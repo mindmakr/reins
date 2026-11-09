@@ -2,7 +2,7 @@
 
 Give coding agents the reins: a tiny dev-only library and agent skill to drive, inspect and debug your web and Expo apps. Built for [**Lucid Coding**](https://mindmakr.github.io/coordinator/lucid-coding.html), and the companion to [**Coordinator**](https://mindmakr.github.io/coordinator/) ([`mindmakr/coordinator`](https://github.com/mindmakr/coordinator)).
 
-**[Live site & docs → mindmakr.github.io/reins](https://mindmakr.github.io/reins/)**
+**[Live site & docs → mindmakr.github.io/reins](https://mindmakr.github.io/reins/)** · **[Official examples → mindmakr/reins-examples](https://github.com/mindmakr/reins-examples)**
 
 An AI coding agent that tests your app usually clicks by pixels and guesses what happened. **reins** lets the app tell the agent what it can do and what state it is in. You register a few named actions ("log in as the tester", "switch to Arabic"), point at some state, and mark the panels worth looking at. The agent then calls those actions, reads the state, sees recent network calls and errors, and takes pixel-exact pictures of a panel. All of it goes through an MCP server on your machine.
 
