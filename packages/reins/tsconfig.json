@@ -3,7 +3,12 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "reins": ["./src/index.ts"],
+      "reins/server": ["./src/server.ts"],
+      "reins/react": ["./src/react.ts"]
+    }
   },
   "include": ["src"]
 }

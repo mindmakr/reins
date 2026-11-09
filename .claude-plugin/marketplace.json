@@ -1,0 +1,12 @@
+{
+  "name": "reins",
+  "description": "Hands and eyes inside your web and Expo apps for coding agents.",
+  "owner": { "name": "mindmakr" },
+  "plugins": [
+    {
+      "name": "reins",
+      "source": "./",
+      "description": "Set up reins in a new or existing web or Expo app, drive named actions, inspect redacted state and network calls, and take pixel-exact panel snapshots."
+    }
+  ]
+}

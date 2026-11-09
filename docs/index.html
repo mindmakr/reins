@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reins: Hands and eyes inside your app for coding agents</title>
+<meta name="description" content="Give coding agents the reins: a tiny dev-only library and agent skill to drive named actions, inspect redacted state and network calls, and snap panels in your web and Expo apps. Companion to Coordinator for Lucid Coding.">
+<meta name="author" content="Asif Raja, by Mindmakr">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="reins: Hands and eyes inside your app for coding agents">
+<meta property="og:description" content="A <5 KB dev-only library, MCP bridge and Claude Code skill for web and Expo apps. Zero bytes in production. Companion to Coordinator.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://mindmakr.github.io/reins/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2020%2020%22%20style%3D%22color%3A%230d7a5f%22%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%3E%3Cpath%20d%3D%22M4%206c4%200%204%208%208%208M4%2014c4%200%204-8%208-8%22%2F%3E%3C%2Fg%3E%3Cg%20fill%3D%22currentColor%22%3E%3Ccircle%20cx%3D%224%22%20cy%3D%226%22%20r%3D%222.2%22%2F%3E%3Ccircle%20cx%3D%224%22%20cy%3D%2214%22%20r%3D%222.2%22%2F%3E%3Ccircle%20cx%3D%2215.5%22%20cy%3D%2210%22%20r%3D%222.6%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400;0,500;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="./" aria-label="reins home">
+      <svg class="mark" width="22" height="22" viewBox="0 0 20 20" aria-hidden="true">
+        <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M4 6c4.5 0 4.5 4 11.5 4M4 14c4.5 0 4.5-4 11.5-4"/>
+        </g>
+        <g fill="currentColor">
+          <circle cx="4" cy="6" r="2.2"/>
+          <circle cx="4" cy="14" r="2.2"/>
+          <circle cx="15.5" cy="10" r="2.6"/>
+        </g>
+      </svg>
+      reins
+    </a>
+    <nav aria-label="Sections">
+      <ul>
+        <li><a href="#why">Why reins</a></li>
+        <li><a href="#setup">5-minute setup</a></li>
+        <li><a href="#tools">Tools &amp; security</a></li>
+        <li><a href="#coordinator">With Coordinator</a></li>
+        <li><a href="https://github.com/mindmakr/reins">GitHub</a></li>
+      </ul>
+    </nav>
+    <a class="btn small" href="#setup">Get started</a>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero" aria-labelledby="hero-h">
+  <div class="wrap hero-in">
+    <h1 id="hero-h">
+      <span class="prod">reins</span>
+      <span class="tag-line">Hands and eyes inside your app for coding agents. Built for <a href="https://mindmakr.github.io/coordinator/lucid-coding.html">Lucid Coding</a>.</span>
+    </h1>
+    <div class="hero-side">
+      <ul class="pills" aria-label="Highlights">
+        <li>&lt; 5 KB min+gzip</li>
+        <li>Zero bytes in prod</li>
+        <li>Web + Expo</li>
+        <li>MCP + WebMCP</li>
+      </ul>
+      <p class="lede">Stop making agents click by pixels and guess what happened. Register named actions, expose redacted state, and mark the panels worth snapping—all in one package (<code>npm i -D reins</code>) with an agent skill that wires it for you.</p>
+      <div class="ctas">
+        <a class="btn" href="#setup">Install in 1 command</a>
+        <a class="btn ghost" href="#coordinator">Pair with Coordinator</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="diagram-sec" aria-label="How reins connects your app and your coding agent">
+  <div class="wrap">
+    <figure class="arch-card" style="margin:0">
+      <svg class="arch-svg" viewBox="0 0 1120 340" role="img" aria-label="Architecture diagram: In development, your web or Expo app pairs with the localhost reins bridge on 127.0.0.1:7357 using a one-time token, exposing 7 MCP tools to your coding agent or Coordinator critic. In production builds, the Vite, Next or Metro plugin swaps reins for an empty stub verified by reins verify.">
+        <defs>
+          <style>
+            .bx { fill: var(--bg); stroke: var(--line); stroke-width: 1.5; rx: 12px; }
+            .bx-hi { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; rx: 12px; }
+            .bx-co { fill: var(--coord-soft); stroke: var(--coord); stroke-width: 2; rx: 12px; }
+            .t-h { font: 800 16px "Schibsted Grotesk", sans-serif; fill: var(--ink); }
+            .t-sub { font: 500 13px "Schibsted Grotesk", sans-serif; fill: var(--ink-2); }
+            .t-mono { font: 600 12.5px "JetBrains Mono", monospace; fill: var(--ink); }
+            .t-tag { font: 700 11px "JetBrains Mono", monospace; fill: var(--accent); }
+            .wire { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-dasharray: 5 4; }
+            .wire-solid { fill: none; stroke: var(--ink-3); stroke-width: 2; }
+          </style>
+        </defs>
+
+        <!-- DEV ROW -->
+        <text x="24" y="32" class="t-tag">DEVELOPMENT &amp; AGENT VERIFICATION</text>
+
+        <!-- Box 1: App -->
+        <rect x="20" y="48" width="320" height="168" class="bx-hi"/>
+        <text x="40" y="78" class="t-h">Your Web or Expo App (dev)</text>
+        <text x="40" y="102" class="t-mono">reins (&lt; 5 KB, 0 browser deps)</text>
+        <text x="40" y="128" class="t-sub">• Actions: login-as-tester, set-locale</text>
+        <text x="40" y="150" class="t-sub">• State: Zustand / Redux / React Query</text>
+        <text x="40" y="172" class="t-sub">• Network &amp; error ring buffers (redacted)</text>
+        <text x="40" y="194" class="t-sub">• &lt;ReinsPanel id="checkout"&gt; + WebMCP</text>
+
+        <!-- Arrow 1 -->
+        <path d="M340 132 L430 132" class="wire"/>
+        <text x="385" y="118" text-anchor="middle" class="t-mono">127.0.0.1:7357</text>
+        <text x="385" y="152" text-anchor="middle" class="t-sub">192-bit token</text>
+
+        <!-- Box 2: Bridge -->
+        <rect x="430" y="48" width="290" height="168" class="bx"/>
+        <text x="450" y="78" class="t-h">Localhost Bridge</text>
+        <text x="450" y="102" class="t-mono">npx reins bridge</text>
+        <text x="450" y="128" class="t-sub">• Writes .reins/token (rotated)</text>
+        <text x="450" y="150" class="t-sub">• Checks Origin header allowlist</text>
+        <text x="450" y="172" class="t-sub">• Appends .reins/audit.log</text>
+        <text x="450" y="194" class="t-sub">• Captures panel PNGs (CDP / adb)</text>
+
+        <!-- Arrow 2 -->
+        <path d="M720 132 L800 132" class="wire"/>
+        <text x="760" y="118" text-anchor="middle" class="t-mono">stdio MCP</text>
+        <text x="760" y="152" text-anchor="middle" class="t-sub">7 tools</text>
+
+        <!-- Box 3: Agent / Coordinator -->
+        <rect x="800" y="48" width="300" height="168" class="bx-co"/>
+        <text x="820" y="78" class="t-h">Coding Agent &amp; Coordinator</text>
+        <text x="820" y="102" class="t-mono">Claude Code · Codex · Cursor</text>
+        <text x="820" y="128" class="t-sub">• Calls reins_list_actions first</text>
+        <text x="820" y="150" class="t-sub">• Drives flows via reins_run_action</text>
+        <text x="820" y="172" class="t-sub">• Reads reins_state &amp; reins_network</text>
+        <text x="820" y="194" class="t-sub">• Blind critic snaps panels as evidence</text>
+
+        <!-- PROD ROW -->
+        <text x="24" y="252" class="t-tag">PRODUCTION BUILD GATE</text>
+        <rect x="20" y="264" width="1080" height="58" class="bx"/>
+        <text x="40" y="298" class="t-mono">reins/vite · reins/next · reins/metro</text>
+        <text x="380" y="298" class="t-sub">→ aliases reins to</text>
+        <text x="515" y="298" class="t-mono">reins/stub (0 dev code)</text>
+        <text x="710" y="298" class="t-sub">→ verified by</text>
+        <text x="815" y="298" class="t-mono">reins verify dist</text>
+        <text x="985" y="298" class="t-tag">✓ CLEAN BUNDLE</text>
+      </svg>
+      <figcaption>
+        <ol class="arch-caps">
+          <li><b>Inside the app, not outside.</b> The agent calls your app's real functions and reads its real stores instead of scraping DOM nodes.</li>
+          <li><b>Inert until paired.</b> Nothing is patched and no listener is added until the app presents the one-time token from <code>.reins/token</code>.</li>
+          <li><b>Guaranteed out of production.</b> Build plugins swap <code>reins</code> for a no-op stub, and <code>reins verify</code> fails the build if <code>__REINS_DEV_ONLY__</code> leaks.</li>
+        </ol>
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="alt" id="why" aria-labelledby="why-h">
+  <div class="wrap">
+    <h2 id="why-h" class="sec-h">Why not just let the agent click by pixels?</h2>
+    <p class="sec-sub">Browser automation tools see the DOM from the outside. <b>reins</b> lets your app declare a small, stable contract from the inside—and pairs cleanly with Playwright when you want both.</p>
+    <div class="table-wrap">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th scope="col">Capability</th>
+            <th scope="col">Pixel clicking / Raw DevTools MCP</th>
+            <th scope="col">Browser WebMCP alone</th>
+            <th scope="col" class="hi">reins</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Reaching a screen state (e.g. Arabic + logged in + 3 cart items)</th>
+            <td>Clicks through 6 screens, types passwords, waits on spinners, breaks when copy changes.</td>
+            <td>Runs registered page tools if the browser supports <code>navigator.modelContext</code>.</td>
+            <td class="hi">One <code>reins_run_action</code> call with schema-validated JSON input. Also registers on WebMCP automatically.</td>
+          </tr>
+          <tr>
+            <th scope="row">Reading app state &amp; network</th>
+            <td>Dumps raw DOM or unredacted network traffic, including auth cookies and tokens.</td>
+            <td>No built-in state snapshots, network ring buffer or error log.</td>
+            <td class="hi">Named snapshots (<code>zustand</code>, <code>redux</code>, <code>reactQuery</code>) + network &amp; error buffers, <b>redacted by default</b>.</td>
+          </tr>
+          <tr>
+            <th scope="row">Visual panel snapshots</th>
+            <td>Full-page screenshots or brittle CSS selector crops.</td>
+            <td>Not supported.</td>
+            <td class="hi"><code>&lt;ReinsPanel id="checkout"&gt;</code> gives pixel-exact boxes and PNG snaps in browsers (CDP) and Android (<code>adb</code>).</td>
+          </tr>
+          <tr>
+            <th scope="row">React Native &amp; Expo</th>
+            <td>Requires separate native UI hierarchy scrapers.</td>
+            <td>Browser only.</td>
+            <td class="hi">First-class <code>reins/expo</code> and <code>reins/metro</code> over <code>127.0.0.1:7357</code>.</td>
+          </tr>
+          <tr>
+            <th scope="row">Production safety</th>
+            <td>Test hooks or globals often ship to production by accident.</td>
+            <td>Up to you to strip.</td>
+            <td class="hi">Build plugins swap <code>reins</code> for a stub + <code>reins verify</code> fails CI if any dev marker remains.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="setup" aria-labelledby="setup-h">
+  <div class="wrap">
+    <h2 id="setup-h" class="sec-h">One package. Or let your agent wire it in one command.</h2>
+    <p class="sec-sub">Everything—core, React &amp; Expo hooks, state adapters, Vite/Next/Metro plugins, the MCP bridge, and the bundle verifier—ships in a single dev dependency: <code>npm i -D reins</code>.</p>
+
+    <div class="setup-top">
+      <div class="setup-box primary">
+        <h3><span class="badge">Recommended</span> Let the agent set it up</h3>
+        <p>Install the <b>reins</b> plugin in Claude Code (or add the skill folder to Codex / Cursor / Antigravity) and run <code>/reins:setup</code>. The agent inspects your stack, installs <code>reins</code>, wires the bundler plugin, connects dev mode, wraps key screens in <code>&lt;ReinsPanel&gt;</code>, and registers the MCP server.</p>
+        <div class="cmd">
+          <pre><code>/plugin marketplace add mindmakr/reins
+/plugin install reins@reins
+/reins:setup</code></pre>
+          <button type="button" class="copy" data-copy="/plugin marketplace add mindmakr/reins&#10;/plugin install reins@reins&#10;/reins:setup">Copy</button>
+        </div>
+        <p style="margin:0;font-size:.88rem">On Claude Code 2.1.275+: <code>/plugin install reins --marketplace mindmakr/reins</code></p>
+      </div>
+
+      <div class="setup-box">
+        <h3>Install the single npm package + MCP server</h3>
+        <p>Prefer to wire it by hand? Install <code>reins</code> once and add <code>npx reins bridge</code> to your project's <code>.mcp.json</code>:</p>
+        <div class="cmd">
+          <pre><code>npm i -D reins</code></pre>
+          <button type="button" class="copy" data-copy="npm i -D reins">Copy</button>
+        </div>
+        <div class="cmd" style="margin-bottom:0">
+          <pre><code>{
+  "mcpServers": {
+    "reins": { "command": "npx", "args": ["reins", "bridge"] }
+  }
+}</code></pre>
+          <button type="button" class="copy" data-copy='{&#10;  "mcpServers": {&#10;    "reins": { "command": "npx", "args": ["reins", "bridge"] }&#10;  }&#10;}'>Copy</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="Framework setup snippets">
+      <button type="button" class="tab-btn" role="tab" id="tab-vite" aria-selected="true" aria-controls="panel-vite">Vite + React</button>
+      <button type="button" class="tab-btn" role="tab" id="tab-next" aria-selected="false" aria-controls="panel-next" tabindex="-1">Next.js (App Router)</button>
+      <button type="button" class="tab-btn" role="tab" id="tab-expo" aria-selected="false" aria-controls="panel-expo" tabindex="-1">Expo / React Native</button>
+    </div>
+
+    <!-- Vite Panel -->
+    <div class="tab-panel active" id="panel-vite" role="tabpanel" aria-labelledby="tab-vite">
+      <div class="code-card">
+        <h4>1. Bundler plugin &amp; dev connect <span>vite.config.ts + src/main.tsx</span></h4>
+        <div class="cmd">
+          <pre><code>// vite.config.ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import reins from 'reins/vite';
+
+export default defineConfig({ plugins: [reins(), react()] });
+
+// src/main.tsx
+import { reins } from 'reins';
+import { zustand } from 'reins/adapters';
+import { useAppStore } from './store';
+
+if (import.meta.env.DEV) {
+  reins.state('app', zustand(useAppStore));
+  reins.connect();
+}</code></pre>
+          <button type="button" class="copy" data-copy="import { defineConfig } from 'vite';&#10;import react from '@vitejs/plugin-react';&#10;import reins from 'reins/vite';&#10;&#10;export default defineConfig({ plugins: [reins(), react()] });">Copy</button>
+        </div>
+        <p>Build script gate: <code>"build": "vite build &amp;&amp; reins verify dist"</code></p>
+      </div>
+      <div class="code-card">
+        <h4>2. Register actions &amp; panels <span>src/Settings.tsx</span></h4>
+        <div class="cmd">
+          <pre><code>import { useReinsAction, ReinsPanel } from 'reins/react';
+
+export function Settings() {
+  const { setLocale } = useI18n();
+  useReinsAction({
+    name: 'set-locale',
+    description: 'Switch the UI language',
+    input: {
+      type: 'object',
+      properties: { locale: { type: 'string', enum: ['en', 'ar', 'fr'] } },
+      required: ['locale'],
+    },
+    run: ({ locale }) => setLocale(locale),
+  });
+  return &lt;ReinsPanel id="settings"&gt;…&lt;/ReinsPanel&gt;;
+}</code></pre>
+          <button type="button" class="copy" data-copy="import { useReinsAction, ReinsPanel } from 'reins/react';">Copy</button>
+        </div>
+        <p>Also exposes <code>window.__reins__</code> in browser DevTools and registers WebMCP tools when paired.</p>
+      </div>
+    </div>
+
+    <!-- Next.js Panel -->
+    <div class="tab-panel" id="panel-next" role="tabpanel" aria-labelledby="tab-next">
+      <div class="code-card">
+        <h4>1. Next config &amp; token route <span>next.config.mjs + route.ts</span></h4>
+        <div class="cmd">
+          <pre><code>// next.config.mjs
+import { withReins } from 'reins/next';
+export default withReins({ /* your Next config */ });
+
+// app/api/reins-token/route.ts
+export { GET } from 'reins/next/token-route';
+export const dynamic = 'force-dynamic';</code></pre>
+          <button type="button" class="copy" data-copy="import { withReins } from 'reins/next';&#10;export default withReins({});">Copy</button>
+        </div>
+        <p>Works with both Webpack and Turbopack. Build gate: <code>"build": "next build &amp;&amp; reins verify .next/static"</code></p>
+      </div>
+      <div class="code-card">
+        <h4>2. Client bootstrap <span>app/Reins.tsx</span></h4>
+        <div class="cmd">
+          <pre><code>'use client';
+import { useEffect } from 'react';
+import { reins } from 'reins';
+
+export function Reins() {
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'production') {
+      reins.connect({ tokenUrl: '/api/reins-token' });
+    }
+  }, []);
+  return null;
+}</code></pre>
+          <button type="button" class="copy" data-copy="'use client';&#10;import { useEffect } from 'react';&#10;import { reins } from 'reins';&#10;&#10;export function Reins() {&#10;  useEffect(() =&gt; {&#10;    if (process.env.NODE_ENV !== 'production') reins.connect({ tokenUrl: '/api/reins-token' });&#10;  }, []);&#10;  return null;&#10;}">Copy</button>
+        </div>
+        <p>In components, import <code>useReinsAction</code>, <code>useReinsState</code> and <code>ReinsPanel</code> from <code>reins/react</code>.</p>
+      </div>
+    </div>
+
+    <!-- Expo Panel -->
+    <div class="tab-panel" id="panel-expo" role="tabpanel" aria-labelledby="tab-expo">
+      <div class="code-card">
+        <h4>1. Metro config <span>metro.config.js</span></h4>
+        <div class="cmd">
+          <pre><code>const { getDefaultConfig } = require('expo/metro-config');
+const { withReins } = require('reins/metro');
+
+module.exports = withReins(getDefaultConfig(__dirname));</code></pre>
+          <button type="button" class="copy" data-copy="const { getDefaultConfig } = require('expo/metro-config');&#10;const { withReins } = require('reins/metro');&#10;module.exports = withReins(getDefaultConfig(__dirname));">Copy</button>
+        </div>
+        <p>For Android emulators or USB devices: <code>adb reverse tcp:7357 tcp:7357</code>. Export gate: <code>npx expo export &amp;&amp; npx reins verify dist</code>.</p>
+      </div>
+      <div class="code-card">
+        <h4>2. Connect &amp; wrap views <span>App.tsx</span></h4>
+        <div class="cmd">
+          <pre><code>import { connectExpo, ReinsPanel, useReinsAction } from 'reins/expo';
+
+if (__DEV__) connectExpo();
+
+export default function App() {
+  useReinsAction({
+    name: 'open-cart',
+    description: 'Open the cart screen',
+    run: () => navigation.navigate('Cart'),
+  });
+  return &lt;ReinsPanel id="home"&gt;…&lt;/ReinsPanel&gt;;
+}</code></pre>
+          <button type="button" class="copy" data-copy="import { connectExpo, ReinsPanel, useReinsAction } from 'reins/expo';&#10;if (__DEV__) connectExpo();">Copy</button>
+        </div>
+        <p><code>&lt;ReinsPanel&gt;</code> renders a native <code>View</code> with <code>testID={id}</code> and measures window coordinates in device pixels.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="tools" aria-labelledby="tools-h">
+  <div class="wrap">
+    <h2 id="tools-h" class="sec-h">Seven MCP tools. Seven hard security limits.</h2>
+    <p class="sec-sub">Giving an agent control over a running app requires boundaries enforced in code, not just prompts.</p>
+    <div class="two-col">
+      <div class="panel-card">
+        <h3>The 7 MCP tools</h3>
+        <ul class="tool-list">
+          <li><code>reins_list_actions</code><span>Returns the paired app, its registered actions with JSON schemas, state sources and mounted panels. Always call this first.</span></li>
+          <li><code>reins_run_action</code><span>Runs one named action: <code>{ name, input, confirm? }</code>. Also logs a console group and a <code>performance.measure</code> entry.</span></li>
+          <li><code>reins_state</code><span>Reads a redacted snapshot of one state source (Zustand, Redux, React Query, route, storage) or all of them.</span></li>
+          <li><code>reins_network</code><span>Recent <code>fetch</code> and <code>XHR</code> calls: method, URL, status, duration in ms, and redacted headers/bodies.</span></li>
+          <li><code>reins_errors</code><span>Recent <code>console.error</code> calls, uncaught exceptions and unhandled promise rejections.</span></li>
+          <li><code>reins_panel_box</code><span>Bounding box of a <code>&lt;ReinsPanel id&gt;</code> in CSS pixels with <code>devicePixelRatio</code> and viewport dimensions.</span></li>
+          <li><code>reins_snap</code><span>Saves a pixel-exact PNG of a panel to <code>.reins/snaps/</code> (via Playwright CDP in browsers or <code>adb screencap</code> on Android).</span></li>
+        </ul>
+      </div>
+
+      <div class="panel-card">
+        <h3>Security model (enforced in code)</h3>
+        <ol class="sec-list">
+          <li><b>Kept out of production.</b> Core turns on only in dev builds. Bundler plugins alias <code>reins</code> to <code>reins/stub</code>, and <code>reins verify</code> fails the build if <code>__REINS_DEV_ONLY__</code> is found.</li>
+          <li><b>Off until paired.</b> Before the bridge accepts its 192-bit token from <code>.reins/token</code>, reins patches nothing and adds no listeners.</li>
+          <li><b>Loopback &amp; origin locked.</b> The bridge binds to <code>127.0.0.1</code> only (no host flag) and refuses non-localhost WebSocket <code>Origin</code> headers.</li>
+          <li><b>Redacted by default.</b> Request/response bodies, <code>Authorization</code>/<code>Cookie</code> headers, storage values and sensitive state keys (<code>token</code>, <code>password</code>, <code>secret</code>, <code>session</code>) become <code>[redacted]</code> unless allowlisted.</li>
+          <li><b>Consequential actions require confirmation.</b> Any action marked <code>consequential: true</code> is refused unless called with <code>confirm: true</code>.</li>
+          <li><b>Full audit log.</b> Every pairing, refusal, MCP call, DevTools call and WebMCP call is written to <code>.reins/audit.log</code> with redacted arguments.</li>
+          <li><b>Lazy &amp; no eval.</b> Waits for <code>load</code> + idle before pairing, and can only run functions explicitly registered by the app.</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="companion" id="coordinator" aria-labelledby="coord-h">
+  <div class="wrap">
+    <div class="comp-card">
+      <div>
+        <span class="comp-eyebrow">Built for Lucid Coding</span>
+        <h2 id="coord-h">The companion to Coordinator</h2>
+        <p><a href="https://mindmakr.github.io/coordinator/"><b>Coordinator</b></a> (<code>mindmakr/coordinator</code>) runs multi-step engineering work through builders and independent <b>blind critics</b> until every behaviour meets a hard bar. <b>reins</b> gives those builders and blind visual critics hands and eyes inside your running app.</p>
+        <ul class="comp-steps">
+          <li><b>1. Agree the bar up front.</b> Coordinator writes each unit's bar as testable <em>given / when / then</em> behaviours referencing your app's <code>reins</code> actions and <code>&lt;ReinsPanel id&gt;</code> names.</li>
+          <li><b>2. Build in an isolated worktree.</b> The builder wires the feature, exposes any new state or actions, and checks its own work through <code>reins_run_action</code> and <code>reins_errors</code>.</li>
+          <li><b>3. Judge blind with real evidence.</b> A separate visual critic—who never sees the builder's reasoning—drives your app across locales (e.g. <code>en</code> and <code>ar</code> RTL) and viewports, checks <code>reins_state</code> and <code>reins_network</code>, and attaches <code>reins_snap</code> PNGs as durable proof on the Coordinator dashboard.</li>
+        </ul>
+        <div class="ctas" style="margin-top:1.4rem">
+          <a class="btn coord-btn" href="https://mindmakr.github.io/coordinator/">Explore Coordinator</a>
+          <a class="btn ghost" href="https://mindmakr.github.io/coordinator/lucid-coding.html">Read the Lucid Coding Manifesto</a>
+          <a class="btn ghost" href="https://github.com/mindmakr/coordinator">mindmakr/coordinator on GitHub</a>
+        </div>
+      </div>
+      <div>
+        <h3 style="font-size:1.15rem;margin-bottom:.7rem">Install both skills in Claude Code</h3>
+        <div class="cmd">
+          <pre><code>/plugin marketplace add mindmakr/coordinator
+/plugin install coordinator@coordinator
+/plugin marketplace add mindmakr/reins
+/plugin install reins@reins</code></pre>
+          <button type="button" class="copy" data-copy="/plugin marketplace add mindmakr/coordinator&#10;/plugin install coordinator@coordinator&#10;/plugin marketplace add mindmakr/reins&#10;/plugin install reins@reins">Copy</button>
+        </div>
+        <h3 style="font-size:1.15rem;margin:1.2rem 0 .7rem">Then in any web or Expo project</h3>
+        <div class="cmd" style="margin-bottom:0">
+          <pre><code># 1. Wire reins into the app automatically
+/reins:setup
+
+# 2. Initialize Coordinator on the repo
+/coordinator:init
+
+# 3. Build &amp; verify with builders + blind critics
+/coordinator:run Add Arabic RTL checkout flow</code></pre>
+          <button type="button" class="copy" data-copy="/reins:setup&#10;/coordinator:init&#10;/coordinator:run Add Arabic RTL checkout flow">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <div>
+      <p class="foot-brand">reins</p>
+      <p>Author: <a href="https://github.com/mindmakr">Asif Raja, by Mindmakr</a></p>
+      <p>Released under the <a href="https://github.com/mindmakr/reins/blob/main/LICENSE">MIT Licence</a>.</p>
+    </div>
+    <div>
+      <p class="foot-h">Lucid Coding ecosystem</p>
+      <p><a href="https://mindmakr.github.io/coordinator/">Coordinator</a> (<a href="https://github.com/mindmakr/coordinator">GitHub</a>) — ask everything up front, then run work through builders and blind critics until it meets a bar you can check. Read the <a href="https://mindmakr.github.io/coordinator/lucid-coding.html">Lucid Coding Manifesto</a>.</p>
+    </div>
+    <div>
+      <p class="foot-h">Links &amp; docs</p>
+      <p><a href="https://github.com/mindmakr/reins">GitHub repository</a> · <a href="https://github.com/mindmakr/reins/blob/main/SECURITY.md">Security policy</a> · <a href="https://github.com/mindmakr/reins/blob/main/AGENTS.md">AGENTS.md</a> · <a href="https://github.com/mindmakr/reins/blob/main/CONTRIBUTING.md">Contributing</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="site.js" defer></script>
+</body>
+</html>

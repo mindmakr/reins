@@ -1,7 +1,7 @@
 {
   "name": "reins",
   "version": "0.1.0",
-  "description": "Give coding agents the reins: a tiny dev-only library to drive, inspect and debug your app",
+  "description": "Give coding agents the reins: a tiny dev-only library to drive, inspect and debug your web and Expo apps",
   "license": "MIT",
   "author": "mindmakr",
   "repository": { "type": "git", "url": "git+https://github.com/mindmakr/reins.git", "directory": "packages/reins" },
@@ -13,11 +13,41 @@
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
     "./stub": { "types": "./dist/stub.d.ts", "default": "./dist/stub.js" },
     "./adapters": { "types": "./dist/adapters.d.ts", "default": "./dist/adapters.js" },
-    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" }
+    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" },
+    "./react": { "types": "./dist/react.d.ts", "default": "./dist/react.js" },
+    "./expo": { "types": "./dist/expo.d.ts", "default": "./dist/expo.js" },
+    "./expo/metro": { "types": "./dist/metro.d.ts", "default": "./dist/metro.js" },
+    "./metro": { "types": "./dist/metro.d.ts", "default": "./dist/metro.js" },
+    "./vite": { "types": "./dist/vite.d.ts", "default": "./dist/vite.js" },
+    "./next": { "types": "./dist/next.d.ts", "default": "./dist/next.js" },
+    "./next/token-route": { "types": "./dist/next-token-route.d.ts", "default": "./dist/next-token-route.js" },
+    "./verify": { "types": "./dist/verify.d.ts", "default": "./dist/verify.js" },
+    "./bridge": { "types": "./dist/bridge/index.d.ts", "default": "./dist/bridge/index.js" }
+  },
+  "bin": {
+    "reins": "./dist/cli.js",
+    "reins-verify-bundle": "./dist/verify-cli.js"
   },
   "files": ["dist"],
+  "engines": { "node": ">=18" },
   "scripts": {
     "build": "tsc -p tsconfig.json"
   },
-  "keywords": ["ai-agents", "testing", "mcp", "webmcp", "devtools"]
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "ws": "^8.18.0"
+  },
+  "peerDependencies": {
+    "next": ">=13",
+    "playwright": ">=1.40",
+    "react": ">=17",
+    "react-native": ">=0.70"
+  },
+  "peerDependenciesMeta": {
+    "next": { "optional": true },
+    "playwright": { "optional": true },
+    "react": { "optional": true },
+    "react-native": { "optional": true }
+  },
+  "keywords": ["ai-agents", "testing", "mcp", "webmcp", "devtools", "lucid-coding"]
 }

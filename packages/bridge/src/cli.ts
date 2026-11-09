@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
+import { main as verifyMain } from 'reins/verify';
 import { parseArgs, USAGE } from './args.js';
 import { fileAudit } from './audit.js';
 import { Hub } from './hub.js';
@@ -9,9 +10,14 @@ import { tokenPath } from './token.js';
 const err = (m: string) => process.stderr.write(m + '\n');
 
 async function main() {
+  const argv = process.argv.slice(2);
+  if (argv[0] === 'verify') {
+    process.exitCode = verifyMain(argv.slice(1));
+    return;
+  }
   let args;
   try {
-    args = parseArgs(process.argv.slice(2), process.cwd());
+    args = parseArgs(argv, process.cwd());
   } catch (e: any) {
     err(`reins: ${e.message}\n\n${USAGE}`);
     process.exitCode = 2;
