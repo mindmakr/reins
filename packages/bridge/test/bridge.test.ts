@@ -138,6 +138,10 @@ describe('end to end: reins core <-> bridge <-> tools', () => {
     await expect(callTool(ctx, 'reins_run_action', { name: 'reset-db' })).rejects.toThrow(/confirm: true/);
     expect(await callTool(ctx, 'reins_run_action', { name: 'reset-db', confirm: true })).toBe('reset');
     expect(await callTool(ctx, 'reins_state', { name: 'session' })).toEqual({ session: { user: 'tess', token: '[redacted]' } });
+    app.markComponent('invoice-list');
+    const perf: any = await callTool(ctx, 'reins_perf');
+    expect(perf.components).toEqual([expect.objectContaining({ id: 'invoice-list', renders: 1 })]);
+    expect(await callTool(ctx, 'reins_dom', { panel: 'invoice-list' })).toBeNull();
 
     const log = readFileSync(join(dir, '.reins', 'audit.log'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     expect(log.filter((e) => e.source === 'agent').map((e) => [e.event, e.ok])).toEqual([
@@ -146,6 +150,8 @@ describe('end to end: reins core <-> bridge <-> tools', () => {
       ['reins_run_action', false],
       ['reins_run_action', true],
       ['reins_state', true],
+      ['reins_perf', true],
+      ['reins_dom', true],
     ]);
   });
 });

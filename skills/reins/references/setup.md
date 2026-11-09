@@ -150,7 +150,7 @@ In the app's root shell or key feature components, import `useReinsAction`, `use
 - **Consequential actions**:
   Any action that resets dev data, deletes records or triggers side effects must set `consequential: true`.
 - **Panels**:
-  Wrap the 2–5 main screens or sections in `<ReinsPanel id="kebab-case-id">…</ReinsPanel>` so agents can measure and snap them by ID.
+  Wrap the 2–5 main screens or sections in `<ReinsPanel id="kebab-case-id">…</ReinsPanel>` so agents can measure and snap them by ID, inspect their DOM and computed CSS via `reins_dom`, and automatically track their mount time and render counts in `reins_perf`.
 
 ## Step 6: Add `.reins/` to `.gitignore` and configure `.mcp.json`
 

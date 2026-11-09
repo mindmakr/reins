@@ -1,6 +1,6 @@
 # Driving and inspecting an app with reins
 
-Use this playbook when verifying a feature, reproducing a bug, or running a visual and behavioural review on a web or Expo app wired with **reins**.
+Use this playbook when verifying a feature, reproducing a bug, or running a visual, layout, and performance review on a web or Expo app wired with **reins**.
 
 ## 1. Pair with the running app
 
@@ -26,21 +26,34 @@ Instead of guessing coordinates or brittle CSS selectors:
 3. **Consequential actions**:
    If an action is marked `consequential: true`, `reins_run_action` refuses it without `confirm: true`. Ask the person for confirmation before calling with `confirm: true`.
 
-## 3. Check state, network and errors after every action
+## 3. Check state, network, errors, performance and DOM after every action
 
-After running an action, verify what actually happened inside the app:
+After running an action, verify what actually happened inside the app using its instruments:
 
 - **State (`reins_state`)**:
   Read `{ "name": "app" }` (or omit `name` to read all sources). Confirm store values updated as expected. Sensitive keys (`token`, `password`, `secret`, `session`, etc.) are automatically `[redacted]`.
 - **Network (`reins_network`)**:
-  Pass `{ "limit": 20 }` or `{ "url": "/api/checkout" }` to verify request methods, status codes and timing (`ms`). Check for unexpected `4xx`/`5xx` responses or duplicate fetches.
+  Pass `{ "limit": 20 }` or `{ "url": "/api/checkout" }` to verify request methods, status codes, start timestamps (`startMs`), and duration (`ms`). Check for unexpected `4xx`/`5xx` responses or duplicate fetches.
 - **Errors (`reins_errors`)**:
   Confirm zero console errors, uncaught exceptions or unhandled promise rejections occurred during the flow.
+- **Performance & Lifecycle (`reins_perf`)**:
+  Call `reins_perf` to inspect:
+  - `lifecycle`: `ttfbMs`, `firstPaintMs`, `firstContentfulPaintMs`, `domInteractiveMs`, `domContentLoadedMs`, `loadMs`, `domNodes`, `nowMs`
+  - `components`: mount timestamps (`mountedAtMs`), latest render timestamp (`lastRenderMs`), and `renders` count for every `<ReinsPanel id>` (or `reins.markComponent(id)`)
+  - `api`: `totalCalls`, `failedCalls`, `avgMs`, `maxMs`, `slowest`, and `calls`
+  - `actions`: duration of every `[reins] <action>` measure
+  - `timeline`: a single chronological millisecond timeline combining lifecycle milestones, component mounts, API calls, and actions
+- **DOM & Computed CSS Layout (`reins_dom`)**:
+  Call `reins_dom` with `{ "panel": "<panel-id>", "depth": 3, "maxNodes": 40 }` (or `{ "selector": "..." }`) to inspect:
+  - `tag`, `id`, `classes`, `panel`, `role`, redacted direct `text`, and `box` (`x`, `y`, `width`, `height`)
+  - `styles`: computed `display`, `position`, `flexDirection`, `justifyContent`, `alignItems`, `gap`, `overflowX`, `overflowY`, `direction` (`ltr`/`rtl`), `color`, `backgroundColor`, `fontSize`, `fontWeight`, `opacity`, `visibility`, `zIndex`
+  - `issues`: automatic layout anomaly flags (`horizontal-clip`, `vertical-clip`, `zero-size`)
 
 ## 4. Measure and snap panels across locales and widths
 
 For every changed or target `<ReinsPanel id="...">`:
 
 1. Call `reins_panel_box` with `{ "id": "<panel-id>", "scroll": true }` to scroll the panel into view and inspect its bounding box (`x`, `y`, `width`, `height`, `devicePixelRatio`, `viewportWidth`, `viewportHeight`).
-2. Call `reins_snap` with `{ "id": "<panel-id>" }` to capture a pixel-exact PNG under `.reins/snaps/<panel-id>-<timestamp>.png`.
-3. If the app supports multiple locales or themes (e.g. `set-locale` with `en` and `ar` for RTL, `set-theme` with `light` and `dark`), loop through each via `reins_run_action`, check `reins_errors`, and take a `reins_snap` of the panel in each state to verify layout integrity, text direction and overflow.
+2. Call `reins_dom` with `{ "panel": "<panel-id>" }` to verify computed CSS (`direction`, flex/grid alignment) and confirm `issues` is empty (`[]`) with no `horizontal-clip`, `vertical-clip` or `zero-size` elements.
+3. Call `reins_snap` with `{ "id": "<panel-id>" }` to capture a pixel-exact PNG under `.reins/snaps/<panel-id>-<timestamp>.png`.
+4. If the app supports multiple locales or themes (e.g. `set-locale` with `en` and `ar` for RTL, `set-theme` with `light` and `dark`), loop through each via `reins_run_action`, check `reins_errors` and `reins_dom`, and take a `reins_snap` of the panel in each state.

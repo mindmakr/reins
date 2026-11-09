@@ -53,6 +53,7 @@ export interface NetEntry {
   url: string;
   status: number;
   ms: number;
+  startMs?: number;
   at: number;
   requestHeaders?: Record<string, string>;
   responseHeaders?: Record<string, string>;
@@ -66,6 +67,67 @@ export interface ErrEntry {
   message: string;
   at: number;
   stack?: string;
+}
+
+export interface ComponentPerf {
+  id: string;
+  mountedAtMs: number;
+  lastRenderMs: number;
+  renders: number;
+}
+
+export interface PerfTimelineEntry {
+  kind: 'lifecycle' | 'component-mount' | 'api' | 'action';
+  name: string;
+  atMs: number;
+  durationMs?: number;
+  status?: number;
+}
+
+export interface PerfReport {
+  lifecycle: {
+    ttfbMs: number | null;
+    domInteractiveMs: number | null;
+    domContentLoadedMs: number | null;
+    loadMs: number | null;
+    firstPaintMs: number | null;
+    firstContentfulPaintMs: number | null;
+    domNodes: number;
+    nowMs: number;
+  };
+  components: ComponentPerf[];
+  api: {
+    totalCalls: number;
+    failedCalls: number;
+    avgMs: number;
+    maxMs: number;
+    slowest: { method: string; url: string; status: number; ms: number; startMs: number } | null;
+    calls: Array<{ method: string; url: string; status: number; startMs: number; ms: number }>;
+  };
+  actions: Array<{ name: string; startMs: number; durationMs: number }>;
+  timeline: PerfTimelineEntry[];
+}
+
+export interface DomOptions {
+  panel?: string;
+  selector?: string;
+  depth?: number;
+  maxNodes?: number;
+}
+
+export type DomIssue = 'horizontal-clip' | 'vertical-clip' | 'zero-size';
+
+export interface DomNode {
+  tag: string;
+  id?: string;
+  classes?: string[];
+  panel?: string;
+  role?: string;
+  text?: string;
+  box: { x: number; y: number; width: number; height: number };
+  styles: Record<string, string>;
+  issues: DomIssue[];
+  children: DomNode[];
 }
 
 export interface SocketLike {

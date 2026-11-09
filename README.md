@@ -4,7 +4,7 @@ Give coding agents the reins: a tiny dev-only library and agent skill to drive, 
 
 **[Live site & docs → mindmakr.github.io/reins](https://mindmakr.github.io/reins/)** · **[Official examples → mindmakr/reins-examples](https://github.com/mindmakr/reins-examples)**
 
-An AI coding agent that tests your app usually clicks by pixels and guesses what happened. **reins** lets the app tell the agent what it can do and what state it is in. You register a few named actions ("log in as the tester", "switch to Arabic"), point at some state, and mark the panels worth looking at. The agent then calls those actions, reads the state, sees recent network calls and errors, and takes pixel-exact pictures of a panel. All of it goes through an MCP server on your machine.
+An AI coding agent that tests your app usually clicks by pixels and guesses what happened. **reins** gives the agent real instruments inside the app: you register a few named actions ("log in as the tester", "switch to Arabic"), point at some state, and mark the panels worth looking at. The agent then calls those actions, reads redacted state, inspects page lifecycle and component mount/render timings (`reins_perf`), checks DOM bounding boxes and computed CSS layout with automatic clipping flags (`reins_dom`), sees recent network calls and errors, and takes pixel-exact pictures of a panel (`reins_snap`). All of it goes through an MCP server on your machine.
 
 reins is for development and test builds. Production builds swap it for an empty stub, and `reins verify` fails the build if any reins code is left.
 
@@ -31,7 +31,7 @@ Or in two steps:
 Then in any new or existing Vite, Next.js, React or Expo project:
 
 - `/reins:setup` — inspects your project, installs `reins`, wires `reins/vite`, `reins/next` or `reins/metro`, adds dev-only `reins.connect()`, hooks up state adapters and high-value actions, wraps key screens in `<ReinsPanel>`, adds `reins verify` to your build script, and configures `.mcp.json`.
-- `/reins:drive` — drives your paired app through the 7 MCP tools (`reins_list_actions`, `reins_run_action`, `reins_state`, `reins_network`, `reins_errors`, `reins_panel_box`, `reins_snap`).
+- `/reins:drive` — drives your paired app through the 9 MCP tools (`reins_list_actions`, `reins_run_action`, `reins_state`, `reins_network`, `reins_errors`, `reins_panel_box`, `reins_snap`, `reins_perf`, `reins_dom`).
 - `/reins:verify` — runs your production build and verifies zero `reins` dev code shipped.
 
 In OpenAI Codex CLI, Cursor or Antigravity: copy `skills/reins/` into `.agents/skills/` (or `~/.gemini/config/skills/`) and ask the agent to follow the `reins` skill.
@@ -42,14 +42,14 @@ Everything ships in the single `reins` package (and the workspace packages `@rei
 
 | Import / CLI | What it does |
 | --- | --- |
-| `reins` | The core (< 5 KB min+gzip, 0 browser deps): actions, state, network and error buffers, panels, WebMCP. |
-| `reins/react` | `useReinsAction`, `useReinsState`, `<ReinsPanel id>`. |
+| `reins` | The core (< 5 KB min+gzip, 0 browser deps): actions, state, network and error buffers, panels, `perf()`, `dom()`, `markComponent()`, WebMCP. |
+| `reins/react` | `useReinsAction`, `useReinsState`, `<ReinsPanel id>` (automatically tracks mount time & render count). |
 | `reins/expo` | React Native glue: `connectExpo()`, `<ReinsPanel id>` with `testID`, `useReinsPanel`, `useReinsAction`, `useReinsState`. |
 | `reins/adapters` | `zustand`, `redux`, `reactQuery`, `routerLocation`, `fromStore`. |
 | `reins/vite` | Vite plugin: serves `/__reins/token` in dev, swaps `reins` for `reins/stub` in production builds. |
 | `reins/next` & `reins/next/token-route` | `withReins(nextConfig)` (Webpack + Turbopack) and the `GET` token route handler. |
 | `reins/metro` (or `reins/expo/metro`) | `withReins(metroConfig)` for Expo and React Native. |
-| `npx reins bridge` | The localhost (`127.0.0.1:7357`) WebSocket pairing hub and stdio MCP server. |
+| `npx reins bridge` | The localhost (`127.0.0.1:7357`) WebSocket pairing hub and stdio MCP server (9 tools). |
 | `npx reins verify <dir>` (`reins-verify-bundle`) | Fails if `__REINS_DEV_ONLY__` is found anywhere in a production build output folder. |
 
 ## Five-minute setup (by hand)
@@ -196,16 +196,18 @@ Options: `--port`, `--dir`, `--origin <exact origin>` (extra allowed page origin
 | `reins_list_actions` | The paired app, its actions with input schemas, state sources and panels. Call this first. |
 | `reins_run_action` | Runs one action: `{ name, input, confirm? }`. |
 | `reins_state` | A redacted snapshot of one state source or all of them. |
-| `reins_network` | Recent fetch and XHR calls: method, URL, status, time, redacted headers and bodies. |
+| `reins_network` | Recent fetch calls: method, URL, status, `startMs`, `ms`, redacted headers and bodies. |
 | `reins_errors` | Recent console errors, uncaught errors and unhandled rejections. |
 | `reins_panel_box` | A panel's box in CSS pixels, with `devicePixelRatio`. |
 | `reins_snap` | A pixel-exact PNG of a panel under `.reins/snaps/`, and optionally a copy on the clipboard. |
+| `reins_perf` | Page lifecycle timings (`ttfbMs`, `firstPaintMs`, `firstContentfulPaintMs`, `domInteractiveMs`, `domContentLoadedMs`, `loadMs`), `<ReinsPanel>` mount times and render counts, API call latency stats, and a unified millisecond timeline. |
+| `reins_dom` | Inspects a panel or CSS selector's DOM subtree, bounding boxes, computed CSS styles (`direction`, `display`, `flexDirection`, `overflowX`, etc.), and automatic layout issue flags (`horizontal-clip`, `vertical-clip`, `zero-size`). |
 
-A typical loop: list actions, run `login-as-tester`, run `set-locale` with `ar`, check `reins_errors` is empty, then `reins_snap` the `checkout` panel and compare it with the design.
+A typical loop: list actions, run `login-as-tester`, run `set-locale` with `ar`, check `reins_errors` is empty, inspect `reins_perf` (mount times, render counts, API latency) and `reins_dom` (confirm `direction: "rtl"` and `issues: []`), then `reins_snap` the `checkout` panel and compare it with the design.
 
 `reins_snap` in a browser uses Playwright, if it is installed, over the Chrome DevTools Protocol. Start Chrome with `--remote-debugging-port=9222` and the bridge with `--cdp http://127.0.0.1:9222`. On Android it captures the screen with `adb` and returns the panel's box in device pixels. Otherwise it returns the box, so the agent's own browser tool can clip a screenshot to it.
 
-People get the same handle in DevTools once the page is paired: `__reins__.actions()`, `__reins__.run('set-locale', { locale: 'ar' })`, `__reins__.state()`, `__reins__.network()`. Each action run shows as a collapsed console group and a `performance.measure` entry in the Performance panel.
+People get the same handle in DevTools once the page is paired: `__reins__.actions()`, `__reins__.run('set-locale', { locale: 'ar' })`, `__reins__.state()`, `__reins__.network()`, `__reins__.perf()`, `__reins__.dom({ panel: 'checkout' })`. Each action run also records a `performance.measure` entry.
 
 If the browser supports [WebMCP](https://github.com/webmachinelearning/webmcp) (`navigator.modelContext` or `document.modelContext`), reins also registers each action as a WebMCP tool. Read-only actions get `readOnlyHint`. Consequential ones get `destructiveHint` and a required `confirm` input.
 
@@ -224,14 +226,25 @@ reins.state('anything', () => ({ step, total }));
 
 Pairing also adds `location`, `localStorage`, `sessionStorage` and `cookies`. Storage and cookies list key names only. Their values are redacted unless allowlisted.
 
-## Companion: Coordinator (Lucid Coding)
+## Companion: Coordinator & The 8 Lucid Coding Principles
 
 [**Coordinator**](https://mindmakr.github.io/coordinator/) ([`mindmakr/coordinator`](https://github.com/mindmakr/coordinator)) asks every open question up front, agrees a testable bar, and runs multi-step work through isolated builders and independent **blind critics** until the bar is met.
 
-**reins** is built to be Coordinator's hands and eyes inside your app:
+Together, **Coordinator** and **reins** practise the [**8 Lucid Coding Principles**](https://mindmakr.github.io/coordinator/lucid-coding.html):
+
+1. **Know your system.** If you cannot say what your agents changed, why, and what proved it, you don't know your system yet.
+2. **Give agents instruments, not just screenshots.** A screenshot shows pixels; it hides why they are slow, broken or clipped. Let your app report its own actions, state, network calls, lifecycle timings (`reins_perf`) and DOM and CSS layout (`reins_dom`) in development, and strip that instrumentation from production.
+3. **Agree the bar before the build.** Write down what done means, as behaviours someone else can check, before anyone starts.
+4. **A blind critic, never the builder, grades the work.** A separate critic, who never sees the builder's reasoning, checks the real result against the bar.
+5. **Evidence or it didn't happen.** A pass carries its proof: test output, a screenshot (`reins_snap`), a lifecycle or API timing (`reins_perf`), a DOM check (`reins_dom`), a log, a link.
+6. **Every run is visible.** What the agent saw, what it built, and why it passed or failed stay on the record while the run is live and after it ends.
+7. **Every run teaches the next.** Repeated gaps become lessons for the next brief, and past runs set the next budgets.
+8. **Get the work done; performance comes with experience and measurement.** Finish the work to the bar first. Then measure what actually happened: when the page painted, when each component mounted, how long each API call took, and where the layout clipped.
+
+**reins** is Coordinator's runtime instrument panel inside your app:
 
 - **Builders** wire features along with `useReinsAction`, `reins.state` and `<ReinsPanel id>`.
-- **Blind visual & code critics** (who never see the builder's reasoning) use `reins_run_action` to switch locales (`en`, `ar` RTL) and themes, check `reins_state`, `reins_network` and `reins_errors`, and attach `reins_snap` PNGs as durable proof on the Coordinator run dashboard.
+- **Blind visual & code critics** (who never see the builder's reasoning) use `reins_run_action` to switch locales (`en`, `ar` RTL) and themes, check `reins_state`, `reins_network`, `reins_errors`, `reins_perf` and `reins_dom`, and attach `reins_snap` PNGs as durable proof on the Coordinator run dashboard.
 
 Install both in Claude Code:
 

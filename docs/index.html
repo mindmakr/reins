@@ -77,7 +77,7 @@
 <section class="diagram-sec" aria-label="How reins connects your app and your coding agent">
   <div class="wrap">
     <figure class="arch-card" style="margin:0">
-      <svg class="arch-svg" viewBox="0 0 1120 340" role="img" aria-label="Architecture diagram: In development, your web or Expo app pairs with the localhost reins bridge on 127.0.0.1:7357 using a one-time token, exposing 7 MCP tools to your coding agent or Coordinator critic. In production builds, the Vite, Next or Metro plugin swaps reins for an empty stub verified by reins verify.">
+      <svg class="arch-svg" viewBox="0 0 1120 340" role="img" aria-label="Architecture diagram: In development, your web or Expo app pairs with the localhost reins bridge on 127.0.0.1:7357 using a one-time token, exposing 9 MCP tools to your coding agent or Coordinator critic. In production builds, the Vite, Next or Metro plugin swaps reins for an empty stub verified by reins verify.">
         <defs>
           <style>
             .bx { fill: var(--bg); stroke: var(--line); stroke-width: 1.5; rx: 12px; }
@@ -121,7 +121,7 @@
         <!-- Arrow 2 -->
         <path d="M720 132 L800 132" class="wire"/>
         <text x="760" y="118" text-anchor="middle" class="t-mono">stdio MCP</text>
-        <text x="760" y="152" text-anchor="middle" class="t-sub">7 tools</text>
+        <text x="760" y="152" text-anchor="middle" class="t-sub">9 tools</text>
 
         <!-- Box 3: Agent / Coordinator -->
         <rect x="800" y="48" width="300" height="168" class="bx-co"/>
@@ -181,10 +181,16 @@
             <td class="hi">Named snapshots (<code>zustand</code>, <code>redux</code>, <code>reactQuery</code>) + network &amp; error buffers, <b>redacted by default</b>.</td>
           </tr>
           <tr>
-            <th scope="row">Visual panel snapshots</th>
-            <td>Full-page screenshots or brittle CSS selector crops.</td>
+            <th scope="row">Visual panel snapshots &amp; DOM/CSS layout</th>
+            <td>Full-page screenshots or brittle CSS selector crops; guesses clipping from pixels.</td>
             <td>Not supported.</td>
-            <td class="hi"><code>&lt;ReinsPanel id="checkout"&gt;</code> gives pixel-exact boxes and PNG snaps in browsers (CDP) and Android (<code>adb</code>).</td>
+            <td class="hi"><code>&lt;ReinsPanel id="checkout"&gt;</code> gives pixel-exact PNG snaps + <code>reins_dom</code> computed CSS and automatic <code>horizontal-clip</code> / <code>vertical-clip</code> / <code>zero-size</code> flags.</td>
+          </tr>
+          <tr>
+            <th scope="row">Performance &amp; lifecycle timeline</th>
+            <td>Manual trace files or wall-clock guesses.</td>
+            <td>Not supported.</td>
+            <td class="hi"><code>reins_perf</code> reports TTFB, FCP, DOM interactive/load, component mount times &amp; render counts, API latency stats, and a unified millisecond timeline.</td>
           </tr>
           <tr>
             <th scope="row">React Native &amp; Expo</th>
@@ -371,19 +377,21 @@ export default function App() {
 
 <section class="alt" id="tools" aria-labelledby="tools-h">
   <div class="wrap">
-    <h2 id="tools-h" class="sec-h">Seven MCP tools. Seven hard security limits.</h2>
-    <p class="sec-sub">Giving an agent control over a running app requires boundaries enforced in code, not just prompts.</p>
+    <h2 id="tools-h" class="sec-h">Nine MCP tools. Seven hard security limits.</h2>
+    <p class="sec-sub">Give agents instruments, not just screenshots—with boundaries enforced in code, not just prompts.</p>
     <div class="two-col">
       <div class="panel-card">
-        <h3>The 7 MCP tools</h3>
+        <h3>The 9 MCP tools</h3>
         <ul class="tool-list">
           <li><code>reins_list_actions</code><span>Returns the paired app, its registered actions with JSON schemas, state sources and mounted panels. Always call this first.</span></li>
-          <li><code>reins_run_action</code><span>Runs one named action: <code>{ name, input, confirm? }</code>. Also logs a console group and a <code>performance.measure</code> entry.</span></li>
+          <li><code>reins_run_action</code><span>Runs one named action: <code>{ name, input, confirm? }</code>. Also records a <code>[reins] &lt;name&gt;</code> performance measure.</span></li>
           <li><code>reins_state</code><span>Reads a redacted snapshot of one state source (Zustand, Redux, React Query, route, storage) or all of them.</span></li>
-          <li><code>reins_network</code><span>Recent <code>fetch</code> and <code>XHR</code> calls: method, URL, status, duration in ms, and redacted headers/bodies.</span></li>
+          <li><code>reins_network</code><span>Recent <code>fetch</code> calls: method, URL, status, <code>startMs</code>, duration in ms, and redacted headers/bodies.</span></li>
           <li><code>reins_errors</code><span>Recent <code>console.error</code> calls, uncaught exceptions and unhandled promise rejections.</span></li>
           <li><code>reins_panel_box</code><span>Bounding box of a <code>&lt;ReinsPanel id&gt;</code> in CSS pixels with <code>devicePixelRatio</code> and viewport dimensions.</span></li>
           <li><code>reins_snap</code><span>Saves a pixel-exact PNG of a panel to <code>.reins/snaps/</code> (via Playwright CDP in browsers or <code>adb screencap</code> on Android).</span></li>
+          <li><code>reins_perf</code><span>Page lifecycle timings (TTFB, FCP, DOM interactive, load), component/panel mount times and render counts, API call latency stats, and a unified millisecond timeline.</span></li>
+          <li><code>reins_dom</code><span>Inspects a panel or CSS selector's DOM subtree, bounding boxes, computed CSS styles (<code>direction</code>, <code>display</code>, <code>flexDirection</code>, <code>overflowX</code>), and automatic layout issue flags (<code>horizontal-clip</code>, <code>vertical-clip</code>, <code>zero-size</code>).</span></li>
         </ul>
       </div>
 
@@ -411,9 +419,9 @@ export default function App() {
         <h2 id="coord-h">The companion to Coordinator</h2>
         <p><a href="https://mindmakr.github.io/coordinator/"><b>Coordinator</b></a> (<code>mindmakr/coordinator</code>) runs multi-step engineering work through builders and independent <b>blind critics</b> until every behaviour meets a hard bar. <b>reins</b> gives those builders and blind visual critics hands and eyes inside your running app.</p>
         <ul class="comp-steps">
-          <li><b>1. Agree the bar up front.</b> Coordinator writes each unit's bar as testable <em>given / when / then</em> behaviours referencing your app's <code>reins</code> actions and <code>&lt;ReinsPanel id&gt;</code> names.</li>
-          <li><b>2. Build in an isolated worktree.</b> The builder wires the feature, exposes any new state or actions, and checks its own work through <code>reins_run_action</code> and <code>reins_errors</code>.</li>
-          <li><b>3. Judge blind with real evidence.</b> A separate visual critic—who never sees the builder's reasoning—drives your app across locales (e.g. <code>en</code> and <code>ar</code> RTL) and viewports, checks <code>reins_state</code> and <code>reins_network</code>, and attaches <code>reins_snap</code> PNGs as durable proof on the Coordinator dashboard.</li>
+          <li><b>1. Agree the bar before the build (Principle #3).</b> Coordinator writes each unit's bar as testable <em>given / when / then</em> behaviours referencing your app's <code>reins</code> actions and <code>&lt;ReinsPanel id&gt;</code> names.</li>
+          <li><b>2. Give agents instruments, not just screenshots (Principle #2).</b> The builder and critic read <code>reins_state</code>, <code>reins_network</code>, <code>reins_perf</code> (lifecycle, component mounts &amp; render counts, API latency timeline), and <code>reins_dom</code> (computed CSS &amp; overflow clipping flags) alongside <code>reins_snap</code> PNGs.</li>
+          <li><b>3. Blind critic &amp; measurement on the record (Principles #4, #5 &amp; #8).</b> A separate visual critic—who never sees the builder's reasoning—drives your app across locales (e.g. <code>en</code> and <code>ar</code> RTL), verifies zero layout clipping and fast paint/mount timings, and attaches durable proof on the Coordinator dashboard.</li>
         </ul>
         <div class="ctas" style="margin-top:1.4rem">
           <a class="btn coord-btn" href="https://mindmakr.github.io/coordinator/">Explore Coordinator</a>

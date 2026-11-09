@@ -28,7 +28,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: 'reins_network',
-    description: 'Recent fetch/XHR calls: method, url, status, ms, redacted headers and bodies.',
+    description: 'Recent fetch/XHR calls: method, url, status, ms, startMs, redacted headers and bodies.',
     inputSchema: obj({ limit: { type: 'number' }, url: { type: 'string', description: 'Only calls whose URL contains this' } }),
   },
   {
@@ -46,6 +46,21 @@ export const TOOLS: Tool[] = [
     description: 'Pixel-exact picture of a panel, saved under .reins/snaps. Uses Playwright over CDP (bridge --cdp) or adb for Android; otherwise returns the box.',
     inputSchema: obj({ id: { type: 'string' }, copy: { type: 'boolean', description: 'Also copy the image to the clipboard' } }, ['id']),
   },
+  {
+    name: 'reins_perf',
+    description: 'Page lifecycle timings (TTFB, FCP, DOM interactive, load), component/panel mount times and render counts, API call latency stats, and a unified millisecond timeline.',
+    inputSchema: obj(),
+  },
+  {
+    name: 'reins_dom',
+    description: 'Inspect a panel or CSS selector\'s DOM subtree, bounding boxes, computed CSS styles, and automatic layout issue flags (horizontal-clip, vertical-clip, zero-size).',
+    inputSchema: obj({
+      panel: { type: 'string', description: 'Panel id (data-reins attribute) to inspect' },
+      selector: { type: 'string', description: 'CSS selector inside the panel (or document if no panel)' },
+      depth: { type: 'number', description: 'Max child tree depth (default 3)' },
+      maxNodes: { type: 'number', description: 'Max elements to return (default 40)' },
+    }),
+  },
 ];
 
 const METHODS: Record<string, string> = {
@@ -55,6 +70,8 @@ const METHODS: Record<string, string> = {
   reins_network: 'network',
   reins_errors: 'errors',
   reins_panel_box: 'panel',
+  reins_perf: 'perf',
+  reins_dom: 'dom',
 };
 
 export interface ToolContext {
@@ -67,7 +84,12 @@ export interface ToolContext {
 /** Runs one MCP tool against the paired app. Every call is audited. */
 export async function callTool(ctx: ToolContext, name: string, args: Record<string, any> = {}): Promise<unknown> {
   const started = Date.now();
-  const entry = { source: 'agent' as const, event: name, name: args.name ?? args.id, args: name === 'reins_run_action' ? args.input : undefined };
+  const entry = {
+    source: 'agent' as const,
+    event: name,
+    name: args.name ?? args.id ?? args.panel ?? args.selector,
+    args: name === 'reins_run_action' ? args.input : undefined,
+  };
   try {
     let result: unknown;
     if (name === 'reins_snap') {

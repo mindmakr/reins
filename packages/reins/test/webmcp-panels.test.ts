@@ -87,3 +87,131 @@ describe('panels', () => {
     expect((window as any).__reins__).toBeUndefined();
   });
 });
+
+describe('perf and dom', () => {
+  it('collects lifecycle, component mounts/renders, API call stats, actions, and unified timeline', async () => {
+    let clock = 50;
+    const measures: any[] = [];
+    const g = Object.assign(fakeGlobal(), {
+      document,
+      performance: {
+        now: () => clock,
+        mark: () => {},
+        measure: (name: string) => measures.push({ name, startTime: clock - 4, duration: 4 }),
+        getEntriesByType: (type: string) => {
+          if (type === 'navigation') return [{ responseStart: 12, domInteractive: 35, domContentLoadedEventEnd: 42, loadEventEnd: 60 }];
+          if (type === 'paint') return [{ name: 'first-paint', startTime: 25 }, { name: 'first-contentful-paint', startTime: 30 }];
+          if (type === 'measure') return measures;
+          return [];
+        },
+      },
+      fetch: async (url: string) => {
+        clock += String(url).includes('slow') ? 40 : 10;
+        return { status: String(url).includes('fail') ? 500 : 200, headers: new Map() };
+      },
+    });
+    const r = createReins(g);
+    r.action({ name: 'filter-invoices', description: 'Filters invoices', run: () => ({ ok: true }) });
+    await r.connect(connectOpts);
+
+    clock = 45;
+    r.markComponent('header');
+    clock = 48;
+    r.markComponent('summary-cards');
+    clock = 55;
+    r.markComponent('summary-cards');
+
+    clock = 70;
+    await g.fetch('/api/invoices');
+    clock = 90;
+    await g.fetch('/api/slow-report');
+    clock = 140;
+    await g.fetch('/api/fail');
+
+    clock = 160;
+    await r.run('filter-invoices', {});
+
+    const res = await FakeSocket.last!.call('perf');
+    const report = res.result;
+    expect(report.lifecycle).toMatchObject({
+      ttfbMs: 12,
+      firstPaintMs: 25,
+      firstContentfulPaintMs: 30,
+      domInteractiveMs: 35,
+      domContentLoadedMs: 42,
+      loadMs: 60,
+    });
+    expect(report.components).toEqual([
+      { id: 'header', mountedAtMs: 45, lastRenderMs: 45, renders: 1 },
+      { id: 'summary-cards', mountedAtMs: 48, lastRenderMs: 55, renders: 2 },
+    ]);
+    expect(report.api).toMatchObject({
+      totalCalls: 3,
+      failedCalls: 1,
+      avgMs: 20,
+      maxMs: 40,
+      slowest: { method: 'GET', url: '/api/slow-report', status: 200, startMs: 90, ms: 40 },
+    });
+    expect(report.actions).toEqual([{ name: '[reins] filter-invoices', startMs: 156, durationMs: 4 }]);
+    expect(report.timeline.map((t: any) => t.kind)).toContain('lifecycle');
+    expect(report.timeline.map((t: any) => t.kind)).toContain('component-mount');
+    expect(report.timeline.map((t: any) => t.kind)).toContain('api');
+    expect(report.timeline.map((t: any) => t.kind)).toContain('action');
+    for (let i = 1; i < report.timeline.length; i++) {
+      expect(report.timeline[i].atMs).toBeGreaterThanOrEqual(report.timeline[i - 1].atMs);
+    }
+    r.disconnect();
+  });
+
+  it('inspects DOM subtrees, computed styles, redacts sensitive text, and flags layout issues', async () => {
+    document.body.innerHTML = `
+      <section data-reins="summary-cards" id="summary" class="cards grid" role="region" style="display: flex; direction: rtl; gap: 12px;">
+        <div id="rev-total" class="stat" style="overflow-x: hidden;">Total Revenue $12,400</div>
+        <div id="api-secret" class="secret">sk_live_12345</div>
+        <span id="empty-badge" style="display: block;"></span>
+      </section>
+    `;
+    const root = document.getElementById('summary')!;
+    const card = document.getElementById('rev-total')!;
+    const secret = document.getElementById('api-secret')!;
+    const badge = document.getElementById('empty-badge')!;
+
+    root.getBoundingClientRect = () => ({ left: 16, top: 80, width: 600, height: 120 }) as DOMRect;
+    card.getBoundingClientRect = () => ({ left: 16, top: 80, width: 180, height: 100 }) as DOMRect;
+    Object.defineProperty(card, 'clientWidth', { value: 180 });
+    Object.defineProperty(card, 'scrollWidth', { value: 260 });
+    secret.getBoundingClientRect = () => ({ left: 210, top: 80, width: 180, height: 100 }) as DOMRect;
+    badge.getBoundingClientRect = () => ({ left: 400, top: 80, width: 0, height: 20 }) as DOMRect;
+
+    const r = createReins(window);
+    await r.connect(connectOpts);
+
+    const res = await FakeSocket.last!.call('dom', { panel: 'summary-cards', depth: 2 });
+    const tree = res.result;
+    expect(tree).toMatchObject({
+      tag: 'section',
+      id: 'summary',
+      classes: ['cards', 'grid'],
+      panel: 'summary-cards',
+      role: 'region',
+      box: { x: 16, y: 80, width: 600, height: 120 },
+      styles: expect.objectContaining({ display: 'flex', direction: 'rtl' }),
+      issues: [],
+    });
+    expect(tree.children[0]).toMatchObject({
+      id: 'rev-total',
+      text: 'Total Revenue $12,400',
+      issues: ['horizontal-clip'],
+    });
+    expect(tree.children[1]).toMatchObject({
+      id: 'api-secret',
+      text: '[redacted]',
+    });
+    expect(tree.children[2]).toMatchObject({
+      id: 'empty-badge',
+      issues: ['zero-size'],
+    });
+    expect(r.dom({ panel: 'nonexistent' })).toBeNull();
+    r.disconnect();
+  });
+});

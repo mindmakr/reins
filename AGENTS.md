@@ -30,7 +30,7 @@ Rules for actions:
 
 **State: small, named snapshots.** Register the stores the agent needs to check results (`zustand(store)`, `redux(store)`, `reactQuery(client)`, `routerLocation()` from `reins/adapters`, or a function). Keep secrets out of state sources. Redaction works on key names only.
 
-**Panels: the screens worth comparing with designs.** Wrap them in `<ReinsPanel id="checkout">` from `reins/react` (web) or `<ReinsPanel id="checkout">` from `reins/expo` (a View with `testID`). Use stable, kebab-case ids that match screen names.
+**Panels: the screens worth comparing with designs.** Wrap them in `<ReinsPanel id="checkout">` from `reins/react` (web) or `<ReinsPanel id="checkout">` from `reins/expo` (a View with `testID`). Use stable, kebab-case ids that match screen names. Each `<ReinsPanel id>` also records its mount timestamp (`mountedAtMs`), latest render timestamp (`lastRenderMs`), and render count (`renders`) for `reins_perf`, and can be inspected on demand with `reins_dom({ panel: id })`.
 
 ## Staging
 

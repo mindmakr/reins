@@ -35,7 +35,8 @@ export interface ReinsPanelProps extends HTMLAttributes<HTMLDivElement> {
   children?: ReactNode;
 }
 
-/** A `<div data-reins={id}>` the agent can measure and snap. Other props go to the div. */
+/** A `<div data-reins={id}>` the agent can measure, inspect and snap. Other props go to the div. */
 export function ReinsPanel({ id, children, ...rest }: ReinsPanelProps) {
+  reins.markComponent(id);
   return createElement('div', { ...rest, 'data-reins': id }, children);
 }
