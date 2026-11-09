@@ -1,0 +1,29 @@
+{
+  "name": "@reins/bridge",
+  "version": "0.1.0",
+  "description": "Localhost bridge and MCP server that lets a coding agent drive an app that uses reins",
+  "license": "MIT",
+  "author": "mindmakr",
+  "repository": { "type": "git", "url": "git+https://github.com/mindmakr/reins.git", "directory": "packages/bridge" },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "bin": { "reins": "./dist/cli.js" },
+  "files": ["dist"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "reins": "0.1.0",
+    "ws": "^8.18.0"
+  },
+  "peerDependencies": {
+    "playwright": ">=1.40"
+  },
+  "peerDependenciesMeta": {
+    "playwright": { "optional": true }
+  }
+}
