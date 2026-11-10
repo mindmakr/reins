@@ -13,6 +13,27 @@ reins is for development and test builds. Production builds swap it for an empty
 - **Agent skill included:** install the Claude Code plugin (or skill folder) and run `/reins:setup`—your agent inspects your repo and wires everything for you.
 - **Inert until paired:** it does nothing until it pairs with the bridge on your machine using a one-time token.
 
+## New here? Paste one prompt
+
+You don't need to understand MCP, bridges or bundlers. Paste this into your coding agent (Claude Code, Codex, Antigravity, Cursor, Gemini CLI) inside your web or Expo project:
+
+```text
+Set up reins in this project using the reins skill from https://github.com/mindmakr/reins
+(in Claude Code: /plugin marketplace add mindmakr/reins, then /plugin install reins@reins, then /reins:setup).
+Register actions for the main things a tester does, wrap the main screens in ReinsPanel,
+and make sure the production build passes `reins verify`. Then start the app,
+drive it with the reins tools, and show me screenshots, the reins_perf numbers and any errors.
+
+Also install Coordinator from https://github.com/mindmakr/coordinator and run its init,
+so every change you make from now on is checked by a separate critic.
+```
+
+What you get back: screenshots of your screens in each language and theme, how fast the page and each panel appeared, how long each API call took, and any layout that is clipped or broken. Your agent gets the same numbers, so it can fix what it finds instead of guessing from a picture.
+
+### Why this matters for vibe-coded apps
+
+Your agent can make a screen that looks right. It can't see that the screen took 3 seconds, rendered 40 times, called the same API five times, or cut off the Arabic text, unless something inside the app tells it. reins is that something, in development only. [Coordinator](https://github.com/mindmakr/coordinator) adds the other half: a second agent that checks every change against a bar you agreed, with these numbers as evidence. Together they matter most when the first version is done and you need to refactor, fix or hand it over without breaking what works.
+
 ## Let your agent set it up (`/reins:setup`)
 
 In Claude Code, install the **reins** plugin:
