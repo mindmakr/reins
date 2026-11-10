@@ -16,16 +16,25 @@ Node 18 or newer. Tests use vitest and run against the sources, so `npm test` wo
 
 ## Layout
 
+Everything ships as one package, `packages/reins`, with one entry file per import path:
+
 ```
-packages/
-  reins/    core (browser and React Native, no dependencies)
-  react/    hooks and <ReinsPanel>
-  expo/     React Native glue and the Metro helper
-  vite/     Vite plugin
-  next/     Next.js wrapper and token route
-  bridge/   `reins bridge`: WebSocket + MCP server (Node)
-  verify/   `reins-verify-bundle` (Node)
+packages/reins/src/
+  index.ts            `reins`: the core (browser and React Native, no dependencies)
+  stub.ts             `reins/stub`: what production builds get instead
+  react.ts, expo.ts   hooks and <ReinsPanel> for web and React Native
+  adapters.ts         state sources for Zustand, Redux, TanStack Query and routers
+  vite.ts, next.ts, next-token-route.ts, metro.ts   build plugins and token routes (Node)
+  node.ts             `reins/node`: backend instrumentation (Node)
+  record.ts, record-stub.ts   tester record mode and its production stand-in
+  report.ts           session reports, shared by the bridge and record mode (no Node or DOM imports)
+  verify.ts, verify-cli.ts    `reins verify` and `reins-verify-bundle`
+  bridge/             `reins bridge`: WebSocket hub, MCP tools, audit log, snaps, session files
+  cli.ts              the `reins` command
+packages/reins/test/  one test file per area; all run against the sources
 ```
+
+A new import path needs an entry in `exports` in `packages/reins/package.json`, an alias in `vitest.config.ts`, and, if app code imports it and it carries dev code, a stub and an entry in each build plugin.
 
 ## Rules
 
@@ -40,7 +49,7 @@ packages/
 ## Pull requests
 
 1. One change per PR, with a test.
-2. `npm run build` and `npm test` pass. CI runs both on Node 18, 20 and 22.
+2. `npm run build` and `npm test` pass on your machine before you open the PR. CI runs both on Node 18, 20 and 22 for pull requests into `main`.
 3. Write commit messages and docs plainly: say what changed and why.
 
 Please report security problems privately, as described in [SECURITY.md](SECURITY.md).

@@ -59,7 +59,7 @@ In OpenAI Codex CLI, Cursor or Antigravity: copy `skills/reins/` into `.agents/s
 
 ## What's in `reins`
 
-Everything ships in the single `reins` package (and the workspace packages `@reins/*` remain available if you prefer separate packages):
+Everything ships in the single `reins` package:
 
 | Import / CLI | What it does |
 | --- | --- |
@@ -292,10 +292,10 @@ Read the [Lucid Coding Manifesto](https://mindmakr.github.io/coordinator/lucid-c
 reins gives an agent real control of a running app, so the limits are enforced in code and covered by tests:
 
 1. **Kept out of production.** The core only turns on when `__DEV__`, `import.meta.env.DEV` or `NODE_ENV !== 'production'` says it is a dev build. The Vite, Next and Metro plugins swap `reins` for an empty stub in production builds. The core carries the marker `__REINS_DEV_ONLY__`, and `reins verify` (`reins-verify-bundle`) fails your build if it finds it. A staging build keeps reins only when built with `REINS_ENABLE=1`.
-2. **Off until paired.** Until the bridge accepts its token, the core adds no listeners and patches nothing. The bridge makes a random 192-bit token, writes it to `.reins/token` (with its own `.gitignore`) and renews it after each pairing. It listens on `127.0.0.1` only, which cannot be changed. It rejects WebSocket origins that are not localhost or on your `--origin` list. Clients with no Origin, like React Native, still need the token, and `--browser-only` refuses them.
+2. **Off until paired.** Until the bridge accepts its token, the core adds no listeners and patches nothing. The one exception is record mode (`reins/record`), which a person turns on themselves in a dev or private staging build; it sends nothing anywhere and only downloads a file when they click Export. [SECURITY.md](SECURITY.md) covers record mode and `reins/node` in full. The bridge makes a random 192-bit token, writes it to `.reins/token` (with its own `.gitignore`) and renews it after each pairing. It listens on `127.0.0.1` only, which cannot be changed. It rejects WebSocket origins that are not localhost or on your `--origin` list. Clients with no Origin, like React Native, still need the token, and `--browser-only` refuses them.
 3. **Redacted by default.** Request and response bodies, `Authorization`, `Cookie` and `Set-Cookie` headers, storage values, cookie values, sensitive query values and sensitive state keys (token, password, secret, session and so on) are replaced with `[redacted]`. Allowlist keys with `reins.connect({ allow: { headers, bodyKeys, storageKeys, cookies, queryKeys, stateKeys } })`. httpOnly cookies cannot be read by page code at all.
 4. **Consequential actions need confirmation.** An action marked `consequential: true` is refused unless the call says `confirm: true`.
-5. **Everything is logged.** Every call shows in the browser console. The bridge appends every agent call, pairing, refusal and DevTools or WebMCP call to `.reins/audit.log`, with arguments redacted.
+5. **Everything is logged.** The bridge appends every agent call, pairing, refusal and DevTools or WebMCP call to `.reins/audit.log`, with arguments redacted.
 6. **Lazy.** `connect()` waits for `load` and an idle moment before it does anything.
 7. **No eval.** Only actions the app registered can run.
 

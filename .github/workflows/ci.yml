@@ -1,9 +1,19 @@
 name: CI
 
+# Runs once per change: on pull requests into main, not again on the push that merges them.
+# Run `npm run build && npm test` locally before opening the pull request.
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

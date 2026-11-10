@@ -1,5 +1,5 @@
 ---
-description: Drive and inspect the paired app through reins MCP tools (actions, state, network, errors and panel snapshots across locales and viewports)
+description: Drive and inspect the paired app and server through reins MCP tools (actions, state, network, errors, perf, DOM layout, server spans, session reports and panel snapshots)
 argument-hint: "[flow or screen to verify]"
 ---
 
