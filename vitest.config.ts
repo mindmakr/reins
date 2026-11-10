@@ -11,7 +11,7 @@ export default defineConfig({
       { find: /^reins\/next\/token-route$/, replacement: src('reins/src/next-token-route.ts') },
       { find: /^reins\/expo\/metro$/, replacement: src('reins/src/metro.ts') },
       { find: /^reins\/bridge$/, replacement: src('reins/src/bridge/index.ts') },
-      { find: /^reins\/(server|stub|adapters|react|expo|metro|vite|next|verify)$/, replacement: src('reins/src/$1.ts') },
+      { find: /^reins\/(server|stub|adapters|react|expo|metro|vite|next|verify|report|node|record|record-stub)$/, replacement: src('reins/src/$1.ts') },
       { find: /^@reins\/react$/, replacement: src('react/src/index.ts') },
     ],
   },

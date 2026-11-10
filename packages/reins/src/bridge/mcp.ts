@@ -7,6 +7,7 @@ export const VERSION = '0.1.0';
 
 /** Serves the reins tools over MCP on stdio. stdout belongs to MCP; logs go to stderr. */
 export async function startMcp(ctx: ToolContext): Promise<Server> {
+  ctx.snaps ??= [];
   const server = new Server({ name: 'reins', version: VERSION }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS as any }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {

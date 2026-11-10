@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 import { createReins } from '../src/index.js';
+import { withTimeline } from '../src/report.js';
 import { connectOpts, FakeSocket, fakeGlobal } from './helpers.js';
 
 function fakeModelContext() {
@@ -132,7 +133,8 @@ describe('perf and dom', () => {
     await r.run('filter-invoices', {});
 
     const res = await FakeSocket.last!.call('perf');
-    const report = res.result;
+    expect(res.result.timeline).toBeUndefined();
+    const report = withTimeline(res.result) as any;
     expect(report.lifecycle).toMatchObject({
       ttfbMs: 12,
       firstPaintMs: 25,

@@ -11,6 +11,9 @@ interface Server {
   middlewares: { use(fn: (req: any, res: any, next: () => void) => void): void };
 }
 
+/** Entries that carry the dev marker, and the stubs that replace them in production builds. */
+export const STUBS: Record<string, string> = { reins: 'reins/stub', 'reins/record': 'reins/record-stub' };
+
 export interface ReinsViteOptions {
   /** Keep reins in production builds. Prefer the REINS_ENABLE=1 env var, and only for staging. */
   keep?: boolean;
@@ -18,7 +21,7 @@ export interface ReinsViteOptions {
 
 /**
  * Dev: serves the pairing token at /__reins/token from `.reins/token`.
- * Build (not development mode): resolves `reins` to `reins/stub`, so no reins code ships.
+ * Build (not development mode): resolves `reins` to `reins/stub` and `reins/record` to `reins/record-stub`, so no reins code ships.
  */
 export function reinsPlugin(options: ReinsViteOptions = {}) {
   let stub = false;
@@ -29,8 +32,8 @@ export function reinsPlugin(options: ReinsViteOptions = {}) {
       stub = config.command === 'build' && config.mode !== 'development' && !options.keep && !keepInBuild();
     },
     async resolveId(this: any, id: string, importer?: string) {
-      if (!stub || id !== 'reins') return null;
-      return this.resolve('reins/stub', importer, { skipSelf: true });
+      const to = stub && Object.prototype.hasOwnProperty.call(STUBS, id) ? STUBS[id] : null;
+      return to ? this.resolve(to, importer, { skipSelf: true }) : null;
     },
     configureServer(server: Server) {
       server.middlewares.use((req, res, next) => {

@@ -4,6 +4,7 @@ import { parseArgs, USAGE } from './bridge/args.js';
 import { fileAudit } from './bridge/audit.js';
 import { Hub } from './bridge/hub.js';
 import { startMcp } from './bridge/mcp.js';
+import { reportMain } from './bridge/report-cli.js';
 import { tokenPath } from './bridge/token.js';
 import { main as verifyMain } from './verify.js';
 
@@ -13,6 +14,10 @@ async function main() {
   const argv = process.argv.slice(2);
   if (argv[0] === 'verify') {
     process.exitCode = verifyMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'report') {
+    process.exitCode = reportMain(argv.slice(1));
     return;
   }
   let args;

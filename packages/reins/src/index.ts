@@ -13,7 +13,6 @@ import type {
   Measure,
   NetEntry,
   PerfReport,
-  PerfTimelineEntry,
   SocketLike,
 } from './types.js';
 import { findModelContext, registerTool } from './webmcp.js';
@@ -55,6 +54,7 @@ export function createReins(g: any = globalThis) {
     errs = ring<ErrEntry>(100),
     sock: SocketLike | null = null,
     paired = false,
+    rec = false,
     undo: Array<() => void> = [],
     mc: any = null,
     connecting: Promise<boolean> | null = null,
@@ -101,7 +101,7 @@ export function createReins(g: any = globalThis) {
       readOnly: !!readOnly,
     }));
 
-  const mustBePaired = () => !paired && fail('not paired');
+  const mustBePaired = () => !undo[0] && fail('not paired');
 
   async function runAction(name: string, input: unknown, confirm: boolean, via: string): Promise<unknown> {
     mustBePaired();
@@ -180,29 +180,23 @@ export function createReins(g: any = globalThis) {
         nowMs: nowMs(),
       },
       components = [...comps.values()].sort((a, b) => a.mountedAtMs - b.mountedAtMs),
-      calls = net.list().map(({ method, url, status, startMs = 0, ms }) => ({ method, url, status, startMs, ms })),
-      act = ent('measure').flatMap((m) => (m.name?.startsWith?.('[reins] ') ? [{ name: m.name, startMs: R(m.startTime), durationMs: R(m.duration) }] : [])),
-      timeline: PerfTimelineEntry[] = [],
-      add = (kind: any, name: string, atMs: number, durationMs?: number, status?: number) => timeline.push({ kind, name, atMs, durationMs, status });
+      // Full (redacted) entries; the bridge trims them to the timing fields.
+      calls = net.list(),
+      act = ent('measure').flatMap((m) => (m.name?.startsWith?.('[reins] ') ? [{ name: m.name, startMs: R(m.startTime), durationMs: R(m.duration) }] : []));
     let sum = 0,
       failedCalls = 0,
       slowest: any = null;
-    for (const [k, v] of Object.entries(lifecycle)) if (v != null && !/tP|es|ow/.test(k)) add('lifecycle', k.slice(0, -2), v);
-    for (const c of components) add('component-mount', c.id, c.mountedAtMs);
     for (const c of calls) {
       sum += c.ms;
       if (!c.status || c.status >= 400) failedCalls++;
       if (!slowest || c.ms > slowest.ms) slowest = c;
-      add('api', `${c.method} ${c.url}`, c.startMs, c.ms, c.status);
     }
-    for (const a of act) add('action', a.name, a.startMs, a.durationMs);
-    timeline.sort((a, b) => a.atMs - b.atMs);
+    // The timeline is built from these parts by `withTimeline` in `reins/report`, in the bridge and in record mode.
     return {
       lifecycle,
       components,
       api: { totalCalls: calls.length, failedCalls, avgMs: R(calls.length && sum / calls.length), maxMs: slowest?.ms || 0, slowest, calls },
       actions: act,
-      timeline,
     };
   }
 
@@ -262,19 +256,26 @@ export function createReins(g: any = globalThis) {
     base = { actions: list, network, errors, perf, dom, panel },
     handleForHumans: ReinsHandle = Object.freeze({ version: VERSION, ...base, run: runner('devtools'), state: snapshot });
 
-  function pair(s: SocketLike) {
-    sock = s;
-    paired = true;
-    delay = 2000;
+  // `undo` starts with the network and error patches, so it is non-empty exactly while reins is live (paired or recording).
+  function start() {
+    if (undo[0]) return;
     const allow = opts.allow || {},
       sz = opts.bufferSize || 100;
     net = ring(sz);
     errs = ring(sz);
-    undo = [patchNetwork(g, net.push, allow), watchErrors(g, errs.push), () => delete g.__reins__];
+    undo = [patchNetwork(g, net.push, allow, () => paired), watchErrors(g, errs.push)];
     if (g.location?.href) states.set('location', locUrl);
     for (const k of ['localStorage', 'sessionStorage']) if (g[k]) states.set(k, () => redactPairs(Object.entries(g[k]), allow.storageKeys));
     if (g.document?.cookie != null)
-      states.set('cookies', () => redactPairs(g.document.cookie.split(';').flatMap((c: string) => (c.trim() ? [c.trim().split('=')] : [])), allow.cookies));
+      states.set('cookies', () => redactPairs(g.document.cookie.split(/; */).filter(Boolean).map((c: string) => c.split('=')), allow.cookies));
+  }
+
+  function pair(s: SocketLike) {
+    sock = s;
+    paired = true;
+    delay = 2000;
+    start();
+    undo.push(() => delete g.__reins__);
     mc = opts.webmcp !== false && findModelContext(g);
     if (mc) actions.forEach(addTool);
     try {
@@ -282,12 +283,18 @@ export function createReins(g: any = globalThis) {
     } catch {}
   }
 
+  // Undoes everything after the first `n` entries: 2 keeps the patches running for record mode.
+  const off = (n: number) => undo.splice(n).forEach((f) => f());
+
   function unpair() {
     paired = false;
     sock = mc = null;
-    undo.forEach((f) => f());
-    undo = [];
+    off(rec ? 2 : 0);
   }
+
+  /** Record mode (`reins/record`): starts the buffers without a bridge, in dev builds only. `false` stops it. */
+  const record = (o?: ConnectOptions | false): boolean =>
+    ((rec = o !== false && devEnabled()), paired || (rec ? ((opts = o || opts), start()) : off(0)), rec);
 
   async function open(): Promise<boolean> {
     if (g.document && opts.lazy !== false)
@@ -354,6 +361,7 @@ export function createReins(g: any = globalThis) {
     connect,
     disconnect,
     isPaired: () => paired,
+    record,
     snapshot,
     ...base,
     run: runner('api'),

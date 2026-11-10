@@ -38,12 +38,16 @@ interface Pending {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
   timer: NodeJS.Timeout;
+  /** Only this client may answer. */
+  client: Client;
 }
 
 /** The WebSocket side of the bridge: pairs pages that present the token, then forwards calls to them. */
 export class Hub {
   token = '';
   readonly clients: Client[] = [];
+  /** When the bridge started; a session report covers the audit log from here on. */
+  readonly startedAt = Date.now();
   private server!: WebSocketServer;
   private pending = new Map<number, Pending>();
   private nextCall = 1;
@@ -117,7 +121,7 @@ export class Hub {
       }
       if (m.type === 'result') {
         const p = this.pending.get(m.id);
-        if (!p) return;
+        if (!p || p.client !== client) return;
         this.pending.delete(m.id);
         clearTimeout(p.timer);
         if (m.ok) p.resolve(m.result);
@@ -133,19 +137,35 @@ export class Hub {
       if (i >= 0) {
         this.clients.splice(i, 1);
         this.log(`[reins] client ${client!.id} disconnected`);
+        for (const [id, p] of this.pending)
+          if (p.client === client) {
+            this.pending.delete(id);
+            clearTimeout(p.timer);
+            p.reject(new Error('the app disconnected'));
+          }
       }
     });
     socket.on('error', () => {});
   }
 
-  /** The most recently paired client. */
-  current(): Client | undefined {
-    return this.clients[this.clients.length - 1];
+  /** Whether a client is a `reins/node` server rather than a page or an app. */
+  static isNode(c: Client): boolean {
+    return !!c.meta && c.meta.platform === 'node';
   }
 
-  /** Sends a call to the newest paired client and waits for its result. */
-  request(method: string, params: Record<string, unknown> = {}): Promise<any> {
-    const client = this.current();
+  /** The most recently paired page or app (not a Node server). Browser methods go here. */
+  current(): Client | undefined {
+    return this.clients.filter((c) => !Hub.isNode(c)).pop();
+  }
+
+  /** Paired `reins/node` servers, oldest first. */
+  nodeClients(): Client[] {
+    return this.clients.filter(Hub.isNode);
+  }
+
+  /** Sends a call to a client (default: the newest page or app) and waits for its result. */
+  request(method: string, params: Record<string, unknown> = {}, target?: Client): Promise<any> {
+    const client = target ?? this.current();
     if (!client) {
       return Promise.reject(new Error('No app is paired. Open the app in dev mode (it must call reins.connect()) and make sure the dev server serves .reins/token.'));
     }
@@ -155,7 +175,7 @@ export class Hub {
         this.pending.delete(id);
         reject(new Error(`the app did not answer "${method}" in time`));
       }, this.opts.callMs ?? 15000);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, client });
       client.socket.send(JSON.stringify({ type: 'call', id, method, params }));
     });
   }

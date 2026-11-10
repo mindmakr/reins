@@ -12,8 +12,9 @@ export interface BridgeArgs {
 export const USAGE = `usage:
   reins bridge [options]
   reins verify <dir> [<dir>...]
+  reins report [--from <session.json>] [--compare <before.json> <after.json>] [--out <dir|file.md>]
 
-Starts the reins bridge on 127.0.0.1 and an MCP server on stdio, or checks a production bundle for reins dev code.
+Starts the reins bridge on 127.0.0.1 and an MCP server on stdio, checks a production bundle for reins dev code, or renders saved session reports.
 
   --port <n>         WebSocket port (default 7357)
   --dir <path>       project folder for .reins/ (default: current folder)

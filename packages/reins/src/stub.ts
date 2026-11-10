@@ -29,6 +29,7 @@ export function createReins(_g?: unknown) {
     connect: (_o?: unknown) => Promise.resolve(false),
     disconnect: noop,
     isPaired: () => false,
+    record: (_o?: unknown) => false,
     actions: (): unknown[] => [],
     run: (_name: string, _input?: unknown, _o?: unknown) => refuse(),
     snapshot: (_name?: string): Record<string, unknown> => ({}),

@@ -24,10 +24,16 @@ export function ring<T>(size: number): Ring<T> {
   };
 }
 
-export function patchNetwork(g: any, record: (e: NetEntry) => void, { queryKeys, headers, bodyKeys }: Allow): () => void {
+/**
+ * Wraps `fetch` to record redacted calls. While `trace()` is true, same-origin calls also carry an
+ * `x-reins-trace` id, so `reins/node` can join the server half. Cross-origin calls never get it.
+ */
+export function patchNetwork(g: any, record: (e: NetEntry) => void, { queryKeys, headers, bodyKeys }: Allow, trace: () => any): () => void {
   const now = () => R(g.performance?.now?.() ?? Date.now()),
     f = g.fetch,
+    tid = Math.random().toString(36).slice(2, 8),
     hdr = (h: any, o: Record<string, string> = {}) => (h?.forEach ? h.forEach((v: string, k: string) => (o[k] = v)) : Object.assign(o, h), redactHeaders(o, headers));
+  let n = 0;
   if (!f) return () => {};
   g.fetch = function (u: any, o: any = {}) {
     const startMs = now(),
@@ -42,7 +48,11 @@ export function patchNetwork(g: any, record: (e: NetEntry) => void, { queryKeys,
         requestBody: b == null ? undefined : typeof b == 'string' ? redactBody(b, bodyKeys) : REDACTED,
       },
       fin = (status: number, h?: any) => ((e.status = status), (e.ms = now() - startMs), (e.responseHeaders = hdr(h)), record(e));
-    return f.apply(this, arguments as any).then(
+    try {
+      if (trace() && new URL(req.url || u, g.location.href).origin == g.location.origin)
+        (o = { ...o, headers: new g.Headers(o.headers || req.headers) }).headers.set('x-reins-trace', (e.traceId = tid + '-' + ++n));
+    } catch {}
+    return f.call(this, u, o).then(
       (r: any) => (fin(r.status, r.headers), bodyKeys?.length && r.clone?.().text().then((t: string) => (e.responseBody = redactBody(t, bodyKeys)), () => {}), r),
       (err: any) => ((e.error = msg(err)), fin(0), Promise.reject(err)),
     );

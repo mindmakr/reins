@@ -66,7 +66,7 @@ describe('reins single-package subpath exports', () => {
     expect(nextShouldStub(false, {}, {})).toBe(true);
     const cfg = withReinsNext({});
     const out = cfg.webpack({ resolve: { alias: {} } }, { dev: false });
-    expect(out.resolve.alias).toEqual({ reins$: 'reins/stub' });
+    expect(out.resolve.alias).toEqual({ reins$: 'reins/stub', 'reins/record$': 'reins/record-stub' });
 
     vi.stubEnv('NODE_ENV', 'production');
     const res = await nextTokenGET(new Request('http://localhost:3000/api/reins-token'));

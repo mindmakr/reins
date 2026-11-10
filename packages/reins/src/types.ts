@@ -60,6 +60,8 @@ export interface NetEntry {
   requestBody?: unknown;
   responseBody?: unknown;
   error?: string;
+  /** Sent as `x-reins-trace` on same-origin calls while paired, so `reins/node` can join the server half. */
+  traceId?: string;
 }
 
 export interface ErrEntry {
@@ -77,11 +79,24 @@ export interface ComponentPerf {
 }
 
 export interface PerfTimelineEntry {
-  kind: 'lifecycle' | 'component-mount' | 'api' | 'action';
+  kind: 'lifecycle' | 'component-mount' | 'api' | 'action' | 'server';
   name: string;
   atMs: number;
   durationMs?: number;
   status?: number;
+  /** Server entries (joined by the bridge from `reins/node`): the trace id, time in `db.*` spans, and the spans. */
+  traceId?: string;
+  dbMs?: number;
+  spans?: Array<{ name: string; atMs: number; durationMs: number; error?: string }>;
+}
+
+export interface ApiCall {
+  method: string;
+  url: string;
+  status: number;
+  startMs?: number;
+  ms: number;
+  traceId?: string;
 }
 
 export interface PerfReport {
@@ -101,11 +116,80 @@ export interface PerfReport {
     failedCalls: number;
     avgMs: number;
     maxMs: number;
-    slowest: { method: string; url: string; status: number; ms: number; startMs: number } | null;
-    calls: Array<{ method: string; url: string; status: number; startMs: number; ms: number }>;
+    slowest: ApiCall | null;
+    /** In the page these are the full (redacted) network entries; the bridge trims them to these fields. */
+    calls: ApiCall[];
   };
   actions: Array<{ name: string; startMs: number; durationMs: number }>;
-  timeline: PerfTimelineEntry[];
+  /** Built from the parts above by `withTimeline` in `reins/report`. The bridge's `reins_perf` and record mode always include it. */
+  timeline?: PerfTimelineEntry[];
+  /** Added by the bridge when a `reins/node` server is paired. */
+  server?: { requests: number; slowest: RouteStat[]; runtime: ServerRuntime | null };
+}
+
+/** One timed piece of server work: a `reinsNode.span()` call. */
+export interface ServerSpan {
+  name: string;
+  /** Milliseconds from the start of the request (or of the process, for top-level spans). */
+  startMs: number;
+  ms: number;
+  error?: string;
+}
+
+/** One outbound `fetch` the server made (seen through `node:diagnostics_channel`). */
+export interface ServerOutbound {
+  method: string;
+  url: string;
+  status: number;
+  startMs: number;
+  ms: number;
+  error?: string;
+}
+
+/** One inbound HTTP request handled by a server that uses `reins/node`. */
+export interface ServerRequest {
+  method: string;
+  route: string;
+  url: string;
+  status: number;
+  ms: number;
+  /** `performance.now()` of the server process when the request started. */
+  startMs: number;
+  at: number;
+  traceId?: string;
+  /** Total time in spans whose name starts with `db.`. */
+  dbMs: number;
+  spans: ServerSpan[];
+  outbound: ServerOutbound[];
+  requestHeaders?: Record<string, string>;
+}
+
+export interface ServerRuntime {
+  node: string;
+  pid: number;
+  uptimeS: number;
+  rssMb: number;
+  heapUsedMb: number;
+  eventLoop: { p50Ms: number; p99Ms: number; maxMs: number };
+}
+
+export interface RouteStat {
+  method: string;
+  route: string;
+  count: number;
+  avgMs: number;
+  maxMs: number;
+  avgDbMs: number;
+}
+
+/** What `reins_server` returns for one server. */
+export interface ServerReport {
+  runtime: ServerRuntime | null;
+  requests: ServerRequest[];
+  slowest: RouteStat[];
+  spans: ServerSpan[];
+  outbound: ServerOutbound[];
+  actions?: ActionInfo[];
 }
 
 export interface DomOptions {

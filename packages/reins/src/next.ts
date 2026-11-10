@@ -13,7 +13,7 @@ export function shouldStub(dev: boolean, options: ReinsNextOptions = {}, env = p
 }
 
 /**
- * Wraps a Next.js config. Production builds resolve `reins` to `reins/stub`,
+ * Wraps a Next.js config. Production builds resolve `reins` to `reins/stub` (and `reins/record` to `reins/record-stub`),
  * with webpack and with Turbopack.
  */
 export function withReins(nextConfig: NextConfig = {}, options: ReinsNextOptions = {}): NextConfig {
@@ -23,13 +23,13 @@ export function withReins(nextConfig: NextConfig = {}, options: ReinsNextOptions
     webpack(config: any, ctx: { dev: boolean }) {
       if (shouldStub(ctx.dev, options)) {
         config.resolve = config.resolve || {};
-        config.resolve.alias = { ...(config.resolve.alias || {}), reins$: 'reins/stub' };
+        config.resolve.alias = { ...(config.resolve.alias || {}), reins$: 'reins/stub', 'reins/record$': 'reins/record-stub' };
       }
       return typeof nextConfig.webpack === 'function' ? nextConfig.webpack(config, ctx) : config;
     },
   };
   if (shouldStub(!prodBuild, options)) {
-    out.turbopack = { ...(nextConfig.turbopack || {}), resolveAlias: { ...((nextConfig.turbopack || {}).resolveAlias || {}), reins: 'reins/stub' } };
+    out.turbopack = { ...(nextConfig.turbopack || {}), resolveAlias: { ...((nextConfig.turbopack || {}).resolveAlias || {}), 'reins/record': 'reins/record-stub', reins: 'reins/stub' } };
   }
   return out;
 }

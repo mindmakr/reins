@@ -18,7 +18,7 @@ export function shouldStub(options: ReinsMetroOptions = {}, env = process.env): 
 /**
  * Wraps a Metro config:
  * - dev: serves the pairing token at /__reins/token on the Metro server;
- * - production: resolves `reins` to `reins/stub`.
+ * - production: resolves `reins` to `reins/stub` and `reins/record` to `reins/record-stub`.
  */
 export function withReins(config: MetroConfig, options: ReinsMetroOptions = {}): MetroConfig {
   const root = options.projectRoot || process.cwd();
@@ -46,7 +46,7 @@ export function withReins(config: MetroConfig, options: ReinsMetroOptions = {}):
     resolver: {
       ...resolver,
       resolveRequest(context: any, moduleName: string, platform: string | null) {
-        const name = stub && moduleName === 'reins' ? 'reins/stub' : moduleName;
+        const name = stub && moduleName === 'reins' ? 'reins/stub' : stub && moduleName === 'reins/record' ? 'reins/record-stub' : moduleName;
         return prevResolve ? prevResolve(context, name, platform) : context.resolveRequest(context, name, platform);
       },
     },

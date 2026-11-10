@@ -7,7 +7,8 @@
     "paths": {
       "reins": ["./src/index.ts"],
       "reins/server": ["./src/server.ts"],
-      "reins/react": ["./src/react.ts"]
+      "reins/react": ["./src/react.ts"],
+      "reins/report": ["./src/report.ts"]
     }
   },
   "include": ["src"]
