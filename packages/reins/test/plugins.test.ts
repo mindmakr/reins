@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { keepInBuild, tokenResponse } from 'reins/server';
-import { reinsPlugin } from '../../vite/src/index.js';
-import { shouldStub as nextShouldStub, withReins as withReinsNext } from '../../next/src/index.js';
-import { withReins as withReinsMetro } from '../../expo/src/metro.js';
+import { reinsPlugin } from '../src/vite.js';
+import { shouldStub as nextShouldStub, withReins as withReinsNext } from '../src/next.js';
+import { withReins as withReinsMetro } from '../src/metro.js';
 
 const dirs: string[] = [];
 function project(token?: string) {
@@ -47,21 +47,31 @@ describe('token route', () => {
   });
 });
 
-describe('@reins/vite', () => {
+describe('reins/vite', () => {
   async function resolveWith(command: 'build' | 'serve', mode: string) {
     const plugin = reinsPlugin();
     plugin.configResolved({ root: '.', command, mode });
     const resolve = vi.fn(async (id: string) => ({ id: `/abs/${id}` }));
-    return { result: await plugin.resolveId.call({ resolve }, 'reins', '/app/main.ts'), other: await plugin.resolveId.call({ resolve }, 'react', '/app/main.ts') };
+    const to = (id: string) => plugin.resolveId.call({ resolve }, id, '/app/main.ts');
+    return { result: await to('reins'), record: await to('reins/record'), other: await to('react'), proto: await to('constructor') };
   }
 
   it('swaps reins for the stub in production builds only', async () => {
     expect((await resolveWith('build', 'production')).result).toEqual({ id: '/abs/reins/stub' });
     expect((await resolveWith('build', 'production')).other).toBeNull();
+    // An import named like an Object.prototype member must not be treated as a stub entry.
+    expect((await resolveWith('build', 'production')).proto).toBeNull();
     expect((await resolveWith('serve', 'development')).result).toBeNull();
     expect((await resolveWith('build', 'development')).result).toBeNull();
     vi.stubEnv('REINS_ENABLE', '1');
     expect((await resolveWith('build', 'staging')).result).toBeNull();
+  });
+
+  it('swaps reins/record for its stub in production builds only', async () => {
+    expect((await resolveWith('build', 'production')).record).toEqual({ id: '/abs/reins/record-stub' });
+    expect((await resolveWith('serve', 'development')).record).toBeNull();
+    vi.stubEnv('REINS_ENABLE', '1');
+    expect((await resolveWith('build', 'staging')).record).toBeNull();
   });
 
   it('serves the token in dev', () => {
@@ -77,13 +87,13 @@ describe('@reins/vite', () => {
   });
 });
 
-describe('@reins/next', () => {
-  it('aliases reins to the stub in production webpack builds and keeps the user webpack hook', () => {
+describe('reins/next', () => {
+  it('aliases reins and reins/record to their stubs in production webpack builds and keeps the user webpack hook', () => {
     const user = vi.fn((c) => c);
     const cfg = withReinsNext({ webpack: user, reactStrictMode: true });
     expect(cfg.reactStrictMode).toBe(true);
     const prod = cfg.webpack({ resolve: { alias: { x: 'y' } } }, { dev: false });
-    expect(prod.resolve.alias).toEqual({ x: 'y', reins$: 'reins/stub' });
+    expect(prod.resolve.alias).toEqual({ x: 'y', reins$: 'reins/stub', 'reins/record$': 'reins/record-stub' });
     const dev = cfg.webpack({ resolve: { alias: {} } }, { dev: true });
     expect(dev.resolve.alias).toEqual({});
     expect(user).toHaveBeenCalledTimes(2);
@@ -93,11 +103,11 @@ describe('@reins/next', () => {
     expect(nextShouldStub(false, {}, { REINS_ENABLE: '1' })).toBe(false);
     expect(nextShouldStub(false, {}, {})).toBe(true);
     vi.stubEnv('NODE_ENV', 'production');
-    expect(withReinsNext({}).turbopack.resolveAlias).toEqual({ reins: 'reins/stub' });
+    expect(withReinsNext({}).turbopack.resolveAlias).toEqual({ reins: 'reins/stub', 'reins/record': 'reins/record-stub' });
   });
 });
 
-describe('@reins/expo/metro', () => {
+describe('reins/metro', () => {
   it('serves the token through Metro middleware', () => {
     const dir = project('metro-token');
     const cfg = withReinsMetro({}, { projectRoot: dir });
@@ -110,12 +120,14 @@ describe('@reins/expo/metro', () => {
     expect(inner).toHaveBeenCalledTimes(1);
   });
 
-  it('resolves reins to the stub only in production', () => {
+  it('resolves reins and reins/record to their stubs only in production', () => {
     const resolveRequest = vi.fn((_c, name) => name);
     vi.stubEnv('NODE_ENV', 'production');
     expect(withReinsMetro({}).resolver.resolveRequest({ resolveRequest }, 'reins', 'ios')).toBe('reins/stub');
+    expect(withReinsMetro({}).resolver.resolveRequest({ resolveRequest }, 'reins/record', 'ios')).toBe('reins/record-stub');
     expect(withReinsMetro({}).resolver.resolveRequest({ resolveRequest }, 'react', 'ios')).toBe('react');
     vi.stubEnv('NODE_ENV', 'development');
     expect(withReinsMetro({}).resolver.resolveRequest({ resolveRequest }, 'reins', 'ios')).toBe('reins');
+    expect(withReinsMetro({}).resolver.resolveRequest({ resolveRequest }, 'reins/record', 'ios')).toBe('reins/record');
   });
 });
