@@ -399,9 +399,17 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
     subs.splice(0).forEach((f) => f());
   }
 
+  function clear() {
+    const n = opts.bufferSize || 200;
+    requests = ring(n);
+    spans = ring(Math.ceil(n / 2));
+    outbound = ring(Math.ceil(n / 2));
+  }
+
   return {
     connect,
     disconnect,
+    clear,
     isPaired: () => paired,
     isActive: () => active,
     middleware,

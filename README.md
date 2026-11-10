@@ -51,8 +51,8 @@ Or in two steps:
 
 Then in any new or existing Vite, Next.js, React or Expo project:
 
-- `/reins:setup` — inspects your project, installs `reins`, wires `reins/vite`, `reins/next` or `reins/metro`, adds dev-only `reins.connect()`, hooks up state adapters and high-value actions, wraps key screens in `<ReinsPanel>`, adds `reins verify` to your build script, and configures `.mcp.json`.
-- `/reins:drive` — drives your paired app through the 9 MCP tools (`reins_list_actions`, `reins_run_action`, `reins_state`, `reins_network`, `reins_errors`, `reins_panel_box`, `reins_snap`, `reins_perf`, `reins_dom`).
+- `/reins:setup` — inspects your project, installs `reins`, wires `reins/vite`, `reins/next` or `reins/metro` (and `reins/node` if you have a Node backend), adds dev-only `reins.connect()`, hooks up state adapters and high-value actions, wraps key screens in `<ReinsPanel>`, adds `reins verify` to your build script, and configures `.mcp.json`.
+- `/reins:drive` — drives your paired app and server through the 11 MCP tools (`reins_list_actions`, `reins_run_action`, `reins_state`, `reins_network`, `reins_errors`, `reins_panel_box`, `reins_snap`, `reins_perf`, `reins_dom`, `reins_server`, `reins_report`).
 - `/reins:verify` — runs your production build and verifies zero `reins` dev code shipped.
 
 In OpenAI Codex CLI, Cursor or Antigravity: copy `skills/reins/` into `.agents/skills/` (or `~/.gemini/config/skills/`) and ask the agent to follow the `reins` skill.
@@ -66,11 +66,15 @@ Everything ships in the single `reins` package (and the workspace packages `@rei
 | `reins` | The core (< 5 KB min+gzip, 0 browser deps): actions, state, network and error buffers, panels, `perf()`, `dom()`, `markComponent()`, WebMCP. |
 | `reins/react` | `useReinsAction`, `useReinsState`, `<ReinsPanel id>` (automatically tracks mount time & render count). |
 | `reins/expo` | React Native glue: `connectExpo()`, `<ReinsPanel id>` with `testID`, `useReinsPanel`, `useReinsAction`, `useReinsState`. |
+| `reins/node` | Node backend instrumentation (Express/Connect `middleware()`, `wrapHandler()`, `fastify()`, `span('db.*')`, `Server-Timing`, outbound `undici` fetches, event-loop p50/p99/max), joined with browser fetches via `x-reins-trace`. |
+| `reins/record` | Opt-in tester recording (`recordFromUrl()` via `?reins=record`, or `startRecording()`) to export `.md` + `.json` session reports in dev or private staging (`REINS_ENABLE=1`) without a bridge. |
+| `reins/report` | Isomorphic session report builder, plain-language `findings()` detector, Markdown renderer, and `compareSessions()` diff. |
 | `reins/adapters` | `zustand`, `redux`, `reactQuery`, `routerLocation`, `fromStore`. |
-| `reins/vite` | Vite plugin: serves `/__reins/token` in dev, swaps `reins` for `reins/stub` in production builds. |
+| `reins/vite` | Vite plugin: serves `/__reins/token` in dev, swaps `reins` and `reins/record` for 0-marker stubs in production builds. |
 | `reins/next` & `reins/next/token-route` | `withReins(nextConfig)` (Webpack + Turbopack) and the `GET` token route handler. |
 | `reins/metro` (or `reins/expo/metro`) | `withReins(metroConfig)` for Expo and React Native. |
-| `npx reins bridge` | The localhost (`127.0.0.1:7357`) WebSocket pairing hub and stdio MCP server (9 tools). |
+| `npx reins bridge` | The localhost (`127.0.0.1:7357`) WebSocket pairing hub and stdio MCP server (11 tools). |
+| `npx reins report [--compare a.json b.json]` | Renders a saved session as Markdown or prints a before/after regression table of metrics, per-URL latency, panel renders, and resolved/new findings. |
 | `npx reins verify <dir>` (`reins-verify-bundle`) | Fails if `__REINS_DEV_ONLY__` is found anywhere in a production build output folder. |
 
 ## Five-minute setup (by hand)
@@ -221,8 +225,15 @@ Options: `--port`, `--dir`, `--origin <exact origin>` (extra allowed page origin
 | `reins_errors` | Recent console errors, uncaught errors and unhandled rejections. |
 | `reins_panel_box` | A panel's box in CSS pixels, with `devicePixelRatio`. |
 | `reins_snap` | A pixel-exact PNG of a panel under `.reins/snaps/`, and optionally a copy on the clipboard. |
-| `reins_perf` | Page lifecycle timings (`ttfbMs`, `firstPaintMs`, `firstContentfulPaintMs`, `domInteractiveMs`, `domContentLoadedMs`, `loadMs`), `<ReinsPanel>` mount times and render counts, API call latency stats, and a unified millisecond timeline. |
+| `reins_perf` | Page lifecycle timings (`ttfbMs`, `firstPaintMs`, `firstContentfulPaintMs`, `domInteractiveMs`, `domContentLoadedMs`, `loadMs`), `<ReinsPanel>` mount times and render counts, API call latency stats, and a unified millisecond timeline (with paired `reins/node` server spans joined by `x-reins-trace`). |
 | `reins_dom` | Inspects a panel or CSS selector's DOM subtree, bounding boxes, computed CSS styles (`direction`, `display`, `flexDirection`, `overflowX`, etc.), and automatic layout issue flags (`horizontal-clip`, `vertical-clip`, `zero-size`). |
+| `reins_server` | When a Node dev server is paired via `reins/node`: recent inbound requests with `dbMs`, `spans` (such as `db.line_items.select ×6`), outbound upstream fetches, `traceId` matching `reins_network`, slowest routes, and runtime stats (event-loop delay `p50`/`p99`/`max`, RSS/heap). |
+| `reins_report` | Gathers everything (actions, redacted state, network, errors, joined frontend+backend `reins_perf` timeline, per-panel DOM layout issues, screenshots, audit log) into `.reins/sessions/<time>-<slug>.md` and `.json` with automatic plain-language findings (slow APIs, duplicate calls, N+1 server spans, excess renders, layout clips). Compare before and after a fix with `npx reins report --compare before.json after.json`. |
+
+### Backend instrumentation (`reins/node`) and tester session exports (`reins/record`)
+
+- **Backend (`reins/node`)**: In Express, Connect, Fastify or `http.createServer`, call `reinsNode.connect({ meta: { name: 'api' } })` in dev mode, add `reinsNode.middleware({ serverTiming: true })` (or `reinsNode.wrapHandler(handler, { serverTiming: true })`), and wrap database calls in `reinsNode.span('db.invoices.select', () => ...)`. Same-origin browser `fetch` calls carry `x-reins-trace`, so `reins_perf` and `reins_report` place server spans right inside the browser call that triggered them—and `Server-Timing` headers let an in-app dev HUD display live `db` and `app` latency.
+- **Tester recording (`reins/record`)**: Import `recordFromUrl()` from `'reins/record'` in your dev or private staging (`REINS_ENABLE=1`) entry. Opening `?reins=record` mounts a tiny `● Recording · Export` pill so a QA tester can click through a bug and download `reins-session-<time>.md` and `.json` for an agent to diagnose—no MCP bridge required on the tester's machine. Production builds swap `reins/record` for `reins/record-stub`.
 
 A typical loop: list actions, run `login-as-tester`, run `set-locale` with `ar`, check `reins_errors` is empty, inspect `reins_perf` (mount times, render counts, API latency) and `reins_dom` (confirm `direction: "rtl"` and `issues: []`), then `reins_snap` the `checkout` panel and compare it with the design.
 

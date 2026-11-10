@@ -115,6 +115,34 @@ if (__DEV__) {
 }
 ```
 
+### Optional: Node backend instrumentation (`reins/node`)
+
+If the project runs a Node API server (Express, Connect, Fastify, or `http.createServer`), wire `reins/node` in dev mode so `reins_server`, `reins_perf` and `reins_report` join backend DB spans and event-loop lag with browser fetches via `x-reins-trace`:
+
+```ts
+import { reinsNode } from 'reins/node';
+
+if (process.env.NODE_ENV !== 'production') {
+  void reinsNode.connect({ meta: { name: 'api' } });
+  app.use(reinsNode.middleware({ serverTiming: true }));
+}
+
+// Wrap DB or external queries in named spans (db.* counts toward dbMs):
+const rows = await reinsNode.span('db.invoices.select', () => db.query('SELECT ...'));
+```
+
+### Optional: Tester session export (`reins/record`)
+
+To let human QA testers record a session (`?reins=record`) and download `.md` + `.json` diagnostics in dev or private staging (`REINS_ENABLE=1`), add `recordFromUrl()` in the browser entry (`reins/vite`, `reins/next`, and `reins/metro` swap `reins/record` for `reins/record-stub` in production builds):
+
+```ts
+import { recordFromUrl } from 'reins/record';
+
+if (import.meta.env.DEV) {
+  recordFromUrl();
+}
+```
+
 ## Step 5: Register high-value actions and `<ReinsPanel>` boundaries
 
 In the app's root shell or key feature components, import `useReinsAction`, `useReinsState` and `ReinsPanel` from `reins/react` (or `reins/expo` on React Native):

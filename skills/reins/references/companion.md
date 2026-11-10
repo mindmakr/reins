@@ -18,8 +18,8 @@
 | Role | What Coordinator does | What reins adds |
 |---|---|---|
 | **Intake & Bar** | Agrees the quality bar up front as testable *given / when / then* behaviours before any code is written. | Names the exact actions, state sources and `<ReinsPanel id>` ids each behaviour will be checked against. |
-| **Builder** (`/coordinator:fix`) | Builds the unit in an isolated git worktree and runs tests. | Registers or updates `useReinsAction`, `reins.state` and `<ReinsPanel>`, and drives the app via `reins_run_action`, `reins_perf` and `reins_dom` to self-check. |
-| **Blind Code & Visual Critics** (`/coordinator:review`, `/coordinator:visual`) | A separate agent — who never sees the builder's reasoning — checks the real running app against every behaviour in the bar. | Calls `reins_list_actions`, `reins_run_action` (e.g. switching locales `en` → `ar` and themes), asserts `reins_state`, `reins_network`, `reins_errors`, `reins_perf` and `reins_dom`, and attaches `reins_snap` PNGs from `.reins/snaps/` as durable evidence (`run.mjs evidence`). |
+| **Builder** (`/coordinator:fix`) | Builds the unit in an isolated git worktree and runs tests. | Registers or updates `useReinsAction`, `reins.state`, `<ReinsPanel>`, and `reinsNode.span('db.*')`, drives the app via `reins_run_action`, `reins_perf`, `reins_dom`, and `reins_server`, and compares before/after sessions with `npx reins report --compare`. |
+| **Blind Code & Visual Critics** (`/coordinator:review`, `/coordinator:visual`) | A separate agent — who never sees the builder's reasoning — checks the real running app against every behaviour in the bar. | Calls `reins_list_actions`, `reins_run_action` (e.g. switching locales `en` → `ar` and themes), asserts `reins_state`, `reins_network`, `reins_errors`, `reins_perf`, `reins_dom`, `reins_server` and `reins_report`, and attaches `reins_snap` PNGs and session Markdown reports as durable evidence (`run.mjs evidence`). |
 | **Production Gate** | Refuses to pass a unit if build or security checks fail. | `reins verify` (`reins-verify-bundle`) guarantees zero dev marker (`__REINS_DEV_ONLY__`) in production bundles. |
 
 ## Installing Coordinator alongside reins
