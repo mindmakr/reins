@@ -103,9 +103,17 @@ export class Hub {
       } catch {
         return;
       }
+      // JSON such as `null` or `1` parses fine; reading `.type` off it would throw inside this listener and stop the bridge.
+      if (!m || typeof m !== 'object') {
+        if (!client) {
+          clearTimeout(timer);
+          socket.close(4401, 'bad handshake');
+        }
+        return;
+      }
       if (!client) {
         clearTimeout(timer);
-        if (m && m.type === 'hello' && tokensMatch(m.token, this.token)) {
+        if (m.type === 'hello' && tokensMatch(m.token, this.token)) {
           client = { id: this.nextClient++, url: m.url, title: m.title, meta: m.meta, socket };
           this.clients.push(client);
           socket.send(JSON.stringify({ type: 'welcome', client: client.id }));

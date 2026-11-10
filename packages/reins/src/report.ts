@@ -83,7 +83,11 @@ const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
 const avg = (a: number[]) => (a.length ? R(sum(a) / a.length) : 0);
 const groupBy = <T>(list: T[], key: (t: T) => string) => {
   const m = new Map<string, T[]>();
-  for (const x of list) m.set(key(x), [...(m.get(key(x)) || []), x]);
+  for (const x of list) {
+    const k = key(x);
+    const bucket = m.get(k);
+    bucket ? bucket.push(x) : m.set(k, [x]);
+  }
   return m;
 };
 const trimCall = ({ method, url, status, startMs = 0, ms, traceId }: ApiCall): ApiCall => ({ method, url, status, startMs, ms, traceId });

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
-import { parseArgs, USAGE } from './bridge/args.js';
+import { parseArgs, portInUse, USAGE } from './bridge/args.js';
 import { fileAudit } from './bridge/audit.js';
-import { Hub } from './bridge/hub.js';
+import { DEFAULT_PORT, Hub } from './bridge/hub.js';
 import { startMcp } from './bridge/mcp.js';
 import { reportMain } from './bridge/report-cli.js';
 import { tokenPath } from './bridge/token.js';
@@ -34,10 +34,20 @@ async function main() {
   }
   const dir = resolve(args.dir);
   const audit = fileAudit(dir);
-  const hub = await Hub.start({ dir, port: args.port, origins: args.origins, rotate: args.rotate, allowNoOrigin: args.allowNoOrigin, audit });
+  let hub: Hub;
+  try {
+    hub = await Hub.start({ dir, port: args.port, origins: args.origins, rotate: args.rotate, allowNoOrigin: args.allowNoOrigin, audit });
+  } catch (e: any) {
+    if (e && e.code === 'EADDRINUSE') {
+      err(portInUse(args.port ?? DEFAULT_PORT));
+      process.exitCode = 1;
+      return;
+    }
+    throw e;
+  }
   err(`[reins] bridge on ws://127.0.0.1:${hub.port}`);
+  // The token itself is not printed: stderr ends up in the agent host's MCP logs. It is in the file.
   err(`[reins] pairing token written to ${tokenPath(dir)}${args.rotate ? ' (renewed after each pairing)' : ''}`);
-  err(`[reins] token: ${hub.token}`);
   audit({ source: 'bridge', event: 'start', ok: true, port: hub.port });
   if (args.mcp) await startMcp({ hub, dir, cdp: args.cdp, audit });
   const stop = async () => {

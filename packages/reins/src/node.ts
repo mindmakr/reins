@@ -325,6 +325,8 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
         } catch {
           return;
         }
+        // An unhandled rejection here would end the dev server, so ignore anything that is not a message object.
+        if (!m || typeof m !== 'object') return;
         if (!done) {
           done = true;
           if (m.type === 'welcome') {

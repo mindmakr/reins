@@ -1,8 +1,7 @@
-// Node-side helpers shared by the build plugins (@reins/vite, @reins/next, @reins/expo/metro).
+// Node-side helpers shared by the build plugins (reins/vite, reins/next, reins/metro).
 // Never imported by app code.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-
 
 export const TOKEN_ROUTE = '/__reins/token';
 

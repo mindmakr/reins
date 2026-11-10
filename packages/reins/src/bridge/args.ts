@@ -25,6 +25,11 @@ Starts the reins bridge on 127.0.0.1 and an MCP server on stdio, checks a produc
   --browser-only     refuse clients without an Origin header (no React Native)
 `;
 
+/** What to tell the person when the bridge port is taken, which happens when two agent sessions each start a bridge. */
+export const portInUse = (port: number) =>
+  `reins: port ${port} is already in use. Another reins bridge is probably running (a second agent session or terminal, in this project or another).
+reins: stop that one, or start this one with --port <n> and give the app the same port: reins.connect({ url: 'ws://127.0.0.1:<n>' }).`;
+
 /** Parses `reins` arguments. Throws on unknown flags. */
 export function parseArgs(argv: string[], cwd: string): BridgeArgs {
   const out: BridgeArgs = { command: 'help', dir: cwd, origins: [], rotate: true, mcp: true, allowNoOrigin: true };
