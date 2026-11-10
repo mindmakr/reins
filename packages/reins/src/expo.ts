@@ -51,7 +51,9 @@ export interface ReinsPanelProps {
 
 /** A View with `testID={id}` that the agent can measure and snap. */
 export function ReinsPanel({ id, children, ...rest }: ReinsPanelProps) {
-  reins.markComponent(id);
+  useEffect(() => {
+    reins.markComponent(id);
+  });
   const ref = useReinsPanel(id);
   return createElement(View, { testID: id, collapsable: false, ...rest, ref }, children);
 }
