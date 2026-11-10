@@ -1,6 +1,7 @@
 // reins/node: dev-only backend instrumentation for Node servers. Node only: never import it from browser code.
 // It pairs with the bridge like the browser client does, records inbound requests, spans and outbound fetches,
 // and serves them to `reins_server`, `reins_perf` and `reins_report`.
+// Like the browser core, it records nothing until the bridge has accepted its token (or `standalone` says otherwise).
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { channel } from 'node:diagnostics_channel';
 import { readFileSync } from 'node:fs';
@@ -38,6 +39,11 @@ export interface NodeConnectOptions {
   allow?: { queryKeys?: string[]; headers?: string[] };
   /** Requests kept. Default 200. */
   bufferSize?: number;
+  /**
+   * Record without a bridge, from the moment `connect()` is called. For tests and scripts that read `report()`
+   * themselves. Default false: nothing is recorded until the bridge pairs, and recording stops when it goes away.
+   */
+  standalone?: boolean;
   /** For tests. Default: the global WebSocket (Node 22+), else the `ws` package. */
   WebSocket?: new (url: string) => any;
 }
@@ -67,6 +73,9 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
   let requests = ring<Rec>(200);
   let spans = ring<ServerSpan>(100);
   let outbound = ring<ServerOutbound>(100);
+  /** `connect()` was called and `disconnect()` was not: keep trying to pair. */
+  let wanted = false;
+  /** Recording: the middleware, spans, the outbound hooks and the event-loop monitor are on. */
   let active = false;
   let paired = false;
   let sock: any = null;
@@ -294,6 +303,22 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
     server: () => report(),
   };
 
+  // ---- recording on and off -------------------------------------------------------------------
+
+  function start() {
+    if (active) return;
+    active = true;
+    loop.enable();
+    subscribe();
+  }
+
+  function stop() {
+    if (!active) return;
+    active = false;
+    loop.disable();
+    subs.splice(0).forEach((f) => f());
+  }
+
   // ---- pairing --------------------------------------------------------------------------------
 
   async function open(): Promise<boolean> {
@@ -333,6 +358,7 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
             sock = s;
             paired = true;
             delay = 2000;
+            start();
             return resolve(true);
           }
           s.close();
@@ -354,6 +380,8 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
         if (sock === s || !paired) {
           sock = null;
           paired = false;
+          // No bridge, nothing to record for (unless the app asked to record on its own).
+          if (!opts.standalone) stop();
           schedule();
         }
       };
@@ -361,7 +389,7 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
   }
 
   function schedule() {
-    if (!active || opts.reconnect === false || retry) return;
+    if (!wanted || opts.reconnect === false || retry) return;
     retry = setTimeout(() => {
       retry = null;
       void open();
@@ -371,34 +399,33 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
   }
 
   /**
-   * Pairs this server with the bridge and starts recording. Dev only: refuses when NODE_ENV is
+   * Pairs this server with the bridge. Recording starts once the bridge accepts the token and stops when
+   * it goes away (`standalone: true` records from this call instead). Dev only: refuses when NODE_ENV is
    * `production` unless REINS_ENABLE=1. Resolves true once paired.
    */
   function connect(o: NodeConnectOptions = {}): Promise<boolean> {
     if (!nodeEnabled(env)) return Promise.resolve(false);
-    if (!active) {
+    if (!wanted) {
       opts = o;
       const n = o.bufferSize || 200;
       requests = ring(n);
       spans = ring(Math.ceil(n / 2));
       outbound = ring(Math.ceil(n / 2));
-      active = true;
-      loop.enable();
-      subscribe();
+      wanted = true;
+      if (o.standalone) start();
     }
     return paired ? Promise.resolve(true) : open();
   }
 
   function disconnect() {
-    active = false;
+    wanted = false;
     paired = false;
     if (retry) clearTimeout(retry);
     retry = null;
     const s = sock;
     sock = null;
     s?.close();
-    loop.disable();
-    subs.splice(0).forEach((f) => f());
+    stop();
   }
 
   function clear() {
