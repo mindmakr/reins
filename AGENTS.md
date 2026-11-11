@@ -39,7 +39,7 @@ Only build with `REINS_ENABLE=1` for a private staging environment that the pers
 ## Working in this repository
 
 - `npm run build`, `npm test` and `claude plugin validate .` must pass. CI runs build and tests on Node 18, 20 and 22.
-- The browser/RN core entry (`packages/reins/src/index.ts`) has zero browser runtime dependencies and must stay under 5 KB min+gzip (`packages/reins/test/size.test.ts`).
+- The browser/RN core entry (`packages/reins/src/index.ts`) has zero browser runtime dependencies and must stay under 5 KB min+gzip (`packages/reins/test/size.test.ts`). The DOM inspector (`packages/reins/src/dom.ts`) is a separate file that the core loads on the first `dom()` call; it has its own 1 KB limit.
 - `skills/reins/SKILL.md` stays under 500 words and routes to `skills/reins/references/`.
 - Guard all globals. Do nothing before pairing. Redact by default. No eval. No shell strings: use `execFileSync` with an argument array.
 - The bridge only binds to `127.0.0.1`. Do not add a host option.

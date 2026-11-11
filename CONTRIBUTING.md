@@ -38,7 +38,7 @@ A new import path needs an entry in `exports` in `packages/reins/package.json`, 
 
 ## Rules
 
-- **The core stays under 5 KB min+gzip and has no runtime dependencies.** `packages/reins/test/size.test.ts` checks this. If you add to the core, take something out or put it in a separate entry, like `reins/adapters`.
+- **The core stays under 5 KB min+gzip and has no runtime dependencies.** It is at about 4.5 KB. The DOM inspector already lives in its own file (`src/dom.ts`), loaded on the first `dom()` call. `packages/reins/test/size.test.ts` checks this. If you add to the core, take something out or put it in a separate entry, like `reins/adapters`.
 - **Guard every global.** The core runs in browsers, React Native and Node. Do not touch `window`, `document` or `navigator` without checking they exist.
 - **Nothing happens before pairing.** No listeners, patches or globals until the bridge accepts the token. Add a test when you touch this.
 - **Redact by default.** New data sources must redact values unless the key is allowlisted.

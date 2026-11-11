@@ -213,7 +213,7 @@ describe('perf and dom', () => {
       id: 'empty-badge',
       issues: ['zero-size'],
     });
-    expect(r.dom({ panel: 'nonexistent' })).toBeNull();
+    expect(await r.dom({ panel: 'nonexistent' })).toBeNull();
     r.disconnect();
   });
 });

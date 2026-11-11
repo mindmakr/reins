@@ -25,7 +25,7 @@ export function createReins(_g?: unknown) {
       actions: [],
       timeline: [],
     }),
-    dom: (_o?: unknown) => null,
+    dom: (_o?: unknown) => Promise.resolve(null),
     connect: (_o?: unknown) => Promise.resolve(false),
     disconnect: noop,
     isPaired: () => false,
