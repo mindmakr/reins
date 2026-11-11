@@ -4,6 +4,9 @@
   "description": "Give coding agents the reins: a tiny dev-only library to drive, inspect and debug your web and Expo apps",
   "license": "MIT",
   "author": "mindmakr",
+  "homepage": "https://mindmakr.github.io/reins/",
+  "bugs": "https://github.com/mindmakr/reins/issues",
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
   "repository": { "type": "git", "url": "git+https://github.com/mindmakr/reins.git", "directory": "packages/reins" },
   "type": "module",
   "sideEffects": false,
@@ -29,13 +32,14 @@
     "./record-stub": { "types": "./dist/record-stub.d.ts", "default": "./dist/record-stub.js" }
   },
   "bin": {
-    "reins": "./dist/cli.js",
-    "reins-verify-bundle": "./dist/verify-cli.js"
+    "reins": "dist/cli.js",
+    "reins-verify-bundle": "dist/verify-cli.js"
   },
   "files": ["dist"],
   "engines": { "node": ">=18" },
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
