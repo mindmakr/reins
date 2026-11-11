@@ -4,8 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { findMarker, MARKER } from '../src/lib.js';
-import { main } from '../src/main.js';
+import { findMarker, main, MARKER } from '../src/verify.js';
 
 const dirs: string[] = [];
 function bundleDir(files: Record<string, string | Buffer>) {
@@ -53,7 +52,7 @@ describe('reins-verify-bundle', () => {
     expect(main([join(tmpdir(), 'reins-does-not-exist-' + Date.now())], quiet, quiet)).toBe(2);
   });
 
-  const built = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const built = fileURLToPath(new URL('../dist/verify-cli.js', import.meta.url));
   it.skipIf(!existsSync(built))('runs as a CLI process (after npm run build)', () => {
     const run = (dir: string) => {
       try {

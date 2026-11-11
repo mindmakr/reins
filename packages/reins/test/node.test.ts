@@ -196,8 +196,46 @@ describe('reins/node + bridge server tools + report CLI', () => {
     } finally {
       browserWs.close();
       rn.disconnect();
-      await new Promise<void>((r) => httpServer.close(() => r()));
+      // Node 18 keeps idle keep-alive connections open on close(), so close() would never call back.
+      await new Promise<void>((r) => {
+        httpServer.close(() => r());
+        httpServer.closeAllConnections?.();
+      });
       await hub.close();
     }
+  });
+});
+
+describe('reins/node records nothing before pairing', () => {
+  const noBridge = { tokenFile: join(tmpdir(), 'reins-no-such-token-file'), reconnect: false };
+  const fakeReq = () => ({ method: 'GET', url: '/api/x', headers: {} });
+  const fakeRes = () => ({ statusCode: 200, once: (_e: string, fn: () => void) => setTimeout(fn, 0) });
+
+  it('is a no-op until the bridge pairs', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    expect(await rn.connect(noBridge)).toBe(false);
+    expect(rn.isActive()).toBe(false);
+    await new Promise<void>((done) => rn.middleware()(fakeReq(), fakeRes(), () => done()));
+    expect(rn.span('db.x', () => 7)).toBe(7);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(rn.report()).toMatchObject({ runtime: null, requests: [], spans: [] });
+    rn.disconnect();
+  });
+
+  it('records from connect() when standalone is set', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    expect(await rn.connect({ ...noBridge, standalone: true })).toBe(false);
+    expect(rn.isActive()).toBe(true);
+    await new Promise<void>((done) => rn.middleware()(fakeReq(), fakeRes(), () => done()));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(rn.report().requests.map((r) => r.route)).toEqual(['/api/x']);
+    rn.disconnect();
+    expect(rn.isActive()).toBe(false);
+  });
+
+  it('stays off in production even when standalone is asked for', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'production' });
+    expect(await rn.connect({ ...noBridge, standalone: true })).toBe(false);
+    expect(rn.isActive()).toBe(false);
   });
 });

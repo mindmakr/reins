@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { VERSION } from 'reins';
 import { buildSession, mergeServers, renderMarkdown, sessionBase, type AuditLine, type SessionData } from 'reins/report';
@@ -13,12 +13,29 @@ export async function serverReports(hub: Hub): Promise<ServerReport[]> {
   return all.filter(Boolean) as ServerReport[];
 }
 
-/** Audit log lines written since `since` (ms), oldest first. Missing log: none. */
-export function readAudit(projectDir: string, since: number, max = 500): AuditLine[] {
+/** How much of the end of the audit log a report reads. The log is never trimmed, so it can be far larger. */
+export const AUDIT_TAIL_BYTES = 1024 * 1024;
+
+/** The last `maxBytes` of a file as text. A first line cut in half fails to parse and is skipped by the caller. */
+function readTail(file: string, maxBytes: number): string {
+  const fd = openSync(file, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    const length = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(length);
+    readSync(fd, buf, 0, length, size - length);
+    return buf.toString('utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Audit log lines written since `since` (ms), oldest first. Missing log: none. Reads only the end of the file. */
+export function readAudit(projectDir: string, since: number, max = 500, tailBytes = AUDIT_TAIL_BYTES): AuditLine[] {
   const file = join(projectDir, '.reins', 'audit.log');
   if (!existsSync(file)) return [];
   const out: AuditLine[] = [];
-  for (const line of readFileSync(file, 'utf8').split('\n')) {
+  for (const line of readTail(file, tailBytes).split('\n')) {
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line);

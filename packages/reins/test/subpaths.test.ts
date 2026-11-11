@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { reactQuery, redux, routerLocation, zustand } from 'reins/adapters';
 import { Hub, parseArgs, TOOLS } from 'reins/bridge';
@@ -34,11 +36,15 @@ describe('reins single-package subpath exports', () => {
   it('exports reins/react hooks and ReinsPanel', () => {
     expect(typeof useReinsAction).toBe('function');
     expect(typeof useReinsState).toBe('function');
-    expect(typeof ReinsPanel).toBe('function');
-    const el: any = ReinsPanel({ id: 'checkout', className: 'box', children: 'hi' });
-    expect(el.type).toBe('div');
-    expect(el.props['data-reins']).toBe('checkout');
-    expect(el.props.className).toBe('box');
+    // ReinsPanel uses a hook, so it must be rendered by React rather than called as a function.
+    const html = renderToStaticMarkup(createElement(ReinsPanel, { id: 'checkout', className: 'box' }, 'hi'));
+    expect(html).toBe('<div class="box" data-reins="checkout">hi</div>');
+  });
+
+  it('keeps every VERSION constant in step with package.json', async () => {
+    const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
+    const versions = await Promise.all([import('reins'), import('reins/stub'), import('reins/node'), import('reins/bridge')].map(async (m) => (await m).VERSION));
+    expect(versions).toEqual([pkg.version, pkg.version, pkg.version, pkg.version]);
   });
 
   it('exports reins/adapters for zustand, redux, reactQuery, and routerLocation', () => {

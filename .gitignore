@@ -8,3 +8,5 @@ coverage/
 .env.*
 # reins pairing token, audit log and snaps
 .reins/
+# shell crash dumps on Windows
+*.stackdump

@@ -4,13 +4,14 @@ import { join } from 'node:path';
 import { createReins } from 'reins';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
-import { parseArgs } from '../src/args.js';
-import type { AuditEntry } from '../src/audit.js';
-import { fileAudit } from '../src/audit.js';
-import { Hub } from '../src/hub.js';
-import { isOriginAllowed } from '../src/origin.js';
-import { tokenPath, tokensMatch } from '../src/token.js';
-import { callTool } from '../src/tools.js';
+import { parseArgs, portInUse } from '../src/bridge/args.js';
+import type { AuditEntry } from '../src/bridge/audit.js';
+import { fileAudit } from '../src/bridge/audit.js';
+import { Hub } from '../src/bridge/hub.js';
+import { isOriginAllowed } from '../src/bridge/origin.js';
+import { readAudit } from '../src/bridge/session.js';
+import { tokenPath, tokensMatch } from '../src/bridge/token.js';
+import { callTool } from '../src/bridge/tools.js';
 
 const cleanup: Array<() => unknown> = [];
 afterEach(async () => {
@@ -169,5 +170,58 @@ describe('cli arguments', () => {
     expect(parseArgs([], '/p').command).toBe('help');
     expect(() => parseArgs(['bridge', '--host', '0.0.0.0'], '/p')).toThrow(/unknown option/);
     expect(() => parseArgs(['bridge', '--port'], '/p')).toThrow(/needs a value/);
+  });
+});
+
+describe('hub robustness', () => {
+  /** Opens a socket, sends each frame in order, and resolves once the bridge has had time to handle them. */
+  function sendFrames(url: string, frames: string[]): Promise<WebSocket> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(url, { origin: 'http://localhost:5173' });
+      cleanup.push(() => ws.terminate());
+      ws.on('error', () => {});
+      ws.on('open', () => {
+        for (const f of frames) ws.send(f);
+        setTimeout(() => resolve(ws), 100);
+      });
+    });
+  }
+
+  it('survives frames that are valid JSON but not message objects, before and after pairing', async () => {
+    const { hub, url } = await startHub();
+    // Before pairing: `null` is refused like any other bad handshake.
+    await sendFrames(url, ['null']);
+    expect(hub.clients).toHaveLength(0);
+
+    // After pairing: junk from a paired client is ignored and the bridge keeps serving.
+    await sendFrames(url, [JSON.stringify({ type: 'hello', token: hub.token, url: 'http://localhost:5173/' }), 'null', '1', '"text"', '[]']);
+    expect(hub.clients).toHaveLength(1);
+    expect(await attempt(url, { origin: 'http://localhost:5173', token: hub.token })).toEqual({ result: 'welcome' });
+  });
+});
+
+describe('audit log reading', () => {
+  it('reads only the end of a large log and skips the line it cuts into', () => {
+    const dir = tempDir();
+    const audit = fileAudit(dir, () => {});
+    for (let i = 0; i < 200; i++) audit({ source: 'agent', event: 'reins_state', name: `call-${i}`, ok: true });
+    const all = readAudit(dir, 0);
+    expect(all).toHaveLength(200);
+    expect(all[199].name).toBe('call-199');
+
+    const tail = readAudit(dir, 0, 500, 1000);
+    expect(tail.length).toBeGreaterThan(0);
+    expect(tail.length).toBeLessThan(20);
+    expect(tail[tail.length - 1].name).toBe('call-199');
+    expect(readAudit(dir, Date.now() + 60_000)).toEqual([]);
+    expect(readAudit(tempDir(), 0)).toEqual([]);
+  });
+});
+
+describe('start-up messages', () => {
+  it('explains a busy port in plain words', () => {
+    const text = portInUse(7357);
+    expect(text).toContain('port 7357 is already in use');
+    expect(text).toContain('--port');
   });
 });

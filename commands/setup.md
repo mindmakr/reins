@@ -1,5 +1,5 @@
 ---
-description: Inspect this web or Expo app and wire reins end-to-end (install, build plugin, dev connect, actions, state adapters, panels, bundle verification and MCP server)
+description: Inspect this web, Expo or Node app and wire reins end-to-end (install, build plugin, dev connect, actions, state adapters, panels, optional backend instrumentation and record mode, bundle verification and MCP server)
 argument-hint: "[optional screens or flows to wire]"
 ---
 
