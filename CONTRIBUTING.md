@@ -53,3 +53,7 @@ A new import path needs an entry in `exports` in `packages/reins/package.json`, 
 3. Write commit messages and docs plainly: say what changed and why.
 
 Please report security problems privately, as described in [SECURITY.md](SECURITY.md).
+
+## Licence and contributor agreement
+
+reins is [MIT](LICENSE). Before your first pull request is merged, agree to the [contributor agreement](CLA.md) by ticking its box in the pull request. You keep ownership of your work. The names are covered by the [trademark policy](TRADEMARKS.md).
