@@ -196,7 +196,11 @@ describe('reins/node + bridge server tools + report CLI', () => {
     } finally {
       browserWs.close();
       rn.disconnect();
-      await new Promise<void>((r) => httpServer.close(() => r()));
+      // Node 18 keeps idle keep-alive connections open on close(), so close() would never call back.
+      await new Promise<void>((r) => {
+        httpServer.close(() => r());
+        httpServer.closeAllConnections?.();
+      });
       await hub.close();
     }
   });
