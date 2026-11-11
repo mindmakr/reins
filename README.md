@@ -63,7 +63,7 @@ Everything ships in the single `reins` package:
 
 | Import / CLI | What it does |
 | --- | --- |
-| `reins` | The core (< 5 KB min+gzip, 0 browser deps): actions, state, network and error buffers, panels, `perf()`, `dom()`, `markComponent()`, WebMCP. |
+| `reins` | The core (< 5 KB min+gzip, 0 browser deps): actions, state, network and error buffers, panels, `perf()`, `dom()` (its inspector loads on the first call), `markComponent()`, WebMCP. |
 | `reins/react` | `useReinsAction`, `useReinsState`, `<ReinsPanel id>` (automatically tracks mount time & render count). |
 | `reins/expo` | React Native glue: `connectExpo()`, `<ReinsPanel id>` with `testID`, `useReinsPanel`, `useReinsAction`, `useReinsState`. |
 | `reins/node` | Node backend instrumentation (Express/Connect `middleware()`, `wrapHandler()`, `fastify()`, `span('db.*')`, `Server-Timing`, outbound `undici` fetches, event-loop p50/p99/max), joined with browser fetches via `x-reins-trace`. |
@@ -239,7 +239,7 @@ A typical loop: list actions, run `login-as-tester`, run `set-locale` with `ar`,
 
 `reins_snap` in a browser uses Playwright, if it is installed, over the Chrome DevTools Protocol. Start Chrome with `--remote-debugging-port=9222` and the bridge with `--cdp http://127.0.0.1:9222`. On Android it captures the screen with `adb` and returns the panel's box in device pixels. Otherwise it returns the box, so the agent's own browser tool can clip a screenshot to it.
 
-People get the same handle in DevTools once the page is paired: `__reins__.actions()`, `__reins__.run('set-locale', { locale: 'ar' })`, `__reins__.state()`, `__reins__.network()`, `__reins__.perf()`, `__reins__.dom({ panel: 'checkout' })`. Each action run also records a `performance.measure` entry.
+People get the same handle in DevTools once the page is paired: `__reins__.actions()`, `__reins__.run('set-locale', { locale: 'ar' })`, `__reins__.state()`, `__reins__.network()`, `__reins__.perf()`, `await __reins__.dom({ panel: 'checkout' })`. Each action run also records a `performance.measure` entry.
 
 If the browser supports [WebMCP](https://github.com/webmachinelearning/webmcp) (`navigator.modelContext` or `document.modelContext`), reins also registers each action as a WebMCP tool. Read-only actions get `readOnlyHint`. Consequential ones get `destructiveHint` and a required `confirm` input.
 

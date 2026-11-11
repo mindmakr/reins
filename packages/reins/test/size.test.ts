@@ -11,16 +11,28 @@ async function bundle(name: string, external: string[] = []) {
   return out.outputFiles[0].text;
 }
 
+// Files the core has already loaded: an entry that also imports one shares that copy, so it is not counted again.
+const SHARED = ['./redact.js'];
+
 describe('size', () => {
   it('core is under 5 KB min+gzip', async () => {
-    const code = await bundle('index');
+    // The DOM inspector is a file of its own that the core loads on the first `dom()` call, so it is counted apart.
+    const code = await bundle('index', ['./dom.js']);
     const gz = gzipSync(code).length;
     console.log(`reins core: ${code.length} B min, ${gz} B min+gzip`);
+    expect(code).toContain('import("./dom.js")');
     expect(gz).toBeLessThan(5 * 1024);
   });
 
+  it('the DOM inspector, loaded on demand, is under 1 KB min+gzip', async () => {
+    const code = await bundle('dom', SHARED);
+    const gz = gzipSync(code).length;
+    console.log(`reins dom inspector: ${code.length} B min, ${gz} B min+gzip`);
+    expect(gz).toBeLessThan(1024);
+  });
+
   it('record entry is under 6 KB min+gzip (core excluded)', async () => {
-    const code = await bundle('record', ['reins']);
+    const code = await bundle('record', ['reins', ...SHARED]);
     const gz = gzipSync(code).length;
     console.log(`reins/record: ${code.length} B min, ${gz} B min+gzip`);
     expect(gz).toBeLessThan(6 * 1024);

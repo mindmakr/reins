@@ -3,6 +3,7 @@
 // (`?reins=record` in the URL via `recordFromUrl()`, or a button that calls `startRecording()`).
 // Production builds swap this file for `reins/record-stub`; it carries the dev marker so `reins verify` catches it.
 import { devEnabled, reins, VERSION, type Allow } from 'reins';
+import { inspect } from './dom.js';
 import { buildSession, renderMarkdown, type SessionData } from './report.js';
 
 const MARKER = '__REINS_DEV_ONLY__';
@@ -78,7 +79,7 @@ export const isRecording = () => on;
 /** Builds the session report from what record mode has collected so far. */
 export function collectSession(title = 'tester session'): SessionData {
   const dom: Record<string, any> = {};
-  for (const id of reins.panels()) dom[id] = reins.dom({ panel: id, depth: 8, maxNodes: 400 });
+  for (const id of reins.panels()) dom[id] = inspect(globalThis, { panel: id, depth: 8, maxNodes: 400 });
   let state: Record<string, any> | null = null;
   try {
     state = reins.snapshot();
