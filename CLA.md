@@ -28,6 +28,18 @@ You give the same people a perpetual, worldwide, non-exclusive, royalty-free, ir
 
 You provide the contribution "as is", with no warranty. The project owner does not have to use it.
 
+## 6. What people make with the software is theirs
+
+Anything a person or organisation creates, directly or indirectly, with the software (your contribution included), with Coordinator, or by following the Lucid Coding principles belongs to them. Neither you nor the project owner claims ownership of it or any other right in it.
+
+The exception is a change or an addition to reins, to Coordinator or to the Lucid Coding materials themselves. That is a contribution, not an outcome of using the tools: this agreement and the project's licences cover it. The full terms are in [DISCLAIMER.md](DISCLAIMER.md), section 1.
+
+## 7. No warranty, no guarantee and no liability
+
+The project is offered to everyone under [DISCLAIMER.md](DISCLAIMER.md): no warranty or guarantee is given or assumed, and nobody is liable for loss of or damage to property, life or reputation, for a security breach, or for any defect, security gap or failure the software did not find.
+
+You agree that this notice covers your contribution. You also agree that, to the fullest extent the law allows, the project owner is not liable to you for anything arising from the project, or from how your contribution is used, changed or left out.
+
 ## How to agree
 
 Tick the contributor agreement box in the pull request description, or write in the pull request: "I have read CLA.md and I agree to it." One agreement covers all your contributions to this repository.
