@@ -317,5 +317,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). For coding agents adding reins to an app
 [MIT](LICENSE) © Asif Raja, by [mindmakr](https://github.com/mindmakr). Use it, change it and ship with it, in personal and commercial projects.
 
 - **Names:** "reins" and "Lucid Coding" are covered by the [trademark policy](TRADEMARKS.md). The code is free to use; the names are not free to reuse for another product.
+- **Your work and the risk:** what you make with reins is yours, and the software comes with no warranty or guarantee and no liability. Read the [notice](DISCLAIMER.md) before you rely on it.
 - **Contributing:** pull requests are welcome under the [contributor agreement](CLA.md).
 - **Sponsoring:** use the Sponsor button on this repository, or the [sponsor or partner form](https://github.com/mindmakr/coordinator/issues/new?template=sponsor-or-partner.yml).
