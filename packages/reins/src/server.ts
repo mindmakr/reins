@@ -1,4 +1,4 @@
-// Node-side helpers shared by the build plugins (reins/vite, reins/next, reins/metro).
+// Node-side helpers shared by the build plugins (@mindmakr/reins/vite, @mindmakr/reins/next, @mindmakr/reins/metro).
 // Never imported by app code.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

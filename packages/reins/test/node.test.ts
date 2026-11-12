@@ -11,7 +11,7 @@ import { createReinsNode, nodeEnabled, TRACE_HEADER } from '../src/node.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-describe('reins/node + bridge server tools + report CLI', () => {
+describe('@mindmakr/reins/node + bridge server tools + report CLI', () => {
   const dirs: string[] = [];
   afterEach(() => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -206,7 +206,7 @@ describe('reins/node + bridge server tools + report CLI', () => {
   });
 });
 
-describe('reins/node records nothing before pairing', () => {
+describe('@mindmakr/reins/node records nothing before pairing', () => {
   const noBridge = { tokenFile: join(tmpdir(), 'reins-no-such-token-file'), reconnect: false };
   const fakeReq = () => ({ method: 'GET', url: '/api/x', headers: {} });
   const fakeRes = () => ({ statusCode: 200, once: (_e: string, fn: () => void) => setTimeout(fn, 0) });

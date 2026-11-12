@@ -1,5 +1,5 @@
 import { relative } from 'node:path';
-import { findings, mergeServers, renderMarkdown, withTimeline } from 'reins/report';
+import { findings, mergeServers, renderMarkdown, withTimeline } from '@mindmakr/reins/report';
 import type { Audit } from './audit.js';
 import type { Client, Hub } from './hub.js';
 import { gatherSession, serverReports, writeSession } from './session.js';
@@ -16,7 +16,7 @@ const obj = (properties: Record<string, unknown> = {}, required: string[] = []) 
 export const TOOLS: Tool[] = [
   {
     name: 'reins_list_actions',
-    description: 'List the actions (with input schemas), state sources and panels the paired app registered, plus the actions of any paired reins/node server. Call this first.',
+    description: 'List the actions (with input schemas), state sources and panels the paired app registered, plus the actions of any paired @mindmakr/reins/node server. Call this first.',
     inputSchema: obj(),
   },
   {
@@ -53,7 +53,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'reins_perf',
     description:
-      'Page lifecycle timings (TTFB, FCP, DOM interactive, load), component/panel mount times and render counts, API call latency stats, and a unified millisecond timeline. With a paired reins/node server it adds a server section and the server half of each API call (kind "server", with db time and spans), joined by trace id.',
+      'Page lifecycle timings (TTFB, FCP, DOM interactive, load), component/panel mount times and render counts, API call latency stats, and a unified millisecond timeline. With a paired @mindmakr/reins/node server it adds a server section and the server half of each API call (kind "server", with db time and spans), joined by trace id.',
     inputSchema: obj(),
   },
   {
@@ -69,7 +69,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'reins_server',
     description:
-      'The server side (needs reins/node in the dev server): recent requests with their spans (db.* time) and outbound fetches, trace ids that match reins_network, the slowest routes, and runtime stats (event-loop delay p50/p99/max, memory). Call it when an API call is slow or fails.',
+      'The server side (needs @mindmakr/reins/node in the dev server): recent requests with their spans (db.* time) and outbound fetches, trace ids that match reins_network, the slowest routes, and runtime stats (event-loop delay p50/p99/max, memory). Call it when an API call is slow or fails.',
     inputSchema: obj({
       limit: { type: 'number', description: 'Requests to return, newest last (default 50)' },
       route: { type: 'string', description: 'Only requests whose route or URL contains this' },
@@ -136,7 +136,7 @@ async function perfJoined(hub: Hub): Promise<unknown> {
 }
 
 async function serverTool(hub: Hub, args: Record<string, any>): Promise<unknown> {
-  if (!hub.nodeClients().length) throw new Error('No server is paired. In the dev server, call reinsNode.connect() from reins/node (dev only) and add reinsNode.middleware().');
+  if (!hub.nodeClients().length) throw new Error('No server is paired. In the dev server, call reinsNode.connect() from @mindmakr/reins/node (dev only) and add reinsNode.middleware().');
   const server = mergeServers(await serverReports(hub));
   if (!server) throw new Error('the paired server did not answer');
   const limit = typeof args.limit === 'number' && args.limit > 0 ? args.limit : 50;

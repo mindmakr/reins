@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createReins } from 'reins';
+import { createReins } from '@mindmakr/reins';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { parseArgs, portInUse } from '../src/bridge/args.js';

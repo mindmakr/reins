@@ -1,5 +1,5 @@
 // Session reports: pure, isomorphic functions shared by the bridge (`reins_report`, `npx reins report`)
-// and by record mode (`reins/record`). No Node or DOM imports here.
+// and by record mode (`@mindmakr/reins/record`). No Node or DOM imports here.
 import type {
   ActionInfo,
   ApiCall,

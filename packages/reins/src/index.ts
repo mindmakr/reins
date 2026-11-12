@@ -190,7 +190,7 @@ export function createReins(g: any = globalThis) {
       if (!c.status || c.status >= 400) failedCalls++;
       if (!slowest || c.ms > slowest.ms) slowest = c;
     }
-    // The timeline is built from these parts by `withTimeline` in `reins/report`, in the bridge and in record mode.
+    // The timeline is built from these parts by `withTimeline` in `@mindmakr/reins/report`, in the bridge and in record mode.
     return {
       lifecycle,
       components,
@@ -254,7 +254,7 @@ export function createReins(g: any = globalThis) {
     off(rec ? 2 : 0);
   }
 
-  /** Record mode (`reins/record`): starts the buffers without a bridge, in dev builds only. `false` stops it. */
+  /** Record mode (`@mindmakr/reins/record`): starts the buffers without a bridge, in dev builds only. `false` stops it. */
   const record = (o?: ConnectOptions | false): boolean =>
     ((rec = o !== false && devEnabled()), paired || (rec ? ((opts = o || opts), start()) : off(0)), rec);
 

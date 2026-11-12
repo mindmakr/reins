@@ -1,8 +1,8 @@
-// reins/record: tester record mode. Browser only. Works without a bridge, but only in builds where reins
+// @mindmakr/reins/record: tester record mode. Browser only. Works without a bridge, but only in builds where reins
 // is enabled (dev, or a private staging build with REINS_ENABLE=1) and only after the tester opts in
 // (`?reins=record` in the URL via `recordFromUrl()`, or a button that calls `startRecording()`).
-// Production builds swap this file for `reins/record-stub`; it carries the dev marker so `reins verify` catches it.
-import { devEnabled, reins, VERSION, type Allow } from 'reins';
+// Production builds swap this file for `@mindmakr/reins/record-stub`; it carries the dev marker so `reins verify` catches it.
+import { devEnabled, reins, VERSION, type Allow } from '@mindmakr/reins';
 import { inspect } from './dom.js';
 import { buildSession, renderMarkdown, type SessionData } from './report.js';
 

@@ -32,15 +32,15 @@ describe('size', () => {
   });
 
   it('record entry is under 6 KB min+gzip (core excluded)', async () => {
-    const code = await bundle('record', ['reins', ...SHARED]);
+    const code = await bundle('record', ['@mindmakr/reins', ...SHARED]);
     const gz = gzipSync(code).length;
-    console.log(`reins/record: ${code.length} B min, ${gz} B min+gzip`);
+    console.log(`@mindmakr/reins/record: ${code.length} B min, ${gz} B min+gzip`);
     expect(gz).toBeLessThan(6 * 1024);
   });
 
   it('core and record carry the dev marker; their stubs do not', async () => {
     expect(await bundle('index')).toContain('__REINS_DEV_ONLY__');
-    expect(await bundle('record', ['reins'])).toContain('__REINS_DEV_ONLY__');
+    expect(await bundle('record', ['@mindmakr/reins'])).toContain('__REINS_DEV_ONLY__');
     expect(await bundle('stub')).not.toContain('__REINS_DEV_ONLY__');
     expect(await bundle('record-stub')).not.toContain('__REINS_DEV_ONLY__');
   });

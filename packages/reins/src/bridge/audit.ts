@@ -1,6 +1,6 @@
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { redactDeep } from 'reins';
+import { redactDeep } from '@mindmakr/reins';
 import { reinsDir } from './token.js';
 
 export interface AuditEntry {

@@ -1,5 +1,5 @@
 {
-  "name": "reins",
+  "name": "@mindmakr/reins",
   "version": "0.1.0",
   "description": "Give coding agents the reins: a tiny dev-only library to drive, inspect and debug your web and Expo apps",
   "license": "MIT",

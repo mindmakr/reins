@@ -1,13 +1,13 @@
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import { VERSION } from 'reins';
-import { buildSession, mergeServers, renderMarkdown, sessionBase, type AuditLine, type SessionData } from 'reins/report';
-import type { ServerReport } from 'reins';
+import { VERSION } from '@mindmakr/reins';
+import { buildSession, mergeServers, renderMarkdown, sessionBase, type AuditLine, type SessionData } from '@mindmakr/reins/report';
+import type { ServerReport } from '@mindmakr/reins';
 import type { Hub } from './hub.js';
 import type { ToolContext } from './tools.js';
 import { reinsDir } from './token.js';
 
-/** Asks every paired `reins/node` server for its report. Servers that do not answer are skipped. */
+/** Asks every paired `@mindmakr/reins/node` server for its report. Servers that do not answer are skipped. */
 export async function serverReports(hub: Hub): Promise<ServerReport[]> {
   const all = await Promise.all(hub.nodeClients().map((c) => hub.request('server', {}, c).catch(() => null)));
   return all.filter(Boolean) as ServerReport[];

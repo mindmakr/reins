@@ -1,4 +1,4 @@
-// reins/node: dev-only backend instrumentation for Node servers. Node only: never import it from browser code.
+// @mindmakr/reins/node: dev-only backend instrumentation for Node servers. Node only: never import it from browser code.
 // It pairs with the bridge like the browser client does, records inbound requests, spans and outbound fetches,
 // and serves them to `reins_server`, `reins_perf` and `reins_report`.
 // Like the browser core, it records nothing until the bridge has accepted its token (or `standalone` says otherwise).

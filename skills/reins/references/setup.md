@@ -15,26 +15,26 @@ Before touching files, detect:
 3. **Auth, locale and theme hooks**: find where sign-in, language/locale switching (`i18n`, `setLocale`), and theme switching (`setTheme`) live.
 4. **Key screens / panels**: identify 2–5 high-value screens or views (for example `home`, `login`, `dashboard`, `settings`, `checkout`) to wrap in `<ReinsPanel id="...">`.
 
-## Step 2: Install `reins`
+## Step 2: Install `@mindmakr/reins`
 
-Install the single package as a dev dependency (or via `npx expo install reins` in Expo):
+Install the single package as a dev dependency (or via `npx expo install @mindmakr/reins` in Expo):
 
 ```sh
-npm i -D reins
+npm i -D @mindmakr/reins
 ```
 
-(Use `pnpm add -D reins`, `yarn add -D reins`, or `bun add -d reins` to match the repo's lockfile.)
+(Use `pnpm add -D @mindmakr/reins`, `yarn add -D @mindmakr/reins`, or `bun add -d reins` to match the repo's lockfile.)
 
 ## Step 3: Wire the build plugin and token endpoint
 
-Wire the build plugin **before** connecting the client so production builds always swap `reins` for `reins/stub`.
+Wire the build plugin **before** connecting the client so production builds always swap `@mindmakr/reins` for `@mindmakr/reins/stub`.
 
 ### Vite (`vite.config.ts`)
 
 ```ts
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import reins from 'reins/vite';
+import reins from '@mindmakr/reins/vite';
 
 export default defineConfig({
   plugins: [reins(), react()],
@@ -46,7 +46,7 @@ export default defineConfig({
 Wrap `nextConfig` in `next.config.mjs` (or `next.config.ts`):
 
 ```js
-import { withReins } from 'reins/next';
+import { withReins } from '@mindmakr/reins/next';
 
 export default withReins({
   // existing Next.js config
@@ -56,7 +56,7 @@ export default withReins({
 Create `app/api/reins-token/route.ts` (or `src/app/api/reins-token/route.ts`):
 
 ```ts
-export { GET } from 'reins/next/token-route';
+export { GET } from '@mindmakr/reins/next/token-route';
 export const dynamic = 'force-dynamic';
 ```
 
@@ -64,7 +64,7 @@ export const dynamic = 'force-dynamic';
 
 ```js
 const { getDefaultConfig } = require('expo/metro-config');
-const { withReins } = require('reins/metro');
+const { withReins } = require('@mindmakr/reins/metro');
 
 module.exports = withReins(getDefaultConfig(__dirname));
 ```
@@ -74,8 +74,8 @@ module.exports = withReins(getDefaultConfig(__dirname));
 ### Vite / React entry (`src/main.tsx` or `src/index.tsx`)
 
 ```ts
-import { reins } from 'reins';
-import { zustand, reactQuery, routerLocation } from 'reins/adapters';
+import { reins } from '@mindmakr/reins';
+import { zustand, reactQuery, routerLocation } from '@mindmakr/reins/adapters';
 
 if (import.meta.env.DEV) {
   // Register state stores discovered in Step 1:
@@ -91,8 +91,8 @@ if (import.meta.env.DEV) {
 ```tsx
 'use client';
 import { useEffect } from 'react';
-import { reins } from 'reins';
-import { routerLocation } from 'reins/adapters';
+import { reins } from '@mindmakr/reins';
+import { routerLocation } from '@mindmakr/reins/adapters';
 
 export function ReinsBootstrap() {
   useEffect(() => {
@@ -108,19 +108,19 @@ export function ReinsBootstrap() {
 ### Expo entry (`App.tsx` or `app/_layout.tsx`)
 
 ```tsx
-import { connectExpo } from 'reins/expo';
+import { connectExpo } from '@mindmakr/reins/expo';
 
 if (__DEV__) {
   connectExpo();
 }
 ```
 
-### Optional: Node backend instrumentation (`reins/node`)
+### Optional: Node backend instrumentation (`@mindmakr/reins/node`)
 
-If the project runs a Node API server (Express, Connect, Fastify, or `http.createServer`), wire `reins/node` in dev mode so `reins_server`, `reins_perf` and `reins_report` join backend DB spans and event-loop lag with browser fetches via `x-reins-trace`:
+If the project runs a Node API server (Express, Connect, Fastify, or `http.createServer`), wire `@mindmakr/reins/node` in dev mode so `reins_server`, `reins_perf` and `reins_report` join backend DB spans and event-loop lag with browser fetches via `x-reins-trace`:
 
 ```ts
-import { reinsNode } from 'reins/node';
+import { reinsNode } from '@mindmakr/reins/node';
 
 if (process.env.NODE_ENV !== 'production') {
   void reinsNode.connect({ meta: { name: 'api' } });
@@ -131,12 +131,12 @@ if (process.env.NODE_ENV !== 'production') {
 const rows = await reinsNode.span('db.invoices.select', () => db.query('SELECT ...'));
 ```
 
-### Optional: Tester session export (`reins/record`)
+### Optional: Tester session export (`@mindmakr/reins/record`)
 
-To let human QA testers record a session (`?reins=record`) and download `.md` + `.json` diagnostics in dev or private staging (`REINS_ENABLE=1`), add `recordFromUrl()` in the browser entry (`reins/vite`, `reins/next`, and `reins/metro` swap `reins/record` for `reins/record-stub` in production builds):
+To let human QA testers record a session (`?reins=record`) and download `.md` + `.json` diagnostics in dev or private staging (`REINS_ENABLE=1`), add `recordFromUrl()` in the browser entry (`@mindmakr/reins/vite`, `@mindmakr/reins/next`, and `@mindmakr/reins/metro` swap `@mindmakr/reins/record` for `@mindmakr/reins/record-stub` in production builds):
 
 ```ts
-import { recordFromUrl } from 'reins/record';
+import { recordFromUrl } from '@mindmakr/reins/record';
 
 if (import.meta.env.DEV) {
   recordFromUrl();
@@ -145,7 +145,7 @@ if (import.meta.env.DEV) {
 
 ## Step 5: Register high-value actions and `<ReinsPanel>` boundaries
 
-In the app's root shell or key feature components, import `useReinsAction`, `useReinsState` and `ReinsPanel` from `reins/react` (or `reins/expo` on React Native):
+In the app's root shell or key feature components, import `useReinsAction`, `useReinsState` and `ReinsPanel` from `@mindmakr/reins/react` (or `@mindmakr/reins/expo` on React Native):
 
 - **Locale & theme switching**:
   ```tsx

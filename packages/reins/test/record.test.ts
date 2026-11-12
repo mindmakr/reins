@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { reins } from 'reins';
+import { reins } from '@mindmakr/reins';
 import { collectSession, exportSession, isRecording, recordFromUrl, startRecording, stopRecording } from '../src/record.js';
 import * as stub from '../src/record-stub.js';
 
@@ -17,7 +17,7 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-describe('reins/record', () => {
+describe('@mindmakr/reins/record', () => {
   it('needs the tester to opt in through the URL', () => {
     expect(recordFromUrl()).toBe(false);
     expect(isRecording()).toBe(false);

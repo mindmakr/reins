@@ -1,5 +1,5 @@
-// Production stand-in for `reins`. Same API, does nothing, holds no dev marker.
-// The Vite, Next and Expo plugins swap `reins` for this file in production builds.
+// Production stand-in for `@mindmakr/reins`. Same API, does nothing, holds no dev marker.
+// The Vite, Next and Expo plugins swap `@mindmakr/reins` for this file in production builds.
 export * from './types.js';
 
 const noop = () => {};

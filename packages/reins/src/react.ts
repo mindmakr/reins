@@ -1,5 +1,5 @@
 import { createElement, useEffect, useRef, type HTMLAttributes, type ReactNode } from 'react';
-import { reins, type Action } from 'reins';
+import { reins, type Action } from '@mindmakr/reins';
 
 /**
  * Registers an action while the component is mounted.

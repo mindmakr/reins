@@ -26,7 +26,7 @@ export function ring<T>(size: number): Ring<T> {
 
 /**
  * Wraps `fetch` to record redacted calls. While `trace()` is true, same-origin calls also carry an
- * `x-reins-trace` id, so `reins/node` can join the server half. Cross-origin calls never get it.
+ * `x-reins-trace` id, so `@mindmakr/reins/node` can join the server half. Cross-origin calls never get it.
  */
 export function patchNetwork(g: any, record: (e: NetEntry) => void, { queryKeys, headers, bodyKeys }: Allow, trace: () => any): () => void {
   const now = () => R(g.performance?.now?.() ?? Date.now()),

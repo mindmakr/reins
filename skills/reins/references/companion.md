@@ -35,6 +35,6 @@ In Claude Code:
 
 Then in your project:
 
-1. Run `/reins:setup` once to wire `reins`, its build plugin, `reins verify`, and `.mcp.json`.
+1. Run `/reins:setup` once to wire `@mindmakr/reins`, its build plugin, `reins verify`, and `.mcp.json`.
 2. Run `/coordinator:init` once to record the project's commands, locales, panels and reins actions in `COORDINATOR.md`.
 3. Run `/coordinator:run <task>` to build and verify features unattended through builders and blind critics that drive your app through **reins**.

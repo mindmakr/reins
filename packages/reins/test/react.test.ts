@@ -2,8 +2,8 @@
 import { act, createElement, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
-import { reins } from 'reins';
-import { ReinsPanel, useReinsAction, useReinsState } from 'reins/react';
+import { reins } from '@mindmakr/reins';
+import { ReinsPanel, useReinsAction, useReinsState } from '@mindmakr/reins/react';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -24,7 +24,7 @@ afterEach(() => {
 
 const panelPerf = (id: string) => reins.perf().components.find((c) => c.id === id);
 
-describe('reins/react', () => {
+describe('@mindmakr/reins/react', () => {
   it('renders a data-reins div and passes other props through', () => {
     const { host } = mount(createElement(ReinsPanel, { id: 'checkout', className: 'box' }, 'hi'));
     const div = host.querySelector('[data-reins="checkout"]')!;
