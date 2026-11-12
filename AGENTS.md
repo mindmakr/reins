@@ -4,9 +4,9 @@ This page is for coding agents asked to add reins to a web or Expo app, or to wo
 
 ## Adding reins to an app
 
-1. **Install the single dev package** (`npm i -D reins`, or `npx expo install reins` in Expo). It provides `reins`, `reins/react`, `reins/expo`, `reins/adapters`, `reins/vite`, `reins/next`, `reins/next/token-route`, `reins/metro`, `npx reins bridge` and `npx reins verify`.
-2. **Add the build plugin first** (`reins/vite`, `reins/next` or `reins/metro`). It serves the pairing token in dev and swaps `reins` for `reins/stub` in production. Without it, production builds contain reins.
-3. **Call `reins.connect()` once, in dev only**, behind `import.meta.env.DEV`, `process.env.NODE_ENV !== 'production'` or `__DEV__`. For Next, pass `tokenUrl: '/api/reins-token'` and add the token route (`reins/next/token-route`). For Expo, call `connectExpo()` from `reins/expo`.
+1. **Install the single dev package** (`npm i -D @mindmakr/reins`, or `npx expo install @mindmakr/reins` in Expo). It provides `@mindmakr/reins`, `@mindmakr/reins/react`, `@mindmakr/reins/expo`, `@mindmakr/reins/adapters`, `@mindmakr/reins/vite`, `@mindmakr/reins/next`, `@mindmakr/reins/next/token-route`, `@mindmakr/reins/metro`, `npx reins bridge` and `npx reins verify`.
+2. **Add the build plugin first** (`@mindmakr/reins/vite`, `@mindmakr/reins/next` or `@mindmakr/reins/metro`). It serves the pairing token in dev and swaps `@mindmakr/reins` for `@mindmakr/reins/stub` in production. Without it, production builds contain reins.
+3. **Call `reins.connect()` once, in dev only**, behind `import.meta.env.DEV`, `process.env.NODE_ENV !== 'production'` or `__DEV__`. For Next, pass `tokenUrl: '/api/reins-token'` and add the token route (`@mindmakr/reins/next/token-route`). For Expo, call `connectExpo()` from `@mindmakr/reins/expo`.
 4. **Add `reins verify <build dir>` (or `reins-verify-bundle <build dir>`) after the production build** in the build script and in CI.
 5. **Add `.reins/` to `.gitignore`.** The bridge also writes `.reins/.gitignore`, but say it in the project file too.
 6. **Register the MCP server** (`npx reins bridge`) in the project's agent config, such as `.mcp.json`.
@@ -28,9 +28,9 @@ Rules for actions:
 - **Do not put secrets in actions.** Read test credentials from dev-only env vars. Never hardcode them, and never return tokens from `run`.
 - **Keep actions small and idempotent where you can**, so an agent can retry them.
 
-**State: small, named snapshots.** Register the stores the agent needs to check results (`zustand(store)`, `redux(store)`, `reactQuery(client)`, `routerLocation()` from `reins/adapters`, or a function). Keep secrets out of state sources. Redaction works on key names only.
+**State: small, named snapshots.** Register the stores the agent needs to check results (`zustand(store)`, `redux(store)`, `reactQuery(client)`, `routerLocation()` from `@mindmakr/reins/adapters`, or a function). Keep secrets out of state sources. Redaction works on key names only.
 
-**Panels: the screens worth comparing with designs.** Wrap them in `<ReinsPanel id="checkout">` from `reins/react` (web) or `<ReinsPanel id="checkout">` from `reins/expo` (a View with `testID`). Use stable, kebab-case ids that match screen names. Each `<ReinsPanel id>` also records its mount timestamp (`mountedAtMs`), latest render timestamp (`lastRenderMs`), and render count (`renders`) for `reins_perf`, and can be inspected on demand with `reins_dom({ panel: id })`.
+**Panels: the screens worth comparing with designs.** Wrap them in `<ReinsPanel id="checkout">` from `@mindmakr/reins/react` (web) or `<ReinsPanel id="checkout">` from `@mindmakr/reins/expo` (a View with `testID`). Use stable, kebab-case ids that match screen names. Each `<ReinsPanel id>` also records its mount timestamp (`mountedAtMs`), latest render timestamp (`lastRenderMs`), and render count (`renders`) for `reins_perf`, and can be inspected on demand with `reins_dom({ panel: id })`.
 
 ## Staging
 

@@ -156,7 +156,7 @@ export class Hub {
     socket.on('error', () => {});
   }
 
-  /** Whether a client is a `reins/node` server rather than a page or an app. */
+  /** Whether a client is a `@mindmakr/reins/node` server rather than a page or an app. */
   static isNode(c: Client): boolean {
     return !!c.meta && c.meta.platform === 'node';
   }
@@ -166,7 +166,7 @@ export class Hub {
     return this.clients.filter((c) => !Hub.isNode(c)).pop();
   }
 
-  /** Paired `reins/node` servers, oldest first. */
+  /** Paired `@mindmakr/reins/node` servers, oldest first. */
   nodeClients(): Client[] {
     return this.clients.filter(Hub.isNode);
   }

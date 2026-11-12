@@ -64,7 +64,7 @@
         <li>Web + Expo + Node</li>
         <li>MCP + WebMCP + Session Reports</li>
       </ul>
-      <p class="lede">Stop making agents click by pixels and guess what happened. Register named actions, expose redacted state, and mark the panels worth snapping—all in one package (<code>npm i -D reins</code>) with an agent skill that wires it for you.</p>
+      <p class="lede">Stop making agents click by pixels and guess what happened. Register named actions, expose redacted state, and mark the panels worth snapping—all in one package (<code>npm i -D @mindmakr/reins</code>) with an agent skill that wires it for you.</p>
       <div class="ctas">
         <a class="btn" href="#setup">Install in 1 command</a>
         <a class="btn ghost" href="https://github.com/mindmakr/reins-examples">See live examples</a>
@@ -135,9 +135,9 @@
         <!-- PROD ROW -->
         <text x="24" y="252" class="t-tag">PRODUCTION BUILD GATE</text>
         <rect x="20" y="264" width="1080" height="58" class="bx"/>
-        <text x="40" y="298" class="t-mono">reins/vite · reins/next · reins/metro</text>
+        <text x="40" y="298" class="t-mono">@mindmakr/reins/vite · @mindmakr/reins/next · @mindmakr/reins/metro</text>
         <text x="380" y="298" class="t-sub">→ aliases reins to</text>
-        <text x="515" y="298" class="t-mono">reins/stub (0 dev code)</text>
+        <text x="515" y="298" class="t-mono">@mindmakr/reins/stub (0 dev code)</text>
         <text x="710" y="298" class="t-sub">→ verified by</text>
         <text x="815" y="298" class="t-mono">reins verify dist</text>
         <text x="985" y="298" class="t-tag">✓ CLEAN BUNDLE</text>
@@ -190,13 +190,13 @@
             <th scope="row">Performance, backend DB spans &amp; session reports</th>
             <td>Manual browser trace files; blind to backend N+1 queries and event-loop lag.</td>
             <td>Not supported.</td>
-            <td class="hi"><code>reins_perf</code> + <code>reins/node</code> (<code>reins_server</code>) join frontend calls with server <code>db.*</code> spans via <code>x-reins-trace</code>; <code>reins_report</code> &amp; <code>reins/record</code> export Markdown/JSON reports and <code>reins report --compare</code> diffs.</td>
+            <td class="hi"><code>reins_perf</code> + <code>@mindmakr/reins/node</code> (<code>reins_server</code>) join frontend calls with server <code>db.*</code> spans via <code>x-reins-trace</code>; <code>reins_report</code> &amp; <code>@mindmakr/reins/record</code> export Markdown/JSON reports and <code>reins report --compare</code> diffs.</td>
           </tr>
           <tr>
             <th scope="row">React Native &amp; Expo</th>
             <td>Requires separate native UI hierarchy scrapers.</td>
             <td>Browser only.</td>
-            <td class="hi">First-class <code>reins/expo</code> and <code>reins/metro</code> over <code>127.0.0.1:7357</code>.</td>
+            <td class="hi">First-class <code>@mindmakr/reins/expo</code> and <code>@mindmakr/reins/metro</code> over <code>127.0.0.1:7357</code>.</td>
           </tr>
           <tr>
             <th scope="row">Production safety</th>
@@ -213,7 +213,7 @@
 <section id="setup" aria-labelledby="setup-h">
   <div class="wrap">
     <h2 id="setup-h" class="sec-h">One package. Or let your agent wire it in one command.</h2>
-    <p class="sec-sub">Everything—core, React &amp; Expo hooks, state adapters, Vite/Next/Metro plugins, the MCP bridge, and the bundle verifier—ships in a single dev dependency: <code>npm i -D reins</code>.</p>
+    <p class="sec-sub">Everything—core, React &amp; Expo hooks, state adapters, Vite/Next/Metro plugins, the MCP bridge, and the bundle verifier—ships in a single dev dependency: <code>npm i -D @mindmakr/reins</code>.</p>
 
     <div class="setup-top">
       <div class="setup-box primary">
@@ -232,8 +232,8 @@
         <h3>Install the single npm package + MCP server</h3>
         <p>Prefer to wire it by hand? Install <code>reins</code> once and add <code>npx reins bridge</code> to your project's <code>.mcp.json</code>:</p>
         <div class="cmd">
-          <pre><code>npm i -D reins</code></pre>
-          <button type="button" class="copy" data-copy="npm i -D reins">Copy</button>
+          <pre><code>npm i -D @mindmakr/reins</code></pre>
+          <button type="button" class="copy" data-copy="npm i -D @mindmakr/reins">Copy</button>
         </div>
         <div class="cmd" style="margin-bottom:0">
           <pre><code>{
@@ -260,27 +260,27 @@
           <pre><code>// vite.config.ts
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import reins from 'reins/vite';
+import reins from '@mindmakr/reins/vite';
 
 export default defineConfig({ plugins: [reins(), react()] });
 
 // src/main.tsx
-import { reins } from 'reins';
-import { zustand } from 'reins/adapters';
+import { reins } from '@mindmakr/reins';
+import { zustand } from '@mindmakr/reins/adapters';
 import { useAppStore } from './store';
 
 if (import.meta.env.DEV) {
   reins.state('app', zustand(useAppStore));
   reins.connect();
 }</code></pre>
-          <button type="button" class="copy" data-copy="import { defineConfig } from 'vite';&#10;import react from '@vitejs/plugin-react';&#10;import reins from 'reins/vite';&#10;&#10;export default defineConfig({ plugins: [reins(), react()] });">Copy</button>
+          <button type="button" class="copy" data-copy="import { defineConfig } from 'vite';&#10;import react from '@vitejs/plugin-react';&#10;import reins from '@mindmakr/reins/vite';&#10;&#10;export default defineConfig({ plugins: [reins(), react()] });">Copy</button>
         </div>
         <p>Build script gate: <code>"build": "vite build &amp;&amp; reins verify dist"</code></p>
       </div>
       <div class="code-card">
         <h4>2. Register actions &amp; panels <span>src/Settings.tsx</span></h4>
         <div class="cmd">
-          <pre><code>import { useReinsAction, ReinsPanel } from 'reins/react';
+          <pre><code>import { useReinsAction, ReinsPanel } from '@mindmakr/reins/react';
 
 export function Settings() {
   const { setLocale } = useI18n();
@@ -296,7 +296,7 @@ export function Settings() {
   });
   return &lt;ReinsPanel id="settings"&gt;…&lt;/ReinsPanel&gt;;
 }</code></pre>
-          <button type="button" class="copy" data-copy="import { useReinsAction, ReinsPanel } from 'reins/react';">Copy</button>
+          <button type="button" class="copy" data-copy="import { useReinsAction, ReinsPanel } from '@mindmakr/reins/react';">Copy</button>
         </div>
         <p>Also exposes <code>window.__reins__</code> in browser DevTools and registers WebMCP tools when paired.</p>
       </div>
@@ -308,13 +308,13 @@ export function Settings() {
         <h4>1. Next config &amp; token route <span>next.config.mjs + route.ts</span></h4>
         <div class="cmd">
           <pre><code>// next.config.mjs
-import { withReins } from 'reins/next';
+import { withReins } from '@mindmakr/reins/next';
 export default withReins({ /* your Next config */ });
 
 // app/api/reins-token/route.ts
-export { GET } from 'reins/next/token-route';
+export { GET } from '@mindmakr/reins/next/token-route';
 export const dynamic = 'force-dynamic';</code></pre>
-          <button type="button" class="copy" data-copy="import { withReins } from 'reins/next';&#10;export default withReins({});">Copy</button>
+          <button type="button" class="copy" data-copy="import { withReins } from '@mindmakr/reins/next';&#10;export default withReins({});">Copy</button>
         </div>
         <p>Works with both Webpack and Turbopack. Build gate: <code>"build": "next build &amp;&amp; reins verify .next/static"</code></p>
       </div>
@@ -323,7 +323,7 @@ export const dynamic = 'force-dynamic';</code></pre>
         <div class="cmd">
           <pre><code>'use client';
 import { useEffect } from 'react';
-import { reins } from 'reins';
+import { reins } from '@mindmakr/reins';
 
 export function Reins() {
   useEffect(() => {
@@ -333,9 +333,9 @@ export function Reins() {
   }, []);
   return null;
 }</code></pre>
-          <button type="button" class="copy" data-copy="'use client';&#10;import { useEffect } from 'react';&#10;import { reins } from 'reins';&#10;&#10;export function Reins() {&#10;  useEffect(() =&gt; {&#10;    if (process.env.NODE_ENV !== 'production') reins.connect({ tokenUrl: '/api/reins-token' });&#10;  }, []);&#10;  return null;&#10;}">Copy</button>
+          <button type="button" class="copy" data-copy="'use client';&#10;import { useEffect } from 'react';&#10;import { reins } from '@mindmakr/reins';&#10;&#10;export function Reins() {&#10;  useEffect(() =&gt; {&#10;    if (process.env.NODE_ENV !== 'production') reins.connect({ tokenUrl: '/api/reins-token' });&#10;  }, []);&#10;  return null;&#10;}">Copy</button>
         </div>
-        <p>In components, import <code>useReinsAction</code>, <code>useReinsState</code> and <code>ReinsPanel</code> from <code>reins/react</code>.</p>
+        <p>In components, import <code>useReinsAction</code>, <code>useReinsState</code> and <code>ReinsPanel</code> from <code>@mindmakr/reins/react</code>.</p>
       </div>
     </div>
 
@@ -345,17 +345,17 @@ export function Reins() {
         <h4>1. Metro config <span>metro.config.js</span></h4>
         <div class="cmd">
           <pre><code>const { getDefaultConfig } = require('expo/metro-config');
-const { withReins } = require('reins/metro');
+const { withReins } = require('@mindmakr/reins/metro');
 
 module.exports = withReins(getDefaultConfig(__dirname));</code></pre>
-          <button type="button" class="copy" data-copy="const { getDefaultConfig } = require('expo/metro-config');&#10;const { withReins } = require('reins/metro');&#10;module.exports = withReins(getDefaultConfig(__dirname));">Copy</button>
+          <button type="button" class="copy" data-copy="const { getDefaultConfig } = require('expo/metro-config');&#10;const { withReins } = require('@mindmakr/reins/metro');&#10;module.exports = withReins(getDefaultConfig(__dirname));">Copy</button>
         </div>
         <p>For Android emulators or USB devices: <code>adb reverse tcp:7357 tcp:7357</code>. Export gate: <code>npx expo export &amp;&amp; npx reins verify dist</code>.</p>
       </div>
       <div class="code-card">
         <h4>2. Connect &amp; wrap views <span>App.tsx</span></h4>
         <div class="cmd">
-          <pre><code>import { connectExpo, ReinsPanel, useReinsAction } from 'reins/expo';
+          <pre><code>import { connectExpo, ReinsPanel, useReinsAction } from '@mindmakr/reins/expo';
 
 if (__DEV__) connectExpo();
 
@@ -367,7 +367,7 @@ export default function App() {
   });
   return &lt;ReinsPanel id="home"&gt;…&lt;/ReinsPanel&gt;;
 }</code></pre>
-          <button type="button" class="copy" data-copy="import { connectExpo, ReinsPanel, useReinsAction } from 'reins/expo';&#10;if (__DEV__) connectExpo();">Copy</button>
+          <button type="button" class="copy" data-copy="import { connectExpo, ReinsPanel, useReinsAction } from '@mindmakr/reins/expo';&#10;if (__DEV__) connectExpo();">Copy</button>
         </div>
         <p><code>&lt;ReinsPanel&gt;</code> renders a native <code>View</code> with <code>testID={id}</code> and measures window coordinates in device pixels.</p>
       </div>
@@ -383,7 +383,7 @@ export default function App() {
       <div class="panel-card">
         <h3>The 11 MCP tools</h3>
         <ul class="tool-list">
-          <li><code>reins_list_actions</code><span>Returns the paired app and any paired <code>reins/node</code> servers, registered actions with JSON schemas, state sources and mounted panels. Always call this first.</span></li>
+          <li><code>reins_list_actions</code><span>Returns the paired app and any paired <code>@mindmakr/reins/node</code> servers, registered actions with JSON schemas, state sources and mounted panels. Always call this first.</span></li>
           <li><code>reins_run_action</code><span>Runs one named action on the app or server: <code>{ name, input, confirm?, target? }</code>. Also records a <code>[reins] &lt;name&gt;</code> performance measure.</span></li>
           <li><code>reins_state</code><span>Reads a redacted snapshot of one state source (Zustand, Redux, React Query, route, storage) or all of them.</span></li>
           <li><code>reins_network</code><span>Recent <code>fetch</code> calls: method, URL, status, <code>startMs</code>, duration in ms, <code>traceId</code>, and redacted headers/bodies.</span></li>
@@ -392,15 +392,15 @@ export default function App() {
           <li><code>reins_snap</code><span>Saves a pixel-exact PNG of a panel to <code>.reins/snaps/</code> (via Playwright CDP in browsers or <code>adb screencap</code> on Android).</span></li>
           <li><code>reins_perf</code><span>Page lifecycle timings (TTFB, FCP, DOM interactive, load), component/panel mount times and render counts, API call latency stats, and a unified millisecond timeline with server spans joined by <code>x-reins-trace</code>.</span></li>
           <li><code>reins_dom</code><span>Inspects a panel or CSS selector's DOM subtree, bounding boxes, computed CSS styles (<code>direction</code>, <code>display</code>, <code>flexDirection</code>, <code>overflowX</code>), and automatic layout issue flags (<code>horizontal-clip</code>, <code>vertical-clip</code>, <code>zero-size</code>).</span></li>
-          <li><code>reins_server</code><span>When paired via <code>reins/node</code>: inbound requests with <code>dbMs</code> and <code>spans</code> (catches N+1 queries), outbound upstream fetches, slowest routes, and Node event-loop lag (p50/p99/max) and memory.</span></li>
-          <li><code>reins_report</code><span>Saves <code>.reins/sessions/&lt;time&gt;-&lt;slug&gt;.md</code> and <code>.json</code> with automatic plain-language findings; diff before/after fixes with <code>npx reins report --compare</code>, or let testers export via <code>reins/record</code> (<code>?reins=record</code>).</span></li>
+          <li><code>reins_server</code><span>When paired via <code>@mindmakr/reins/node</code>: inbound requests with <code>dbMs</code> and <code>spans</code> (catches N+1 queries), outbound upstream fetches, slowest routes, and Node event-loop lag (p50/p99/max) and memory.</span></li>
+          <li><code>reins_report</code><span>Saves <code>.reins/sessions/&lt;time&gt;-&lt;slug&gt;.md</code> and <code>.json</code> with automatic plain-language findings; diff before/after fixes with <code>npx reins report --compare</code>, or let testers export via <code>@mindmakr/reins/record</code> (<code>?reins=record</code>).</span></li>
         </ul>
       </div>
 
       <div class="panel-card">
         <h3>Security model (enforced in code)</h3>
         <ol class="sec-list">
-          <li><b>Kept out of production.</b> Core turns on only in dev builds. Bundler plugins alias <code>reins</code> to <code>reins/stub</code>, and <code>reins verify</code> fails the build if <code>__REINS_DEV_ONLY__</code> is found.</li>
+          <li><b>Kept out of production.</b> Core turns on only in dev builds. Bundler plugins alias <code>reins</code> to <code>@mindmakr/reins/stub</code>, and <code>reins verify</code> fails the build if <code>__REINS_DEV_ONLY__</code> is found.</li>
           <li><b>Off until paired.</b> Before the bridge accepts its 192-bit token from <code>.reins/token</code>, reins patches nothing and adds no listeners.</li>
           <li><b>Loopback &amp; origin locked.</b> The bridge binds to <code>127.0.0.1</code> only (no host flag) and refuses non-localhost WebSocket <code>Origin</code> headers.</li>
           <li><b>Redacted by default.</b> Request/response bodies, <code>Authorization</code>/<code>Cookie</code> headers, storage values and sensitive state keys (<code>token</code>, <code>password</code>, <code>secret</code>, <code>session</code>) become <code>[redacted]</code> unless allowlisted.</li>

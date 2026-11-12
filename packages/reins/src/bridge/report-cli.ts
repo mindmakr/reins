@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { compareSessions, renderMarkdown } from 'reins/report';
+import { compareSessions, renderMarkdown } from '@mindmakr/reins/report';
 import { latestSession, linkFrom, readSession } from './session.js';
 
 export const REPORT_USAGE = `usage:

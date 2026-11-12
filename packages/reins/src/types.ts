@@ -60,7 +60,7 @@ export interface NetEntry {
   requestBody?: unknown;
   responseBody?: unknown;
   error?: string;
-  /** Sent as `x-reins-trace` on same-origin calls while paired, so `reins/node` can join the server half. */
+  /** Sent as `x-reins-trace` on same-origin calls while paired, so `@mindmakr/reins/node` can join the server half. */
   traceId?: string;
 }
 
@@ -84,7 +84,7 @@ export interface PerfTimelineEntry {
   atMs: number;
   durationMs?: number;
   status?: number;
-  /** Server entries (joined by the bridge from `reins/node`): the trace id, time in `db.*` spans, and the spans. */
+  /** Server entries (joined by the bridge from `@mindmakr/reins/node`): the trace id, time in `db.*` spans, and the spans. */
   traceId?: string;
   dbMs?: number;
   spans?: Array<{ name: string; atMs: number; durationMs: number; error?: string }>;
@@ -121,9 +121,9 @@ export interface PerfReport {
     calls: ApiCall[];
   };
   actions: Array<{ name: string; startMs: number; durationMs: number }>;
-  /** Built from the parts above by `withTimeline` in `reins/report`. The bridge's `reins_perf` and record mode always include it. */
+  /** Built from the parts above by `withTimeline` in `@mindmakr/reins/report`. The bridge's `reins_perf` and record mode always include it. */
   timeline?: PerfTimelineEntry[];
-  /** Added by the bridge when a `reins/node` server is paired. */
+  /** Added by the bridge when a `@mindmakr/reins/node` server is paired. */
   server?: { requests: number; slowest: RouteStat[]; runtime: ServerRuntime | null };
 }
 
@@ -146,7 +146,7 @@ export interface ServerOutbound {
   error?: string;
 }
 
-/** One inbound HTTP request handled by a server that uses `reins/node`. */
+/** One inbound HTTP request handled by a server that uses `@mindmakr/reins/node`. */
 export interface ServerRequest {
   method: string;
   route: string;

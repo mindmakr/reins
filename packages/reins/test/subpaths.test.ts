@@ -6,15 +6,15 @@ import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { reactQuery, redux, routerLocation, zustand } from 'reins/adapters';
-import { Hub, parseArgs, TOOLS } from 'reins/bridge';
-import { shouldStub as metroShouldStub, withReins as withReinsMetro } from 'reins/metro';
-import { shouldStub as expoMetroShouldStub, withReins as withReinsExpoMetro } from 'reins/expo/metro';
-import { shouldStub as nextShouldStub, withReins as withReinsNext } from 'reins/next';
-import { GET as nextTokenGET } from 'reins/next/token-route';
-import { ReinsPanel, useReinsAction, useReinsState } from 'reins/react';
-import { findMarker, listFiles, main as verifyMain, MARKER } from 'reins/verify';
-import reinsVite, { reinsPlugin } from 'reins/vite';
+import { reactQuery, redux, routerLocation, zustand } from '@mindmakr/reins/adapters';
+import { Hub, parseArgs, TOOLS } from '@mindmakr/reins/bridge';
+import { shouldStub as metroShouldStub, withReins as withReinsMetro } from '@mindmakr/reins/metro';
+import { shouldStub as expoMetroShouldStub, withReins as withReinsExpoMetro } from '@mindmakr/reins/expo/metro';
+import { shouldStub as nextShouldStub, withReins as withReinsNext } from '@mindmakr/reins/next';
+import { GET as nextTokenGET } from '@mindmakr/reins/next/token-route';
+import { ReinsPanel, useReinsAction, useReinsState } from '@mindmakr/reins/react';
+import { findMarker, listFiles, main as verifyMain, MARKER } from '@mindmakr/reins/verify';
+import reinsVite, { reinsPlugin } from '@mindmakr/reins/vite';
 
 const dirs: string[] = [];
 function tempDir(files: Record<string, string> = {}) {
@@ -33,7 +33,7 @@ afterEach(() => {
 });
 
 describe('reins single-package subpath exports', () => {
-  it('exports reins/react hooks and ReinsPanel', () => {
+  it('exports @mindmakr/reins/react hooks and ReinsPanel', () => {
     expect(typeof useReinsAction).toBe('function');
     expect(typeof useReinsState).toBe('function');
     // ReinsPanel uses a hook, so it must be rendered by React rather than called as a function.
@@ -43,11 +43,11 @@ describe('reins single-package subpath exports', () => {
 
   it('keeps every VERSION constant in step with package.json', async () => {
     const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
-    const versions = await Promise.all([import('reins'), import('reins/stub'), import('reins/node'), import('reins/bridge')].map(async (m) => (await m).VERSION));
+    const versions = await Promise.all([import('@mindmakr/reins'), import('@mindmakr/reins/stub'), import('@mindmakr/reins/node'), import('@mindmakr/reins/bridge')].map(async (m) => (await m).VERSION));
     expect(versions).toEqual([pkg.version, pkg.version, pkg.version, pkg.version]);
   });
 
-  it('exports reins/adapters for zustand, redux, reactQuery, and routerLocation', () => {
+  it('exports @mindmakr/reins/adapters for zustand, redux, reactQuery, and routerLocation', () => {
     const store = { getState: () => ({ count: 42 }) };
     expect(zustand(store)()).toEqual({ count: 42 });
     expect(redux(store)()).toEqual({ count: 42 });
@@ -60,34 +60,34 @@ describe('reins single-package subpath exports', () => {
     expect(routerLocation(() => '/cart')()).toBe('/cart');
   });
 
-  it('exports reins/vite plugin', async () => {
+  it('exports @mindmakr/reins/vite plugin', async () => {
     expect(reinsVite).toBe(reinsPlugin);
     const plugin = reinsPlugin();
     plugin.configResolved({ root: '.', command: 'build', mode: 'production' });
     const resolve = vi.fn(async (id: string) => ({ id: `/abs/${id}` }));
-    expect(await plugin.resolveId.call({ resolve }, 'reins', '/app/main.ts')).toEqual({ id: '/abs/reins/stub' });
+    expect(await plugin.resolveId.call({ resolve }, '@mindmakr/reins', '/app/main.ts')).toEqual({ id: '/abs/@mindmakr/reins/stub' });
   });
 
-  it('exports reins/next and reins/next/token-route', async () => {
+  it('exports @mindmakr/reins/next and @mindmakr/reins/next/token-route', async () => {
     expect(nextShouldStub(false, {}, {})).toBe(true);
     const cfg = withReinsNext({});
     const out = cfg.webpack({ resolve: { alias: {} } }, { dev: false });
-    expect(out.resolve.alias).toEqual({ reins$: 'reins/stub', 'reins/record$': 'reins/record-stub' });
+    expect(out.resolve.alias).toEqual({ '@mindmakr/reins$': '@mindmakr/reins/stub', '@mindmakr/reins/record$': '@mindmakr/reins/record-stub' });
 
     vi.stubEnv('NODE_ENV', 'production');
     const res = await nextTokenGET(new Request('http://localhost:3000/api/reins-token'));
     expect(res.status).toBe(404);
   });
 
-  it('exports reins/metro and reins/expo/metro', () => {
+  it('exports @mindmakr/reins/metro and @mindmakr/reins/expo/metro', () => {
     expect(withReinsMetro).toBe(withReinsExpoMetro);
     expect(metroShouldStub).toBe(expoMetroShouldStub);
     vi.stubEnv('NODE_ENV', 'production');
     const resolveRequest = vi.fn((_c, name) => name);
-    expect(withReinsMetro({}).resolver.resolveRequest({ resolveRequest }, 'reins', 'ios')).toBe('reins/stub');
+    expect(withReinsMetro({}).resolver.resolveRequest({ resolveRequest }, '@mindmakr/reins', 'ios')).toBe('@mindmakr/reins/stub');
   });
 
-  it('exports reins/verify and reins/bridge', () => {
+  it('exports @mindmakr/reins/verify and @mindmakr/reins/bridge', () => {
     const dir = tempDir({ 'bundle.js': `const m = "${MARKER}";` });
     expect(listFiles(dir).length).toBe(1);
     expect(findMarker(dir)).toEqual(['bundle.js']);

@@ -1,4 +1,4 @@
-# reins
+# @mindmakr/reins
 
 The reins core: actions, state, network and error buffers, panels and WebMCP. No dependencies, under 5 KB min+gzip.
 

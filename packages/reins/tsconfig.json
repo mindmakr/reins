@@ -5,10 +5,10 @@
     "rootDir": "src",
     "types": ["node"],
     "paths": {
-      "reins": ["./src/index.ts"],
-      "reins/server": ["./src/server.ts"],
-      "reins/react": ["./src/react.ts"],
-      "reins/report": ["./src/report.ts"]
+      "@mindmakr/reins": ["./src/index.ts"],
+      "@mindmakr/reins/server": ["./src/server.ts"],
+      "@mindmakr/reins/react": ["./src/react.ts"],
+      "@mindmakr/reins/report": ["./src/report.ts"]
     }
   },
   "include": ["src"]

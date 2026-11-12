@@ -1,6 +1,6 @@
 import { createElement, useEffect, useRef, type ReactNode } from 'react';
 import { NativeModules, PixelRatio, Platform, View } from 'react-native';
-import { reins, type Box, type ConnectOptions } from 'reins';
+import { reins, type Box, type ConnectOptions } from '@mindmakr/reins';
 
 export const TOKEN_ROUTE = '/__reins/token';
 
@@ -12,7 +12,7 @@ export function devServerOrigin(scriptURL: string | undefined = NativeModules.So
 }
 
 /**
- * Pairs the app with the bridge. Fetches the token from the Metro dev server (see `withReins` in `reins/metro`)
+ * Pairs the app with the bridge. Fetches the token from the Metro dev server (see `withReins` in `@mindmakr/reins/metro`)
  * and connects to the bridge on localhost. Android emulators and USB devices need `adb reverse tcp:7357 tcp:7357`.
  * Does nothing in production builds.
  */
@@ -58,4 +58,4 @@ export function ReinsPanel({ id, children, ...rest }: ReinsPanelProps) {
   return createElement(View, { testID: id, collapsable: false, ...rest, ref }, children);
 }
 
-export { useReinsAction, useReinsState } from 'reins/react';
+export { useReinsAction, useReinsState } from '@mindmakr/reins/react';

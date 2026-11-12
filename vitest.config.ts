@@ -7,11 +7,11 @@ export default defineConfig({
   resolve: {
     // Tests run against sources, so they pass before a build.
     alias: [
-      { find: /^reins$/, replacement: src('reins/src/index.ts') },
-      { find: /^reins\/next\/token-route$/, replacement: src('reins/src/next-token-route.ts') },
-      { find: /^reins\/expo\/metro$/, replacement: src('reins/src/metro.ts') },
-      { find: /^reins\/bridge$/, replacement: src('reins/src/bridge/index.ts') },
-      { find: /^reins\/(server|stub|adapters|react|expo|metro|vite|next|verify|report|node|record|record-stub)$/, replacement: src('reins/src/$1.ts') },
+      { find: /^@mindmakr\/reins$/, replacement: src('reins/src/index.ts') },
+      { find: /^@mindmakr\/reins\/next\/token-route$/, replacement: src('reins/src/next-token-route.ts') },
+      { find: /^@mindmakr\/reins\/expo\/metro$/, replacement: src('reins/src/metro.ts') },
+      { find: /^@mindmakr\/reins\/bridge$/, replacement: src('reins/src/bridge/index.ts') },
+      { find: /^@mindmakr\/reins\/(server|stub|adapters|react|expo|metro|vite|next|verify|report|node|record|record-stub)$/, replacement: src('reins/src/$1.ts') },
     ],
   },
   test: {

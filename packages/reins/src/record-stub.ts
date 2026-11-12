@@ -1,5 +1,5 @@
-// Production stand-in for `reins/record`. Same API, does nothing, holds no dev marker.
-// The Vite, Next and Metro plugins swap `reins/record` for this file in production builds.
+// Production stand-in for `@mindmakr/reins/record`. Same API, does nothing, holds no dev marker.
+// The Vite, Next and Metro plugins swap `@mindmakr/reins/record` for this file in production builds.
 export interface RecordOptions {
   allow?: Record<string, string[] | undefined>;
   bufferSize?: number;

@@ -20,12 +20,12 @@ Everything ships as one package, `packages/reins`, with one entry file per impor
 
 ```
 packages/reins/src/
-  index.ts            `reins`: the core (browser and React Native, no dependencies)
-  stub.ts             `reins/stub`: what production builds get instead
+  index.ts            `@mindmakr/reins`: the core (browser and React Native, no dependencies)
+  stub.ts             `@mindmakr/reins/stub`: what production builds get instead
   react.ts, expo.ts   hooks and <ReinsPanel> for web and React Native
   adapters.ts         state sources for Zustand, Redux, TanStack Query and routers
   vite.ts, next.ts, next-token-route.ts, metro.ts   build plugins and token routes (Node)
-  node.ts             `reins/node`: backend instrumentation (Node)
+  node.ts             `@mindmakr/reins/node`: backend instrumentation (Node)
   record.ts, record-stub.ts   tester record mode and its production stand-in
   report.ts           session reports, shared by the bridge and record mode (no Node or DOM imports)
   verify.ts, verify-cli.ts    `reins verify` and `reins-verify-bundle`
@@ -38,7 +38,7 @@ A new import path needs an entry in `exports` in `packages/reins/package.json`, 
 
 ## Rules
 
-- **The core stays under 5 KB min+gzip and has no runtime dependencies.** It is at about 4.5 KB. The DOM inspector already lives in its own file (`src/dom.ts`), loaded on the first `dom()` call. `packages/reins/test/size.test.ts` checks this. If you add to the core, take something out or put it in a separate entry, like `reins/adapters`.
+- **The core stays under 5 KB min+gzip and has no runtime dependencies.** It is at about 4.5 KB. The DOM inspector already lives in its own file (`src/dom.ts`), loaded on the first `dom()` call. `packages/reins/test/size.test.ts` checks this. If you add to the core, take something out or put it in a separate entry, like `@mindmakr/reins/adapters`.
 - **Guard every global.** The core runs in browsers, React Native and Node. Do not touch `window`, `document` or `navigator` without checking they exist.
 - **Nothing happens before pairing.** No listeners, patches or globals until the bridge accepts the token. Add a test when you touch this.
 - **Redact by default.** New data sources must redact values unless the key is allowlisted.

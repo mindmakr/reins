@@ -51,7 +51,7 @@ export function main(args: string[], out = console.log, err = console.error): nu
     found += hits.length;
   }
   if (found > 0) {
-    err(`reins-verify-bundle: ${found} file(s) contain reins dev code. Use the reins/vite, reins/next or reins/metro plugin, or check REINS_ENABLE.`);
+    err(`reins-verify-bundle: ${found} file(s) contain reins dev code. Use the @mindmakr/reins/vite, @mindmakr/reins/next or @mindmakr/reins/metro plugin, or check REINS_ENABLE.`);
     return 1;
   }
   out(`reins-verify-bundle: clean (${dirs.join(', ')})`);

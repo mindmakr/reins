@@ -1,4 +1,4 @@
-import { keepInBuild, TOKEN_ROUTE, tokenResponse } from 'reins/server';
+import { keepInBuild, TOKEN_ROUTE, tokenResponse } from '@mindmakr/reins/server';
 
 /** The parts of the Vite plugin API this plugin uses, so it needs no Vite types. */
 interface ResolvedConfig {
@@ -12,7 +12,7 @@ interface Server {
 }
 
 /** Entries that carry the dev marker, and the stubs that replace them in production builds. */
-export const STUBS: Record<string, string> = { reins: 'reins/stub', 'reins/record': 'reins/record-stub' };
+export const STUBS: Record<string, string> = { '@mindmakr/reins': '@mindmakr/reins/stub', '@mindmakr/reins/record': '@mindmakr/reins/record-stub' };
 
 export interface ReinsViteOptions {
   /** Keep reins in production builds. Prefer the REINS_ENABLE=1 env var, and only for staging. */
@@ -21,7 +21,7 @@ export interface ReinsViteOptions {
 
 /**
  * Dev: serves the pairing token at /__reins/token from `.reins/token`.
- * Build (not development mode): resolves `reins` to `reins/stub` and `reins/record` to `reins/record-stub`, so no reins code ships.
+ * Build (not development mode): resolves `@mindmakr/reins` to `@mindmakr/reins/stub` and `@mindmakr/reins/record` to `@mindmakr/reins/record-stub`, so no reins code ships.
  */
 export function reinsPlugin(options: ReinsViteOptions = {}) {
   let stub = false;
