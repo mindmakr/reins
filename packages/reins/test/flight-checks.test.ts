@@ -339,21 +339,34 @@ describe('flight.step (B1)', () => {
     expect(w.stats()).toMatchObject({ dropped: 2, storeErrors: 1, written: 0 });
   });
 
-  it('a row the store refuses never costs the other rows of its batch: they are saved, and only it is dropped', async () => {
+  // Round 3 (G2): the split-and-retry salvage is gone (this test locked it in). A bad row is now stopped at the
+  // door of every store (contract test), and a refused batch is never sent again.
+  it('a store that commits and then reports an error: one call per flush, no step written twice, the batch counted as dropped', async () => {
     const store = memoryStore();
     let calls = 0;
-    // Like Postgres with a row it cannot take: the whole statement fails while that row is in it.
-    const picky = { ...store, addSteps: async (s: any[]) => (calls++, s.some((x) => x.key === 'poison') ? Promise.reject(new Error('22021')) : store.addSteps(s)) };
-    const w = createStepWriter({ store: picky, instance: 'i1' });
-    for (let i = 0; i < 100; i++) w.step('payout', `k${i}`, 'requested');
-    w.step('refund', 'poison', 'requested');
+    // Like a connection that drops after the commit: the rows are stored, the caller sees an error.
+    const flaky = { ...store, addSteps: async (s: any[]) => (calls++, await store.addSteps(s), Promise.reject(new Error('ECONNRESET'))) };
+    const w = createStepWriter({ store: flaky, instance: 'i1' });
+    for (let i = 0; i < 20; i++) w.step('payout', `k${i}`, 'ledger.debited');
     await w.flush();
-    expect(w.stats()).toMatchObject({ written: 100, dropped: 1, storeErrors: 1 });
-    expect(await store.runSteps('payout', 0)).toHaveLength(100);
-    const m = await store.minutes(0);
-    expect(m.reduce((n, x) => n + (x.stepsDropped.refund || 0), 0)).toBe(1);
-    expect(m.reduce((n, x) => n + (x.stepsDropped.payout || 0), 0)).toBe(0);
-    expect(calls).toBeLessThan(20);
+    expect(calls).toBe(1);
+    expect(await store.runSteps('payout', 0)).toHaveLength(20);
+    expect(w.stats()).toMatchObject({ written: 0, dropped: 20, storeErrors: 1 });
+    // The drop makes once not checked for the window instead of held, and never a false breach.
+    const m = manifest();
+    const once = get(await check(store, m), 'one-debit');
+    expect(once).toMatchObject({ state: 'not-checked', reason: 'steps-dropped' });
+  });
+
+  it('during an outage each flush costs one store call', async () => {
+    let calls = 0;
+    const down = { ...memoryStore(), addSteps: async () => (calls++, Promise.reject(new Error('down'))) };
+    const w = createStepWriter({ store: down, instance: 'i1' });
+    for (let f = 0; f < 5; f++) {
+      for (let i = 0; i < 50; i++) w.step('payout', `k${f}-${i}`, 'requested');
+      await w.flush();
+    }
+    expect(calls).toBe(5);
   });
 });
 

@@ -4,6 +4,36 @@
 // the checker needs is read from the store, so a separate process (the watcher) gets the same answer.
 // Imports: Node built-ins and reins' shared modules only (the flight safety test walks this file).
 import type { MinuteSummary } from '../recorder.js';
+import { isName } from './manifest.js';
+
+/** The longest process key kept. A longer key is refused as invalid, not cut, so two runs never merge. */
+export const MAX_KEY = 200;
+
+/** Control characters (U+0000-U+001F, U+007F), and a surrogate that is not one half of a pair. */
+const BAD_KEY = /[\u0000-\u001f\u007f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+/**
+ * The key as stored: a non-empty string up to MAX_KEY, or a finite number as text. Anything else is invalid,
+ * and so is a key with a control character or a lone surrogate: Postgres refuses a NUL byte (and with it the
+ * whole batch) and turns a lone surrogate into U+FFFD, which could merge two runs, so every store gets only
+ * keys all three keep the same.
+ */
+export function stepKey(key: unknown): string | undefined {
+  if (typeof key === 'number') return Number.isFinite(key) ? String(key) : undefined;
+  return typeof key === 'string' && key.length > 0 && key.length <= MAX_KEY && !BAD_KEY.test(key) ? key : undefined;
+}
+
+/**
+ * The check at the door of every store's `addSteps` (and of the step writer): process and step are manifest
+ * names, key and instance are keys as `stepKey` keeps them, and the time is a whole number of ms. A row that
+ * fails it is left out, so a bad row from any caller never costs the rest of its batch. The reserved name
+ * PRUNED_STEP is not a manifest name, so no caller can write a retention marker.
+ */
+export const goodStep = (s: StepRecord): boolean =>
+  !!s && isName(s.process) && isName(s.step) && typeof s.key === 'string' && stepKey(s.key) === s.key && typeof s.instance === 'string' && stepKey(s.instance) === s.instance && Number.isSafeInteger(s.at) && s.at >= 0;
+
+/** The rows of `steps` that pass `goodStep`. */
+export const goodSteps = (steps: StepRecord[]): StepRecord[] => (Array.isArray(steps) ? steps.filter(goodStep) : []);
 
 /** One step of one run of a process (design C7): a bare fact, with no free text and no outcome. */
 export interface StepRecord {
@@ -283,7 +313,7 @@ export function memoryStore(r: Retention = {}): FlightStore {
   const self: FlightStore = {
     kind: 'memory',
     async addSteps(list) {
-      for (const s of list) {
+      for (const s of goodSteps(list)) {
         let m = runs.get(s.process);
         if (!m) runs.set(s.process, (m = new Map()));
         let run = m.get(s.key);

@@ -7,6 +7,7 @@
 import {
   type FindingRecord,
   type FlightStore,
+  goodSteps,
   type InstanceMinute,
   lockUntil,
   MAX_LOCK_MS,
@@ -81,7 +82,8 @@ export function pgStore(o: PgStoreOptions): FlightStore {
 
   const self: FlightStore = {
     kind: 'postgres',
-    async addSteps(steps: StepRecord[]) {
+    async addSteps(list: StepRecord[]) {
+      const steps = goodSteps(list);
       if (!steps.length) return;
       await q(
         `insert into reins_flight_steps (process, key, step, at, instance)

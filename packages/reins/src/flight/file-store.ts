@@ -18,6 +18,7 @@ import {
   countOpen,
   type FindingRecord,
   type FlightStore,
+  goodSteps,
   type InstanceMinute,
   laterProbe,
   lockHeld,
@@ -212,8 +213,9 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
 
   return {
     kind: 'file',
-    addSteps: (steps) =>
+    addSteps: (list) =>
       queued(async () => {
+        const steps = goodSteps(list);
         if (!steps.length) return;
         ensure();
         const groups = new Map<string, StepRecord[]>();

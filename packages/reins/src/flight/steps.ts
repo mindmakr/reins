@@ -7,11 +7,11 @@
 // Imports: Node built-ins and reins' shared modules only (the flight safety test walks this file).
 import type { MinuteSummary } from '../recorder.js';
 import { isName } from './manifest.js';
-import type { FlightStore, InstanceMinute, StepRecord } from './store.js';
+import { type FlightStore, goodStep, type InstanceMinute, type StepRecord, stepKey } from './store.js';
+
+export { MAX_KEY, stepKey } from './store.js';
 
 export const STEP_DEFAULTS = { bufferSize: 10_000, flushMs: 1000, minuteMs: 15_000 };
-/** The longest process key kept. A longer key is refused as invalid, not cut, so two runs never merge. */
-export const MAX_KEY = 200;
 /** Distinct process names counted per minute; beyond this, drops are counted under OTHER_PROCESS. */
 const MAX_PROCESSES = 200;
 export const OTHER_PROCESS = '(other)';
@@ -43,23 +43,6 @@ interface Facts {
 
 const int = (v: unknown, d: number, min: number, max: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.floor(v))) : d);
 const minuteOf = (t: number) => t - (t % 60_000);
-
-/** Control characters (U+0000-U+001F, U+007F), and a surrogate that is not one half of a pair. */
-const BAD_KEY = /[\u0000-\u001f\u007f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
-
-/**
- * The key as stored: a non-empty string up to MAX_KEY, or a finite number as text. Anything else is invalid,
- * and so is a key with a control character or a lone surrogate: Postgres refuses a NUL byte (and with it the
- * whole batch) and turns a lone surrogate into U+FFFD, which could merge two runs, so every store gets only
- * keys all three keep the same.
- */
-export function stepKey(key: unknown): string | undefined {
-  if (typeof key === 'number') return Number.isFinite(key) ? String(key) : undefined;
-  return typeof key === 'string' && key.length > 0 && key.length <= MAX_KEY && !BAD_KEY.test(key) ? key : undefined;
-}
-
-/** Store calls spent at most on saving the good rows of one refused batch (it is split in halves). */
-const SALVAGE_CALLS = 64;
 
 export function createStepWriter(o: StepWriterOptions) {
   const store = o.store;
@@ -99,47 +82,28 @@ export function createStepWriter(o: StepWriterOptions) {
   }
 
   /**
-   * A batch the store refused: one bad row must not cost the others. The batch is split in halves and each half
-   * tried again, down to single rows, within SALVAGE_CALLS store calls; what is still unsaved is counted as
-   * dropped, row for row. Returns whether every row was saved.
+   * Writes the queue, one store call per batch. A row no store accepts (the same check every store's `addSteps`
+   * applies) is counted as invalid and left out, so it cannot cost the batch. A batch the store refuses is
+   * dropped and counted, never tried again: the store may have committed it before the error reached us, and a
+   * step written twice would read as a second record (a false `once` or `retries` breach).
    */
-  async function salvage(batch: StepRecord[]): Promise<boolean> {
-    let calls = 0;
-    const lost: StepRecord[] = [];
-    const parts: StepRecord[][] = [batch.slice(0, batch.length >> 1), batch.slice(batch.length >> 1)];
-    while (parts.length) {
-      const part = parts.shift()!;
-      if (!part.length) continue;
-      if (calls >= SALVAGE_CALLS) {
-        lost.push(...part);
-        continue;
-      }
-      calls++;
-      try {
-        await store.addSteps(part);
-        totals.written += part.length;
-      } catch {
-        if (part.length === 1) lost.push(part[0]);
-        else parts.unshift(part.slice(0, part.length >> 1), part.slice(part.length >> 1));
-      }
-    }
-    if (lost.length) dropAll(lost, Date.now());
-    return !lost.length;
-  }
-
   async function writeSteps(): Promise<void> {
     while (queue.length) {
-      const batch = queue;
+      const batch = queue.filter(goodStep);
+      const bad = queue.length - batch.length;
       queue = [];
+      if (bad) {
+        factsOf(Date.now()).invalid += bad;
+        totals.invalid += bad;
+      }
+      if (!batch.length) continue;
       try {
         await store.addSteps(batch);
         totals.written += batch.length;
       } catch {
-        // One store error per refused batch, however many calls saving its good rows takes.
         factsOf(Date.now()).storeErrors++;
         totals.storeErrors++;
-        if (batch.length === 1) dropAll(batch, Date.now());
-        else if (await salvage(batch)) continue;
+        dropAll(batch, Date.now());
         return;
       }
     }

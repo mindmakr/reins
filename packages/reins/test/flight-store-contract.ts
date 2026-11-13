@@ -62,6 +62,27 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     for (const k of good) expect(keys.has(k)).toBe(true);
   });
 
+  it('leaves out a bad row passed straight to addSteps and stores the rest of the batch', async () => {
+    const { store } = await make();
+    const t = 1_000_000;
+    const bad: any[] = [
+      step('a\u0000b', 'requested', t), // NUL in the key
+      step('lone\ud800', 'requested', t),
+      step('', 'requested', t),
+      step('x'.repeat(201), 'requested', t),
+      step('k', 'Requested', t), // not a manifest name
+      step('k', '(pruned)', t), // the reserved retention marker
+      step('k', 'requested', t, 'pay out'),
+      step('k', 'requested', t, 'payout', 'i\u0000'),
+      step('k', 'requested', 1.5),
+      step('k', 'requested', Number.NaN),
+      { process: 'payout', key: 7, step: 'requested', at: t, instance: 'i1' },
+      null,
+    ];
+    await store.addSteps([step('good1', 'requested', t), ...bad, step('good2', 'requested', t + 1)]);
+    expect((await store.runSteps('payout', 0)).map((s) => s.key)).toEqual(['good1', 'good2']);
+  });
+
   it('keeps one record per instance and minute, the last write winning', async () => {
     const { store } = await make();
     const t = Date.now();
