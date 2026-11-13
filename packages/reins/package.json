@@ -28,6 +28,7 @@
     "./bridge": { "types": "./dist/bridge/index.d.ts", "default": "./dist/bridge/index.js" },
     "./report": { "types": "./dist/report.d.ts", "default": "./dist/report.js" },
     "./node": { "types": "./dist/node.d.ts", "default": "./dist/node.js" },
+    "./flight": { "types": "./dist/flight.d.ts", "default": "./dist/flight.js" },
     "./record": { "types": "./dist/record.d.ts", "default": "./dist/record.js" },
     "./record-stub": { "types": "./dist/record-stub.d.ts", "default": "./dist/record-stub.js" }
   },
