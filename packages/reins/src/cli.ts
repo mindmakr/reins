@@ -5,6 +5,7 @@ import { fileAudit } from './bridge/audit.js';
 import { DEFAULT_PORT, Hub } from './bridge/hub.js';
 import { startMcp } from './bridge/mcp.js';
 import { reportMain } from './bridge/report-cli.js';
+import { flightMain } from './flight/check-cli.js';
 import { tokenPath } from './bridge/token.js';
 import { main as verifyMain } from './verify.js';
 
@@ -18,6 +19,10 @@ async function main() {
   }
   if (argv[0] === 'report') {
     process.exitCode = reportMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'flight') {
+    process.exitCode = flightMain(argv.slice(1));
     return;
   }
   let args;
