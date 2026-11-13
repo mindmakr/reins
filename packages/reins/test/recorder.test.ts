@@ -1,10 +1,11 @@
 // The shared recorder in strict mode (flight), and the hooks it shares with @mindmakr/reins/node.
+import { EventEmitter } from 'node:events';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createFlight } from '../src/flight.js';
 import { createReinsNode } from '../src/node.js';
-import { errorCode, notCheckedFacts, routeMatcher, UNMATCHED } from '../src/recorder.js';
+import { bounded, CAPTURE_MAX, errorCode, notCheckedFacts, routeMatcher, UNMATCHED } from '../src/recorder.js';
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => unknown;
 
@@ -50,7 +51,29 @@ function httpGet(url: string, headers: Record<string, string> = {}): Promise<num
   });
 }
 
+function httpCall(url: string, method: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(url, { method }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode || 0));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 const settle = () => new Promise((r) => setTimeout(r, 20));
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Runs one request through a hook without a socket, at the wall-clock time `at`. */
+function fakeRequest(hook: (req: any, res: any) => unknown, at: number) {
+  const spy = vi.spyOn(Date, 'now').mockReturnValue(at);
+  try {
+    hook({ method: 'GET', url: '/x', headers: {} }, Object.assign(new EventEmitter(), { statusCode: 200 }));
+  } finally {
+    spy.mockRestore();
+  }
+}
 
 describe('strict recording (flight)', () => {
   it('records a request as method, route pattern, status and timing, and an upstream call as method, host, status and timing', async () => {
@@ -300,6 +323,117 @@ describe('strict recording (flight)', () => {
     expect(ok.p95Ms).toBeLessThanOrEqual(ok.maxMs);
   });
 
+  it('records calls and spans that finish after the response as top-level ones, never into the finished request', async () => {
+    const upstream = await serve((_q, res) => res.end('ok'));
+    const f = started({ routes: ['/hook'], bufferSize: 10 });
+    let late: Promise<unknown> = Promise.resolve();
+    const base = await serve(
+      f.wrapHandler((_q: IncomingMessage, res: ServerResponse) => {
+        res.statusCode = 202;
+        res.end();
+        // Fire and forget, still inside the request's async context: respond 202, then call the bank.
+        late = (async () => {
+          await wait(30);
+          await fetch(upstream, { method: 'PUT' });
+          await httpCall(upstream, 'DELETE');
+          f.span('late.work', () => 0);
+          for (let i = 0; i < 1000; i++) f.span('late.loop', () => 0);
+        })();
+      }),
+    );
+    await fetch(`${base}/hook`);
+    await late;
+    await settle();
+    const rec = f.recorder()!;
+    expect(rec.requests()).toMatchObject([{ route: '/hook', status: 202, upstream: [], spans: [] }]);
+    expect(rec.upstream().map((u) => u.method)).toEqual(expect.arrayContaining(['PUT', 'DELETE']));
+    const rows = rec.summaries().flatMap((m) => m.upstream.map((u) => u.method));
+    expect(rows).toEqual(expect.arrayContaining(['PUT', 'DELETE']));
+    // 1001 late spans: the top-level buffer keeps 5 and counts the rest; nothing grows in the capture.
+    expect(rec.spans()).toHaveLength(5);
+    expect(rec.stats()).toMatchObject({ droppedSpans: 1001 - 5, droppedRequests: 0, droppedCalls: 0, dropped: 1001 - 5 });
+  });
+
+  it('keeps at most CAPTURE_MAX spans and calls in one request and counts the rest', async () => {
+    const upstream = await serve((_q, res) => res.end());
+    const f = started();
+    const base = await serve(
+      f.wrapHandler(async (_q: IncomingMessage, res: ServerResponse) => {
+        for (let i = 0; i < CAPTURE_MAX + 50; i++) f.span('s', () => 0);
+        for (let i = 0; i < CAPTURE_MAX + 2; i++) await fetch(upstream);
+        res.end();
+      }),
+    );
+    await fetch(base);
+    await settle();
+    const rec = f.recorder()!;
+    const [r] = rec.requests();
+    expect(r.spans).toHaveLength(CAPTURE_MAX);
+    expect(r.upstream).toHaveLength(CAPTURE_MAX);
+    expect(rec.stats()).toMatchObject({ droppedSpans: 50, droppedCalls: 2, droppedRequests: 0, dropped: 52 });
+  });
+
+  it('never adds a Server-Timing header when only flight records, even where the dev hook asks for one', async () => {
+    const f = started();
+    const rn = createReinsNode({ NODE_ENV: 'production' });
+    expect(await rn.connect({ standalone: true, reconnect: false })).toBe(false);
+    const h = (_q: IncomingMessage, res: ServerResponse) => {
+      res.setHeader('x-app', '1');
+      res.end('ok');
+    };
+    const mw = rn.middleware({ serverTiming: true });
+    const plain = await serve(h);
+    const viaWrap = await serve(rn.wrapHandler(h, { serverTiming: true }));
+    const viaMiddleware = await serve((q, res) => mw(q, res, () => h(q, res)));
+    const keys = async (u: string) => [...(await fetch(u)).headers.keys()].sort();
+    const want = await keys(plain);
+    expect(want).not.toContain('server-timing');
+    expect(await keys(`${viaWrap}/users/alice-SECRETID/reset`)).toEqual(want);
+    expect(await keys(`${viaMiddleware}/users/alice-SECRETID/reset`)).toEqual(want);
+    await settle();
+    expect(f.recorder()!.requests()).toHaveLength(2);
+  });
+
+  it('keeps only short, known error codes', () => {
+    expect(errorCode({ code: 'AKIAIOSFODNN7EXAMPLE' })).toBe('error');
+    expect(errorCode(Object.assign(new Error('x'), { name: 'AKIAIOSFODNN7EXAMPLE' }))).toBe('error');
+    expect(errorCode({ code: 'ERR_' + 'A'.repeat(30) })).toBe('error');
+    expect(errorCode({ code: 'EABC123SECRET' })).toBe('error');
+    expect(errorCode({ name: 'SessionTokenAbcdefghijklmnopError' })).toBe('error');
+    expect(errorCode({ code: 'ECONNREFUSED' })).toBe('ECONNREFUSED');
+    expect(errorCode({ code: 'ERR_INVALID_URL' })).toBe('ERR_INVALID_URL');
+    expect(errorCode({ name: 'AbortError' })).toBe('AbortError');
+  });
+
+  it('keeps its buffers as rings, in order, with constant-time pushes', () => {
+    let dropped = 0;
+    const b = bounded<number>(3, () => dropped++);
+    for (let i = 0; i < 7; i++) b.push(i);
+    expect(b.list()).toEqual([4, 5, 6]);
+    expect(dropped).toBe(4);
+    expect(b.drain()).toEqual([4, 5, 6]);
+    expect(b.list()).toEqual([]);
+    b.push(9);
+    expect(b.list()).toEqual([9]);
+    const big = bounded<number>(100000, () => {});
+    const t0 = performance.now();
+    for (let i = 0; i < 400000; i++) big.push(i);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(big.list()[0]).toBe(300000);
+  });
+
+  it('evicts the oldest minute, also when the wall clock steps back, and counts dropped requests apart', () => {
+    const f = started({ minutes: 2, bufferSize: 10 });
+    const hook = f.wrapHandler((_q: unknown, res: EventEmitter) => res.emit('finish'));
+    fakeRequest(hook, 10 * 60000 + 5);
+    fakeRequest(hook, 11 * 60000 + 5);
+    fakeRequest(hook, 5 * 60000 + 5);
+    const rec = f.recorder()!;
+    expect(rec.summaries().map((m) => m.minute)).toEqual([10 * 60000, 11 * 60000]);
+    for (let i = 0; i < 9; i++) fakeRequest(hook, 11 * 60000 + 5);
+    expect(rec.stats()).toMatchObject({ recorded: 12, droppedRequests: 2, droppedCalls: 0, droppedSpans: 0, dropped: 2 });
+  });
+
   it('matches route patterns segment by segment', () => {
     const m = routeMatcher(['/', '/a/:id', '/b/*', 'not-a-pattern']);
     expect(m('/')).toBe('/');
@@ -340,6 +474,43 @@ describe('one set of hooks feeds the development pairing and flight', () => {
     await fetch(`${viaFlight}/from-flight-hook`);
     await settle();
     expect(rn.report().requests.map((r) => r.route)).toEqual(['/from-flight-hook']);
+  });
+
+  it('shows late spans in the development view of their request, bounded by CAPTURE_MAX', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    await rn.connect({ standalone: true, reconnect: false, tokenFile: 'no-such-token-file' });
+    stops.push(() => rn.disconnect());
+    let late: Promise<unknown> = Promise.resolve();
+    const base = await serve(
+      rn.wrapHandler((_q: IncomingMessage, res: ServerResponse) => {
+        res.end();
+        late = (async () => {
+          await wait(30);
+          for (let i = 0; i < CAPTURE_MAX * 3; i++) rn.span('late', () => 0);
+        })();
+      }),
+    );
+    await fetch(base);
+    await late;
+    expect(rn.report().requests[0].spans).toHaveLength(CAPTURE_MAX);
+  });
+
+  it('copies request headers for the development view when the request begins', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    await rn.connect({ standalone: true, reconnect: false, tokenFile: 'no-such-token-file', allow: { headers: ['x-first', 'x-later'] } });
+    stops.push(() => rn.disconnect());
+    const base = await serve(
+      rn.wrapHandler((q: IncomingMessage, res: ServerResponse) => {
+        q.headers['x-first'] = 'changed';
+        q.headers['x-later'] = 'added';
+        res.end();
+      }),
+    );
+    await fetch(base, { headers: { 'x-first': 'original' } });
+    await settle();
+    const h = rn.report().requests[0].requestHeaders!;
+    expect(h['x-first']).toBe('original');
+    expect(h).not.toHaveProperty('x-later');
   });
 
   it('keeps @mindmakr/reins/node off in production while flight records', async () => {

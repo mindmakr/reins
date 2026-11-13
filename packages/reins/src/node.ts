@@ -15,6 +15,8 @@ import {
   type Consumer,
   createLoop,
   fastify as hookFastify,
+  keepCall,
+  keepSpan,
   markDevModule,
   middleware as hookMiddleware,
   r1,
@@ -113,12 +115,13 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
 
   const dbMs = (spans: Array<{ name: string; ms: number }>) => r1(spans.filter((s) => s.name.startsWith('db.')).reduce((a, s) => a + s.ms, 0));
 
-  /** Made when read, so spans and calls that finish after the response still show, as before. */
+  /**
+   * Made when read, so spans and calls that finish after the response still show, as before (up to
+   * CAPTURE_MAX each). The headers were copied when the request began (`dev.begin`).
+   */
   function devRequest(c: Capture): ServerRequest {
-    const h: any = c.headers || {};
-    const t = h[TRACE_HEADER];
-    const headers: Record<string, string> = {};
-    for (const [k, v] of Object.entries(h)) if (typeof v === 'string') headers[k] = v;
+    const headers = c.headers || {};
+    const t = headers[TRACE_HEADER];
     const spanList = c.spans.map(devSpan);
     return {
       method: c.method,
@@ -138,13 +141,23 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
 
   const dev: Consumer = {
     kind: 'dev',
+    begin(c, req) {
+      if (c.headers) return;
+      const h: any = req?.headers || {};
+      const copy: Record<string, string> = {};
+      for (const [k, v] of Object.entries(h)) if (typeof v === 'string') copy[k] = v;
+      c.headers = copy;
+    },
     request: (c) => requests.push(c),
-    span: (s) => spans.push(devSpan(s)),
-    call: (k) => void (!toBridge(k) && outbound.push(devCall(k))),
+    // A late span or call joins its request's view, which is bounded by CAPTURE_MAX.
+    // (Another development instance may have added it already.)
+    span: (s, late) => void (late ? late.spans.includes(s) || keepSpan(late, s) : spans.push(devSpan(s))),
+    call: (k, late) => void (late ? late.calls.includes(k) || keepCall(late, k) : !toBridge(k) && outbound.push(devCall(k))),
     fault: () => {},
   };
 
-  function timing(c: Capture): string {
+  function timing(c: Capture): string | undefined {
+    if (!active) return;
     const el = runtimeOf(loop).eventLoop.p99Ms;
     const desc = `${c.method} ${c.route || c.url.split(/[?#]/)[0]}`.replace(/["\\\r\n]/g, '');
     return `app;dur=${Math.round(now() - c.startMs)};desc="${desc}", db;dur=${dbMs(c.spans)}, el-p99;dur=${el}`;

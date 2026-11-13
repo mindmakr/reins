@@ -18,28 +18,40 @@ function stripComments(code: string): string {
   return code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:\\])\/\/.*$/gm, '$1');
 }
 
-/** Specifiers a module loads at run time: static imports and re-exports (not type-only ones) and dynamic imports. */
-function specifiers(code: string): string[] {
+/**
+ * What a module loads at run time: static imports and re-exports (not type-only ones), with or without
+ * whitespace, and dynamic imports of a literal. `bad` lists what the walk cannot follow and so refuses:
+ * an `import(` of anything but a string literal, any `require(` and any `createRequire`.
+ */
+function scan(code: string): { specs: string[]; bad: string[] } {
   const src = stripComments(code);
-  const out: string[] = [];
-  const re = /\b(?:import|export)\s+(type\s+)?(?:[\w*{}\s,$]+?\s+from\s+)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  const specs: string[] = [];
+  const bad: string[] = [];
+  const re = /\b(?:import|export)\s*(type\b\s*)?(?:[\w*{}\s,$]+?\s*\bfrom\s*)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   for (const m of src.matchAll(re)) {
     if (m[1]) continue;
-    out.push(m[2] || m[3]);
+    specs.push(m[2] || m[3]);
   }
-  return out;
+  for (const m of src.matchAll(/\bimport\s*\((?!\s*['"][^'"]+['"]\s*\))/g)) bad.push(src.slice(m.index!, m.index! + 40));
+  for (const m of src.matchAll(/\brequire\s*\(|\bcreateRequire\b/g)) bad.push(src.slice(m.index!, m.index! + 40));
+  return { specs, bad };
 }
+
+const specifiers = (code: string): string[] => scan(code).specs;
 
 function walk(entry: string, ts: boolean) {
   const root = dirname(entry);
   const files = new Set<string>();
   const bare = new Set<string>();
+  const bad: string[] = [];
   const todo = [entry];
   while (todo.length) {
     const file = todo.pop()!;
     if (files.has(file)) continue;
     files.add(file);
-    for (const s of specifiers(readFileSync(file, 'utf8'))) {
+    const found = scan(readFileSync(file, 'utf8'));
+    bad.push(...found.bad.map((b) => `${relative(root, file)}: ${b}`));
+    for (const s of found.specs) {
       if (!s.startsWith('.')) {
         bare.add(s);
         continue;
@@ -50,12 +62,14 @@ function walk(entry: string, ts: boolean) {
     }
   }
   const names = [...files].map((f) => relative(root, f).replace(/\\/g, '/').replace(/\.(ts|js)$/, ''));
-  return { files: [...files], names, bare: [...bare] };
+  return { files: [...files], names, bare: [...bare], bad };
 }
 
 function expectSafe(entry: string, ts: boolean) {
   const g = walk(entry, ts);
   expect(g.names).toContain('recorder');
+  // A load the walk cannot follow could reach anything.
+  expect(g.bad).toEqual([]);
   expect(g.names.filter((n) => FORBIDDEN.test(n))).toEqual([]);
   // Only Node built-ins: no ws, no MCP SDK, no other package.
   expect(g.bare.filter((b) => !b.startsWith('node:'))).toEqual([]);
@@ -102,6 +116,23 @@ describe('@mindmakr/reins/flight safety (design section 7)', () => {
     expect(core.names).toContain('index');
     expect(readFileSync(join(pkg, 'src', 'index.ts'), 'utf8')).toContain('__REINS_DEV_ONLY__');
     expect(specifiers(`import type { A } from './types.js';\nexport { b } from './b.js';\nconst x = await import('ws');`)).toEqual(['./b.js', 'ws']);
+  });
+
+  it('follows imports without whitespace and refuses loads it cannot follow', () => {
+    expect(specifiers(`import{a}from"./node.js";export*from'./bridge/hub.js';import"./side.js";import d,{e}from'./index.js'`)).toEqual([
+      './node.js',
+      './bridge/hub.js',
+      './side.js',
+      './index.js',
+    ]);
+    expect(specifiers(`import type{A}from'./types.js';import typeset from './typeset.js'`)).toEqual(['./typeset.js']);
+    expect(scan(`const m = await import('./ok.js'); const n = await import( "./ok2.js" )`)).toEqual({ specs: ['./ok.js', './ok2.js'], bad: [] });
+    expect(scan(`const name = './node.js'; await import(name)`).bad).toHaveLength(1);
+    expect(scan('await import(`./${x}.js`)').bad).toHaveLength(1);
+    expect(scan(`const ws = require('ws')`).bad).toHaveLength(1);
+    expect(scan(`const r = require ('ws')`).bad).toHaveLength(1);
+    expect(scan(`import { createRequire } from 'node:module'; const r = createRequire(import.meta.url);`).bad).toHaveLength(2);
+    expect(scan(`// require('ws') in a comment\nconst meta = import.meta.url;`).bad).toEqual([]);
   });
 
   it('never reaches development reins from the source entry', () => {

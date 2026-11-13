@@ -23,8 +23,11 @@ export interface Capture {
   pattern?: string;
   /** Express only: the matched mount (`req.baseUrl`). Real path text, not a pattern: strict mode never keeps it as it is. */
   mount?: string;
-  /** The request's header object, by reference. */
-  headers: unknown;
+  /**
+   * String headers, copied when the request began, and only when a development recorder asked for them
+   * (`Consumer.begin`). The strict recorder never sets or reads it.
+   */
+  headers?: Record<string, string>;
   status: number;
   ms: number;
   startMs: number;
@@ -32,9 +35,16 @@ export interface Capture {
   done: boolean;
   /** The connection closed before the response finished. */
   aborted: boolean;
+  /** At most `CAPTURE_MAX`; the rest are counted in `spansDropped`. */
   spans: RawSpan[];
+  /** At most `CAPTURE_MAX`; the rest are counted in `callsDropped`. */
   calls: RawCall[];
+  spansDropped: number;
+  callsDropped: number;
 }
+
+/** Spans and upstream calls kept per request (a long request, such as SSE, can make many); the rest are counted. */
+export const CAPTURE_MAX = 100;
 
 export interface RawSpan {
   name: string;
@@ -61,16 +71,26 @@ export interface RawCall {
 /** A started recorder. The hub calls it for every finished request, top-level span and top-level call. */
 export interface Consumer {
   kind: 'dev' | 'strict';
+  /** Optional: called when a request begins, to copy what this recorder needs from `req`. */
+  begin?(c: Capture, req: any): void;
   request(c: Capture): void;
-  span(s: RawSpan): void;
-  call(c: RawCall): void;
+  /**
+   * A span outside any request, or (with `late`) one that finished after its request was delivered. A late
+   * one is never added to the capture by the hub: a recorder that wants it there adds it with `keepSpan`.
+   */
+  span(s: RawSpan, late?: Capture): void;
+  /** An upstream call outside any request, or one that finished after its request was delivered (`late`). */
+  call(c: RawCall, late?: Capture): void;
   /** Counts an error of the recorder or of the hooks. Must not throw. */
   fault(): void;
 }
 
 export interface HookOptions {
-  /** Development only: the value of a `Server-Timing` header to add to the response. */
-  timing?: (c: Capture) => string;
+  /**
+   * Development only: the value of a `Server-Timing` header to add to the response. Used only while a
+   * development recorder is attached; nothing is added when it returns no string.
+   */
+  timing?: (c: Capture) => string | undefined;
 }
 
 export const r1 = (n: number) => Math.round(n * 10) / 10;
@@ -129,17 +149,18 @@ export interface DevInstruments {
   devRecording: boolean;
 }
 
+const devAttached = () => [...consumers].some((k) => k.kind === 'dev');
+
 export function devInstruments(env: Record<string, string | undefined> = process.env): DevInstruments {
-  return { production: env.NODE_ENV === 'production', devModuleLoaded: devModule, devRecording: [...consumers].some((k) => k.kind === 'dev') };
+  return { production: env.NODE_ENV === 'production', devModuleLoaded: devModule, devRecording: devAttached() };
 }
 
 // ---- inbound requests -------------------------------------------------------------------------------
 
 function begin(req: any): Capture {
-  return {
+  const c: Capture = {
     method: String(req.method || 'GET').toUpperCase(),
     url: String(req.originalUrl || req.url || '/'),
-    headers: req.headers,
     status: 0,
     ms: 0,
     startMs: Math.round(now()),
@@ -148,7 +169,23 @@ function begin(req: any): Capture {
     aborted: false,
     spans: [],
     calls: [],
+    spansDropped: 0,
+    callsDropped: 0,
   };
+  deliver((k) => k.begin?.(c, req));
+  return c;
+}
+
+/** Adds a span to a capture, up to `CAPTURE_MAX`; counts the rest. */
+export function keepSpan(c: Capture, s: RawSpan): void {
+  if (c.spans.length < CAPTURE_MAX) c.spans.push(s);
+  else c.spansDropped++;
+}
+
+/** Adds an upstream call to a capture, up to `CAPTURE_MAX`; counts the rest. */
+export function keepCall(c: Capture, k: RawCall): void {
+  if (c.calls.length < CAPTURE_MAX) c.calls.push(k);
+  else c.callsDropped++;
 }
 
 function end(c: Capture, status: unknown, route?: unknown, aborted = false) {
@@ -182,12 +219,15 @@ function track(c: Capture, req: any, res: any, o: HookOptions) {
   };
   res.once?.('finish', fin(false));
   res.once?.('close', fin(true));
+  // Development only: flight alone never changes a response, so the header needs a development recorder
+  // attached both when the request begins and when the head is written.
   const timing = o.timing;
-  if (timing && typeof res.writeHead === 'function') {
+  if (timing && devAttached() && typeof res.writeHead === 'function') {
     const writeHead = res.writeHead;
     res.writeHead = function (...args: any[]) {
       try {
-        if (!res.headersSent) res.setHeader('Server-Timing', timing(c));
+        const v = devAttached() && !res.headersSent ? timing(c) : undefined;
+        if (typeof v === 'string' && v) res.setHeader('Server-Timing', v);
       } catch {}
       return writeHead.apply(this, args);
     };
@@ -264,7 +304,9 @@ export function span<T>(name: string, fn: () => T): T {
   const done = (failed: boolean, error?: unknown) => {
     try {
       const s: RawSpan = { name: String(name).slice(0, 80), startMs: r1(t0 - (cap ? cap.startMs : 0)), ms: r1(now() - t0), failed, error };
-      cap ? cap.spans.push(s) : deliver((k) => k.span(s));
+      if (!cap) deliver((k) => k.span(s));
+      else if (cap.done) deliver((k) => k.span(s, cap));
+      else keepSpan(cap, s);
     } catch {
       fault();
     }
@@ -305,7 +347,11 @@ function subscribe() {
       p.e.failed = true;
       p.e.error = error;
     }
-    p.cap ? p.cap.calls.push(p.e) : deliver((k) => k.call(p.e));
+    const cap = p.cap;
+    // A capture that is done has been delivered: a late call goes to each recorder, never into it.
+    if (!cap) deliver((k) => k.call(p.e));
+    else if (cap.done) deliver((k) => k.call(p.e, cap));
+    else keepCall(cap, p.e);
   };
   const handlers: Record<string, (m: any) => void> = {
     'undici:request:create': ({ request }) => request && start(request, 'fetch', request.method, String(request.origin || ''), request.path),
@@ -426,8 +472,14 @@ export interface MinuteSummary {
 export interface StrictStats {
   /** Requests recorded. */
   recorded: number;
-  /** Records pushed out of a full buffer. */
+  /** Everything dropped: the sum of the three counts below. */
   dropped: number;
+  /** Request records pushed out of the full buffer. */
+  droppedRequests: number;
+  /** Upstream calls pushed out of the full top-level buffer, or past `CAPTURE_MAX` in one request. */
+  droppedCalls: number;
+  /** Spans pushed out of the full top-level buffer, or past `CAPTURE_MAX` in one request. */
+  droppedSpans: number;
   /** Errors of the recorder or the hooks, caught so the request completed normally. */
   errors: number;
   /** Requests with no route pattern. */
@@ -460,8 +512,11 @@ const OTHER = '(other)';
 const MAX_KEYS = 300;
 const BOUNDS = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, Infinity];
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT']);
-const CODE = /^[A-Z][A-Z0-9_]{1,39}$/;
-const ERROR_NAME = /^[A-Z][A-Za-z0-9]{0,39}$/;
+// Short known forms only, at most 24 characters: an errno-style code (`ECONNREFUSED`, letters only), a code
+// with an underscore (`UND_ERR_SOCKET`, `ERR_INVALID_URL`), or a class name ending in `Error`. Anything else,
+// such as a key-shaped `AKIAIOSFODNN7EXAMPLE` set as a code or a name, becomes `error`.
+const CODE = /^(?=.{2,24}$)(?:E[A-Z]+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)$/;
+const ERROR_NAME = /^[A-Z][A-Za-z]{0,18}Error$/;
 const SPAN_NAME = /^[\w.:-]{1,64}$/;
 const HOST = /^(?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63}$|^\[[0-9a-f:.]{2,45}\]$/;
 
@@ -512,17 +567,25 @@ function fits(parts: string[], p: string[]): boolean {
   return parts.length === p.length;
 }
 
-function bounded<T>(size: number, dropped: () => void) {
+/** A ring of at most `size` items, oldest first. A push into a full ring overwrites the oldest: O(1). */
+export function bounded<T>(size: number, dropped: () => void) {
   let a: T[] = [];
+  let head = 0;
+  const list = () => (head ? a.slice(head).concat(a.slice(0, head)) : a.slice());
   return {
     push(x: T) {
-      a.push(x);
-      while (a.length > size) a.shift(), dropped();
+      if (a.length < size) a.push(x);
+      else {
+        a[head] = x;
+        head = (head + 1) % size;
+        dropped();
+      }
     },
-    list: () => a.slice(),
+    list,
     drain: () => {
-      const r = a;
+      const r = list();
       a = [];
+      head = 0;
       return r;
     },
   };
@@ -574,11 +637,13 @@ export function createStrictRecorder(o: StrictOptions = {}) {
   const matchMount = routeMatcher(o.mounts);
   const onRecord = typeof o.onRecord === 'function' ? o.onRecord : undefined;
   const loop = createLoop();
-  const stats: StrictStats = { recorded: 0, dropped: 0, errors: 0, unmatched: 0, overflow: 0 };
-  const drop = () => void stats.dropped++;
-  let requests = bounded<StrictRequest>(size, drop);
-  let calls = bounded<StrictCall>(Math.ceil(size / 2), drop);
-  let spans = bounded<StrictSpan>(Math.ceil(size / 2), drop);
+  const stats = { recorded: 0, droppedRequests: 0, droppedCalls: 0, droppedSpans: 0, errors: 0, unmatched: 0, overflow: 0 };
+  const dropRequest = () => void stats.droppedRequests++;
+  const dropCall = () => void stats.droppedCalls++;
+  const dropSpan = () => void stats.droppedSpans++;
+  let requests = bounded<StrictRequest>(size, dropRequest);
+  let calls = bounded<StrictCall>(Math.ceil(size / 2), dropCall);
+  let spans = bounded<StrictSpan>(Math.ceil(size / 2), dropSpan);
   const minutes = new Map<number, Minute>();
   let detach: (() => void) | null = null;
 
@@ -635,7 +700,8 @@ export function createStrictRecorder(o: StrictOptions = {}) {
     if (!m) {
       m = { minute: key, requests: new Map(), upstream: new Map(), unmatched: 0, runtime: null };
       minutes.set(key, m);
-      while (minutes.size > keep) minutes.delete(minutes.keys().next().value as number);
+      // Evict the oldest minute, not the first inserted: a wall clock that steps back must not evict the current one.
+      while (minutes.size > keep) minutes.delete(Math.min(...minutes.keys()));
     }
     return m;
   }
@@ -677,12 +743,15 @@ export function createStrictRecorder(o: StrictOptions = {}) {
       };
       requests.push(r);
       stats.recorded++;
+      stats.droppedSpans += c.spansDropped;
+      stats.droppedCalls += c.callsDropped;
       const m = minute(r.at);
       if (r.route === UNMATCHED) m.unmatched++;
       add(m.requests, { method: r.method, route: r.route }, r.status, r.ms, !!r.error);
       for (const u of r.upstream) addCall(m, u);
       onRecord?.(r);
     },
+    // A late span or call (finished after its request was recorded) is kept as a top-level one.
     span(s) {
       spans.push(toSpan(s, Date.now()));
     },
@@ -729,16 +798,16 @@ export function createStrictRecorder(o: StrictOptions = {}) {
     /** Per-minute counts and timings, oldest first; closes minutes that have passed. */
     summaries(): MinuteSummary[] {
       roll(Date.now() - (Date.now() % 60000));
-      return [...minutes.values()].map(view);
+      return [...minutes.values()].sort((a, b) => a.minute - b.minute).map(view);
     },
-    stats: (): StrictStats => ({ ...stats }),
+    stats: (): StrictStats => ({ ...stats, dropped: stats.droppedRequests + stats.droppedCalls + stats.droppedSpans }),
     runtime: () => runtimeOf(loop),
     notChecked: () => notCheckedFacts(),
     /** Empties buffers and summaries; counters stay. */
     clear() {
-      requests = bounded<StrictRequest>(size, drop);
-      calls = bounded<StrictCall>(Math.ceil(size / 2), drop);
-      spans = bounded<StrictSpan>(Math.ceil(size / 2), drop);
+      requests = bounded<StrictRequest>(size, dropRequest);
+      calls = bounded<StrictCall>(Math.ceil(size / 2), dropCall);
+      spans = bounded<StrictSpan>(Math.ceil(size / 2), dropSpan);
       minutes.clear();
     },
   };
