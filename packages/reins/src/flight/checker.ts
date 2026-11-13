@@ -171,8 +171,8 @@ export async function check(store: FlightStore, manifest: ManifestResult | null,
       const partial = [...runs.values()].filter((r) => isPartial(r) && r.some((s) => s.step !== PRUNED_STEP && s.at >= since)).length;
       if (partial) out.blind.push({ kind: 'runs-partial', process: p.name, count: partial, since });
       // Kept for as long as the widest promise window, like `overdue-pruned`.
-      const unmarked = minutes.reduce((n, x) => n + (Number(x.markersDropped && own(x.markersDropped, p.name)) || 0), 0);
-      if (unmarked) out.blind.push({ kind: 'markers-dropped', process: p.name, count: unmarked, since: now - widest });
+      const markersGone = minutes.reduce((n, x) => n + (x.instance === PRUNE_INSTANCE ? Number(x.markersDropped && own(x.markersDropped, p.name)) || 0 : 0), 0);
+      if (markersGone) out.blind.push({ kind: 'markers-dropped', process: p.name, count: markersGone, since: now - widest });
       const timed = p.promises.some((x) => x.kind === 'within' || x.kind === 'ends');
       // A marker counts as an end here: a partial run is not judged overdue (`overdue-pruned` covers it).
       const open = timed ? group(await store.openRuns(p.name, [...p.ends, PRUNED_STEP])) : new Map<string, StepRecord[]>();

@@ -576,6 +576,37 @@ describe('probes that never settle (F6) and probe writes that fail (F15)', () =>
     expect((await base.probes())[0]).toMatchObject({ id: 'pool', ok: false, reason: 'timeout' });
   });
 
+  it('a hung probe write survives stop and start: 5 cycles leave exactly 1 pending write, and a later settle lets the next result be written', async () => {
+    const base = memoryStore();
+    let pending = 0;
+    let release!: () => void;
+    let hang = true;
+    const store: FlightStore = {
+      ...base,
+      putProbe: (r) => {
+        if (!hang) return base.putProbe(r);
+        pending++;
+        return new Promise<void>((res) => (release = () => (pending--, res())));
+      },
+    };
+    const p = createProbes();
+    p.register('pool', () => ({ ok: false }));
+    const declared = [{ id: 'pool', every: '1s', everyMs: 10 } as any];
+    for (let i = 0; i < 5; i++) {
+      p.start({ store, instance: 'i1', declared, timeoutMs: 5 });
+      await sleep(40);
+      p.stop();
+    }
+    expect(pending).toBe(1);
+    hang = false;
+    release();
+    p.start({ store, instance: 'i1', declared, timeoutMs: 5 });
+    for (let i = 0; i < 50 && !(await base.probes()).length; i++) await sleep(10);
+    p.stop();
+    expect(pending).toBe(0);
+    expect((await base.probes())[0]).toMatchObject({ id: 'pool', ok: false });
+  });
+
   it('a probe that settles is called again on its next period', async () => {
     let calls = 0;
     const p = createProbes();
