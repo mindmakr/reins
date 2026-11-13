@@ -97,6 +97,8 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     passing: Promise<CheckResult | null> | null;
     /** The live pass; work of a pass that ran past its time limit is ignored. */
     token: object | null;
+    /** The store work of a pass that ran past its time limit, while it has not settled: no new store work starts. */
+    hung: Promise<unknown> | null;
   } | null = null;
   let checkEvery = 60_000;
   let checkTimeout = CHECK_TIMEOUT_MS;
@@ -106,6 +108,12 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     const r = run;
     if (!r) return null;
     if (r.passing) return r.passing;
+    if (r.hung) {
+      // The last pass's store calls never came back: calling the store again would only pile up more (with pg,
+      // waiters in the app's own pool). This period says so without calling it.
+      r.lastCheck = notCheckedResult(r.manifest, Date.now(), { kind: 'store-unreachable', error: 'timeout' }, 'store-unreachable');
+      return r.lastCheck;
+    }
     // A lock its checker stopped renewing is taken over after three periods (at least three minutes).
     const ttl = 3 * Math.max(checkEvery, 60_000);
     // This pass is live until it ends or runs past its time limit; work that finishes later is ignored.
@@ -128,7 +136,14 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const limit = new Promise<CheckResult>((resolve) => {
-      timer = setTimeout(() => resolve(notCheckedResult(r.manifest, Date.now(), { kind: 'store-unreachable', error: 'timeout' }, 'store-unreachable')), checkTimeout);
+      timer = setTimeout(() => {
+        r.hung = work;
+        const settled = () => {
+          if (r.hung === work) r.hung = null;
+        };
+        work.then(settled, settled);
+        resolve(notCheckedResult(r.manifest, Date.now(), { kind: 'store-unreachable', error: 'timeout' }, 'store-unreachable'));
+      }, checkTimeout);
       (timer as any).unref?.();
     });
     const p: Promise<CheckResult | null> = Promise.race([work, limit])
@@ -179,7 +194,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
         const m = manifest?.ok ? manifest.manifest : undefined;
         const widest = Math.max(DEFAULT_WINDOW_MS, ...(m?.processes || []).flatMap((p) => p.promises.map((x) => x.windowMs)));
         const keep: Retention = { maxAgeMs: Math.max(RETENTION_DEFAULTS.maxAgeMs, widest + 86_400_000), ...(opts.retention && typeof opts.retention === 'object' ? opts.retention : {}) };
-        run = { store, writer, manifest, owner: `${instance}-${randomBytes(4).toString('hex')}`, retention: keep, timer: null, lastCheck: null, lastPrune: 0, passing: null, token: null };
+        run = { store, writer, manifest, owner: `${instance}-${randomBytes(4).toString('hex')}`, retention: keep, timer: null, lastCheck: null, lastPrune: 0, passing: null, token: null, hung: null };
         probes.start({ store, instance, declared: m?.probes || [], timeoutMs: nonNeg(opts.probeTimeoutMs, PROBE_TIMEOUT_MS) || PROBE_TIMEOUT_MS, onError: () => writer.storeError() });
         checkEvery = nonNeg(opts.checkEveryMs, 60_000);
         checkTimeout = Math.min(nonNeg(opts.checkTimeoutMs, CHECK_TIMEOUT_MS) || CHECK_TIMEOUT_MS, 3 * Math.max(checkEvery, 60_000));

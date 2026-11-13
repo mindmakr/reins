@@ -490,7 +490,9 @@ describe('a checker that cannot take the lock or reach the store (F4, F5)', () =
     expect(f.lastCheck()).toBe(r);
   });
 
-  it('a pass past its time limit ends with a blind fact, the next pass starts, and the late result is ignored', async () => {
+  // Round 3 (G4): this test used to expect the next pass to call the store while the timed-out call was still
+  // pending, which piled up one pending call per period. The next pass now reports the timeout without calling.
+  it('a pass past its time limit ends with a blind fact; while its store call is pending no new store work starts; the late result is ignored', async () => {
     const store = memoryStore();
     let release!: () => void;
     const hang = new Promise<void>((r) => (release = r));
@@ -503,11 +505,27 @@ describe('a checker that cannot take the lock or reach the store (F4, F5)', () =
     expect(r1.promises.every((p) => p.state === 'not-checked' && p.reason === 'store-unreachable')).toBe(true);
     expect(f.lastCheck()).toBe(r1);
     const r2 = (await f.checkNow())!;
-    expect(calls).toBe(2);
-    expect(r2.blind).not.toContainEqual({ kind: 'store-unreachable', error: 'timeout' });
+    expect(calls).toBe(1);
+    expect(r2.blind).toContainEqual({ kind: 'store-unreachable', error: 'timeout' });
+    expect(f.lastCheck()).toBe(r2);
     release();
     await sleep(30);
-    expect(f.lastCheck()).toBe(r2);
+    expect(f.lastCheck()).toBe(r2); // the late result of the first pass is ignored
+    const r3 = (await f.checkNow())!;
+    expect(calls).toBe(2);
+    expect(r3.blind).not.toContainEqual({ kind: 'store-unreachable', error: 'timeout' });
+  });
+
+  it('50 periods with a store that hangs leave one pending store call', async () => {
+    let pending = 0;
+    const s: FlightStore = { ...memoryStore(), lock: () => (pending++, new Promise<boolean>(() => {})) };
+    const f = newFlight();
+    f.start({ manifest: manifestData(), store: s, checkEveryMs: 0, checkTimeoutMs: 5 });
+    for (let i = 0; i < 50; i++) {
+      const r = (await f.checkNow())!;
+      expect(r.blind).toContainEqual({ kind: 'store-unreachable', error: 'timeout' });
+    }
+    expect(pending).toBe(1);
   });
 });
 
