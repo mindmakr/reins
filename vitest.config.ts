@@ -11,6 +11,7 @@ export default defineConfig({
       { find: /^@mindmakr\/reins\/next\/token-route$/, replacement: src('reins/src/next-token-route.ts') },
       { find: /^@mindmakr\/reins\/expo\/metro$/, replacement: src('reins/src/metro.ts') },
       { find: /^@mindmakr\/reins\/bridge$/, replacement: src('reins/src/bridge/index.ts') },
+      { find: /^@mindmakr\/reins\/flight$/, replacement: src('reins/src/flight.ts') },
       { find: /^@mindmakr\/reins\/(server|stub|adapters|react|expo|metro|vite|next|verify|report|node|record|record-stub)$/, replacement: src('reins/src/$1.ts') },
     ],
   },
