@@ -7,6 +7,10 @@ const DAY = 86_400_000;
 
 export const step = (key: string, s: string, at: number, process = 'payout', instance = 'i1'): StepRecord => ({ process, key, step: s, at, instance });
 
+/** Round 3 (G3): a run removed by retention leaves one marker step; `real` leaves markers out, `marker` makes one. */
+export const real = (steps: StepRecord[]) => steps.filter((s) => s.step !== '(pruned)');
+export const marker = (key: string, at: number, process = 'payout'): StepRecord => ({ process, key, step: '(pruned)', at, instance: '(prune)' });
+
 export const minute = (instance: string, at: number, extra: Partial<InstanceMinute> = {}): InstanceMinute => ({
   instance,
   minute: at - (at % 60_000),
@@ -169,7 +173,7 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
       { key: 'done', state: 'resolved', updatedAt: t, data: {} },
     ]);
     await store.prune({ maxAgeMs: DAY }, t + 2 * DAY);
-    expect(await store.runSteps('payout', 0)).toEqual([]);
+    expect(await store.runSteps('payout', 0)).toEqual([marker('p1', t)]);
     expect(await store.minutes(0)).toEqual([]);
     expect(await store.probes()).toEqual([]);
     expect((await store.findings()).map((f) => f.key)).toEqual(['open-one']);
@@ -204,7 +208,7 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
       step('r1', 'requested', t, 'refund'), // a process not named: not counted
     ]);
     await store.prune({ maxAgeMs: DAY }, t + 2 * DAY, { payout: ['ledger.debited', 'bank.failed'] });
-    expect(await store.runSteps('payout', 0)).toEqual([]);
+    expect(real(await store.runSteps('payout', 0))).toEqual([]);
     // Another handle (a watcher) reads the count back.
     const got = (await second().minutes(0)).filter((m) => m.instance === '(prune)');
     expect(got).toHaveLength(1);
@@ -217,7 +221,8 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
 
   it('prune by age removes whole runs: a run stays whole while its newest step is inside the bounds', async () => {
     const { store } = await make();
-    const t = Date.now() - 8 * DAY;
+    // Pruned at a time ahead of now: the file store leaves segments written in the hour before the prune alone.
+    const t = Date.now();
     await store.addSteps([
       step('long', 'requested', t), // open, last step at t + 6.5 days
       step('long', 'bank.pending', t + 6.5 * DAY),
@@ -229,7 +234,7 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     ]);
     await store.prune({ maxAgeMs: 7 * DAY }, t + 7 * DAY + 3_600_000, { payout: ['ledger.debited', 'bank.failed'] });
     const got = await store.runSteps('payout', 0);
-    expect(got.map((s) => `${s.key}:${s.step}`).sort()).toEqual(['long:bank.pending', 'long:requested', 'ord:bank.settled', 'ord:ledger.debited']);
+    expect(got.map((s) => `${s.key}:${s.step}`).sort()).toEqual(['long:bank.pending', 'long:requested', 'old:(pruned)', 'oldend:(pruned)', 'ord:bank.settled', 'ord:ledger.debited']);
     expect((await store.minutes(0)).find((m) => m.instance === '(prune)')!.runsPruned).toEqual({ payout: 1 });
   });
 
@@ -238,9 +243,9 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     const t = Date.now();
     // Ten runs of three steps; the even ones reached an end step.
     await store.addSteps(Array.from({ length: 10 }, (_, i) => [step(`r${i}`, 'requested', t + i), step(`r${i}`, 'bank.sent', t + i), step(`r${i}`, i % 2 ? 'bank.pending' : 'ledger.debited', t + i)]).flat());
-    // Another handle prunes (a store object never prunes the segment it is still appending to).
-    await second().prune({ maxSteps: 10 }, t + 100, { payout: ['ledger.debited'] });
-    const got = await store.runSteps('payout', 0);
+    // Another handle prunes, two hours on (the file store leaves segments written in the last hour alone).
+    await second().prune({ maxSteps: 10 }, t + 2 * 3_600_000, { payout: ['ledger.debited'] });
+    const got = real(await store.runSteps('payout', 0));
     expect(got.length).toBeLessThanOrEqual(10);
     const left = new Map<string, number>();
     for (const s of got) left.set(s.key, (left.get(s.key) || 0) + 1);
@@ -251,6 +256,39 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     // What is left is the newest runs.
     const kept = [...left.keys()].map((k) => Number(k.slice(1))).sort((a, b) => a - b);
     expect(kept).toEqual(kept.length ? Array.from({ length: kept.length }, (_, i) => 10 - kept.length + i) : []);
+    // Each removed run left one marker at its newest step's time.
+    const marks = (await store.runSteps('payout', 0)).filter((s) => s.step === '(pruned)');
+    expect(marks.map((s) => s.key).sort()).toEqual(Array.from({ length: 10 - kept.length }, (_, i) => `r${i}`).sort());
+    for (const m of marks) expect(m.at).toBe(t + Number(m.key.slice(1)));
+  });
+
+  it('a removed run leaves a marker, so a later step for its key joins a run known to be partial; markers go after twice the age', async () => {
+    const { store } = await make();
+    const t = Date.now();
+    const ends = { payout: ['ledger.debited'] };
+    await store.addSteps([step('p1', 'bank.settled', t), step('p1', 'ledger.debited', t + 1000), step('keep', 'requested', t + 7 * DAY)]);
+    await store.prune({ maxAgeMs: 7 * DAY }, t + 8 * DAY, ends);
+    expect(await store.runSteps('payout', 0)).toEqual([marker('p1', t + 1000), step('keep', 'requested', t + 7 * DAY)]);
+    // A second debit of p1 arrives after p1 was removed: it joins the marker, not a fresh run.
+    await store.addSteps([step('p1', 'ledger.debited', t + 8 * DAY)]);
+    expect(await store.runSteps('payout', t + 7.5 * DAY)).toEqual([marker('p1', t + 1000), step('p1', 'ledger.debited', t + 8 * DAY)]);
+    // The marker inside a run that has real steps stays while they do; keep (open) goes and is counted once.
+    await store.prune({ maxAgeMs: 7 * DAY }, t + 14 * DAY + 2000, ends);
+    expect(await store.runSteps('payout', 0)).toEqual([marker('p1', t + 1000), marker('keep', t + 7 * DAY), step('p1', 'ledger.debited', t + 8 * DAY)]);
+    // Past twice the age bound nothing is left; p1, partial and open, is not counted as overdue again.
+    const pruned = (since: number) => store.minutes(since).then((ms) => ms.filter((m) => m.instance === '(prune)').reduce((n, m) => n + (m.runsPruned?.payout || 0), 0));
+    expect(await pruned(0)).toBe(1);
+    await store.prune({ maxAgeMs: 7 * DAY }, t + 30 * DAY, ends);
+    expect(await store.runSteps('payout', 0)).toEqual([]);
+    expect(await pruned(t + 29 * DAY)).toBe(0);
+  });
+
+  it('the cap on steps leaves markers for the runs it removes, and keeps at most maxSteps runs that hold only a marker', async () => {
+    const { store } = await make();
+    const t = Date.now();
+    await store.addSteps(Array.from({ length: 6 }, (_, i) => step(`r${i}`, 'requested', t + i)));
+    await store.prune({ maxSteps: 2 }, t + 2 * 3_600_000);
+    expect(await store.runSteps('payout', 0)).toEqual([marker('r2', t + 2), marker('r3', t + 3), step('r4', 'requested', t + 4), step('r5', 'requested', t + 5)]);
   });
 
   it('prune without end steps writes no count', async () => {

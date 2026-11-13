@@ -54,4 +54,30 @@ describe.skipIf(!url)('postgres store against a real Postgres (B11)', () => {
     expect(await store.lock('a', 1000)).toBe(true); // the lock table is still there
     for (const { text } of statements) for (const v of [evil, 'payout', 'ledger.debited', 'one-debit']) expect(text).not.toContain(v);
   });
+
+  it('a step inserted for a run while the prune removes it stays beside the marker: the run is known to be partial', async () => {
+    await reset();
+    const store = pgStore({ query });
+    const t = Date.now();
+    await store.addSteps([step('p1', 'ledger.debited', t)]);
+    // A writer's transaction adds the second debit of p1 and commits only after the prune has run.
+    const writer = await pool.connect();
+    try {
+      await writer.query('begin');
+      await writer.query(`insert into reins_flight_steps (process, key, step, at, instance) values ('payout', 'p1', 'ledger.debited', $1, 'i2')`, [t + 9 * 86_400_000]);
+      await store.prune({ maxAgeMs: 7 * 86_400_000 }, t + 8 * 86_400_000);
+      await writer.query('commit');
+    } finally {
+      writer.release();
+    }
+    expect((await store.runSteps('payout', 0)).map((s) => s.step)).toEqual(['(pruned)', 'ledger.debited']);
+  });
+
+  it('a bad row passed straight to addSteps never reaches Postgres (a NUL key would fail the batch)', async () => {
+    await reset();
+    statements.length = 0;
+    const store = pgStore({ query });
+    await store.addSteps([step('a\u0000b', 'requested', 1)]);
+    expect(statements).toEqual([]);
+  });
 });

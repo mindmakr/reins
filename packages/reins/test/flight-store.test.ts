@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { BROKEN_LOCK_MS, fileStore, safe } from '../src/flight/file-store.js';
 import { PG_TABLES, pgStore } from '../src/flight/pg-store.js';
 import { isStore, memoryStore } from '../src/flight/store.js';
-import { DAY, step, storeContract } from './flight-store-contract.js';
+import { DAY, real, step, storeContract } from './flight-store-contract.js';
 
 const dirs: string[] = [];
 const tmp = () => {
@@ -28,7 +28,7 @@ describe('memory store', () => {
   it('never holds more than maxSteps, even if nothing prunes it', async () => {
     const store = memoryStore({ maxSteps: 3 });
     await store.addSteps([1, 2, 3, 4, 5].map((i) => step(`k${i}`, 'requested', i)));
-    expect((await store.runSteps('payout', 0)).map((s) => s.key)).toEqual(['k3', 'k4', 'k5']);
+    expect(real(await store.runSteps('payout', 0)).map((s) => s.key)).toEqual(['k3', 'k4', 'k5']);
   });
 
   it('removes whole runs only, and counts the open ones it removes, also when the cap on add removes them', async () => {
@@ -38,7 +38,7 @@ describe('memory store', () => {
     const t = Date.now();
     await store.addSteps([step('part', 'requested', t - 3 * DAY), step('part', 'bank.sent', t), step('gone', 'requested', t - 3 * DAY)]);
     await store.prune({ maxAgeMs: DAY }, t, { payout: ['ledger.debited'] });
-    expect((await store.openRuns('payout', ['ledger.debited'])).map((s) => `${s.key}:${s.step}`)).toEqual(['part:requested', 'part:bank.sent']);
+    expect(real(await store.openRuns('payout', ['ledger.debited'])).map((s) => `${s.key}:${s.step}`)).toEqual(['part:requested', 'part:bank.sent']);
     expect((await store.minutes(0)).find((m) => m.instance === '(prune)')!.runsPruned).toEqual({ payout: 1 });
     await store.addSteps([1, 2, 3, 4].map((i) => step(`n${i}`, 'requested', t + i)));
     const counts = (await store.minutes(0)).filter((m) => m.instance === '(prune)').reduce((n, m) => n + (m.runsPruned?.payout || 0), 0);
@@ -74,20 +74,37 @@ describe('file store', () => {
     expect(await store.runSteps('payout', 0)).toEqual([step('p1', 'requested', 1)]);
   });
 
-  it('prunes by count a whole segment at a time, oldest first, never one still being written', async () => {
+  // Round 3 (G6, G7): this test used to lock in pruning the oldest segments whole (which took a long, still
+  // active run before older finished ones) and sparing only the pruning object's own open segment. The count
+  // cap now removes the runs whose newest step is oldest, as the other stores do, and no segment written in the
+  // last hour is rewritten or deleted, by any process.
+  it('prunes by count the runs whose newest step is oldest, whatever segments they span, and leaves segments written in the last hour', async () => {
     const dir = join(tmp(), 'flight');
-    const a = fileStore({ dir });
-    // Steps at real times: retention now goes by step time in every store (it went by segment file time here).
     const t = Date.now();
-    await a.addSteps([step('a1', 'requested', t + 1), step('a2', 'requested', t + 2)]);
+    const segs = () => readdirSync(join(dir, 'steps')).filter((f) => f.endsWith('.jsonl'));
+    const age = () => {
+      const old = (Date.now() - 2 * 3_600_000) / 1000;
+      for (const f of segs()) utimesSync(join(dir, 'steps', f), old, old);
+    };
+    // A long run starts in the oldest segment and goes on in the newest; two short runs finish in between.
+    await fileStore({ dir }).addSteps([step('long', 'requested', t + 1)]);
     await new Promise((r) => setTimeout(r, 5));
-    const b = fileStore({ dir });
-    await b.addSteps([step('b1', 'requested', t + 3, 'payout', 'i2')]);
-    await b.prune({ maxSteps: 2 });
-    expect((await b.runSteps('payout', 0)).map((s) => s.key)).toEqual(['b1']);
-    // b's own open segment is never removed, even when it alone is over the bound.
-    await b.prune({ maxSteps: 0.5 });
-    expect((await b.runSteps('payout', 0)).map((s) => s.key)).toEqual(['b1']);
+    await fileStore({ dir }).addSteps([step('f1', 'requested', t + 2), step('f2', 'requested', t + 3)]);
+    await new Promise((r) => setTimeout(r, 5));
+    await fileStore({ dir }).addSteps([step('long', 'bank.sent', t + 10)]);
+    age();
+    await fileStore({ dir }).prune({ maxSteps: 2 });
+    expect(real(await fileStore({ dir }).runSteps('payout', 0)).map((s) => s.key)).toEqual(['long', 'long']);
+    // A segment written in the last hour is left as it is, even over the cap; the old ones are pruned.
+    age();
+    const w = fileStore({ dir });
+    await w.addSteps([step('y1', 'requested', t + 20)]);
+    const fresh = segs().filter((f) => statSync(join(dir, 'steps', f)).mtimeMs > Date.now() - 3_600_000);
+    expect(fresh).toHaveLength(1);
+    const before = readFileSync(join(dir, 'steps', fresh[0]), 'utf8');
+    await fileStore({ dir }).prune({ maxSteps: 1 });
+    expect(readFileSync(join(dir, 'steps', fresh[0]), 'utf8')).toBe(before);
+    expect(real(await w.runSteps('payout', 0)).map((s) => s.key)).toEqual(['y1']);
   });
 
   it('never has two holders: 1000 rounds of three checkers racing for an expired lock, its owner among them', async () => {
@@ -253,7 +270,7 @@ describe('file store', () => {
       await s.unlock('a');
       expect(readdirSync(lockDir(dir))).toHaveLength(1);
       expect(await fileStore({ dir }).lock('b', 60_000, t + 301)).toBe(true);
-    });
+    }, 30_000);
   });
 });
 

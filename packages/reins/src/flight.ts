@@ -168,7 +168,8 @@ export function createFlight(env: Record<string, string | undefined> = process.e
       try {
         if (opts.store !== undefined && !isStore(opts.store)) return false;
         if (opts.instance !== undefined && !(typeof opts.instance === 'string' && INSTANCE.test(opts.instance))) return false;
-        const store = opts.store || memoryStore(opts.retention);
+        // The memory store is told the end steps now, so its cap on add counts the open runs it removes before the first prune.
+        const store = opts.store || memoryStore({ ...(opts.retention && typeof opts.retention === 'object' ? opts.retention : {}), ends: endsOf(manifest) });
         const instance = opts.instance || randomBytes(6).toString('hex');
         r = createStrictRecorder(opts);
         r.start();

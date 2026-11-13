@@ -3,7 +3,7 @@
 // the blind facts: what flight itself could not see. Turning these into findings is the next layer's job.
 // Imports: Node built-ins and reins' shared modules only (the flight safety test walks this file).
 import { DEFAULT_WINDOW_MS, type FlightManifest, type FlightProcess, type FlightPromise, type ManifestProblem, type ManifestResult, type PromiseKind } from './manifest.js';
-import { type FlightStore, type InstanceMinute, PRUNE_INSTANCE, type ProbeFailure, type ProbeResult, type StepRecord } from './store.js';
+import { type FlightStore, type InstanceMinute, PRUNE_INSTANCE, PRUNED_STEP, type ProbeFailure, type ProbeResult, type StepRecord } from './store.js';
 import { errorCode } from '../recorder.js';
 import { OTHER_PROCESS } from './steps.js';
 
@@ -35,6 +35,8 @@ interface CheckBase {
   since: number;
   /** Runs checked: those with a step inside the window. */
   runs: number;
+  /** Runs with a step inside the window that were not judged: retention removed part of them (`runs-partial`). */
+  partial: number;
   /** Steps of this process dropped inside the window (0 when none). */
   stepsDropped: number;
 }
@@ -71,6 +73,11 @@ export type BlindFact =
   | { kind: 'steps-dropped'; process: string; count: number; since: number }
   /** Runs retention removed while they had reached no end step, so they may have been overdue (B7). */
   | { kind: 'overdue-pruned'; process: string; count: number; since: number }
+  /**
+   * Runs with a step inside the window that retention removed before and that have since had a step again: part of
+   * each is gone, so once, order, retries, within and ends do not judge them (the other runs are judged).
+   */
+  | { kind: 'runs-partial'; process: string; count: number; since: number }
   | { kind: 'store-write-failed'; count: number; since: number }
   | { kind: 'no-instance'; since: number }
   | { kind: 'probe-stale'; id: string; lastAt: number; everyMs: number }
@@ -124,7 +131,7 @@ export function notCheckedResult(manifest: ManifestResult | null, now: number, f
     const all = [...p.promises.map((x) => ({ id: x.id, kind: x.kind, windowMs: x.windowMs })), ...Object.keys(p.retries || {}).map((s) => ({ id: `retries:${s}`, kind: 'retries' as const, windowMs: DEFAULT_WINDOW_MS }))];
     for (const x of all) {
       if (seen.has(`${p.name} ${x.id}`)) continue;
-      out.promises.push({ process: p.name, ...x, since: now - x.windowMs, runs: 0, stepsDropped: 0, state: 'not-checked', reason });
+      out.promises.push({ process: p.name, ...x, since: now - x.windowMs, runs: 0, partial: 0, stepsDropped: 0, state: 'not-checked', reason });
     }
   }
   out.probes = m.probes.map((x) => ({ id: x.id, everyMs: x.everyMs, lastAt: null, state: 'not-checked', reason }));
@@ -156,8 +163,11 @@ export async function check(store: FlightStore, manifest: ManifestResult | null,
       const dropped = droppedIn(minutes, p.name, since);
       if (dropped) out.blind.push({ kind: 'steps-dropped', process: p.name, count: dropped, since });
       const runs = group(await store.runSteps(p.name, since));
+      const partial = [...runs.values()].filter((r) => isPartial(r) && r.some((s) => s.step !== PRUNED_STEP && s.at >= since)).length;
+      if (partial) out.blind.push({ kind: 'runs-partial', process: p.name, count: partial, since });
       const timed = p.promises.some((x) => x.kind === 'within' || x.kind === 'ends');
-      const open = timed ? group(await store.openRuns(p.name, p.ends)) : new Map<string, StepRecord[]>();
+      // A marker counts as an end here: a partial run is not judged overdue (`overdue-pruned` covers it).
+      const open = timed ? group(await store.openRuns(p.name, [...p.ends, PRUNED_STEP])) : new Map<string, StepRecord[]>();
       if (timed) {
         // Kept for as long as the widest promise window (at least a day), so the fact does not vanish a day
         // after the prune while a longer window still covers it.
@@ -195,9 +205,22 @@ function group(steps: StepRecord[]): Map<string, StepRecord[]> {
   return runs;
 }
 
-/** Runs with at least one step at or after `since` (design C15). */
-function inWindow(runs: Map<string, StepRecord[]>, since: number): Array<[string, StepRecord[]]> {
-  return [...runs].filter(([, steps]) => steps.some((s) => s.at >= since));
+/** Whether retention removed part of a run: it holds a marker. */
+const isPartial = (steps: StepRecord[]) => steps.some((s) => s.step === PRUNED_STEP);
+
+/**
+ * Runs with at least one step at or after `since` (design C15), split into those judged and the count of
+ * partial ones, which are not judged. A run holding only its marker is neither: nothing of it is left to judge.
+ */
+function inWindow(runs: Map<string, StepRecord[]>, since: number): { checked: Array<[string, StepRecord[]]>; partial: number } {
+  const checked: Array<[string, StepRecord[]]> = [];
+  let partial = 0;
+  for (const [key, steps] of runs) {
+    if (!steps.some((s) => s.step !== PRUNED_STEP && s.at >= since)) continue;
+    if (isPartial(steps)) partial++;
+    else checked.push([key, steps]);
+  }
+  return { checked, partial };
 }
 
 interface Breach {
@@ -219,12 +242,12 @@ function verdict(base: CheckBase, breaches: Breach[], late: LateRun[]): PromiseC
  */
 function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string, StepRecord[]>, open: Map<string, StepRecord[]>, minutes: InstanceMinute[], now: number): PromiseCheck {
   const since = now - promise.windowMs;
-  const checked = inWindow(runs, since);
+  const { checked, partial } = inWindow(runs, since);
   if (promise.kind === 'within' || promise.kind === 'ends') {
     const seen = new Set(checked.map(([k]) => k));
-    for (const [k, steps] of open) if (!seen.has(k)) checked.push([k, steps]);
+    for (const [k, steps] of open) if (!seen.has(k) && !isPartial(steps)) checked.push([k, steps]);
   }
-  const base: CheckBase = { process: p.name, id: promise.id, kind: promise.kind, windowMs: promise.windowMs, since, runs: checked.length, stepsDropped: droppedIn(minutes, p.name, since) };
+  const base: CheckBase = { process: p.name, id: promise.id, kind: promise.kind, windowMs: promise.windowMs, since, runs: checked.length, partial, stepsDropped: droppedIn(minutes, p.name, since) };
   const breaches: Breach[] = [];
   const late: LateRun[] = [];
 
@@ -276,8 +299,8 @@ function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string
 /** `retries: { step: n }`: one first attempt and up to n retries, so n + 1 records per key; one more is a breach. */
 function checkRetries(process: string, step: string, n: number, runs: Map<string, StepRecord[]>, minutes: InstanceMinute[], now: number): PromiseCheck {
   const since = now - DEFAULT_WINDOW_MS;
-  const checked = inWindow(runs, since);
-  const base: CheckBase = { process, id: `retries:${step}`, kind: 'retries', windowMs: DEFAULT_WINDOW_MS, since, runs: checked.length, stepsDropped: droppedIn(minutes, process, since) };
+  const { checked, partial } = inWindow(runs, since);
+  const base: CheckBase = { process, id: `retries:${step}`, kind: 'retries', windowMs: DEFAULT_WINDOW_MS, since, runs: checked.length, partial, stepsDropped: droppedIn(minutes, process, since) };
   if (base.stepsDropped > 0) return { ...base, state: 'not-checked', reason: 'steps-dropped' };
   const breaches: Breach[] = [];
   for (const [key, steps] of checked) {

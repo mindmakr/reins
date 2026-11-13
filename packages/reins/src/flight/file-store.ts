@@ -16,6 +16,10 @@ import { join } from 'node:path';
 import {
   byTime,
   countOpen,
+  markerOf,
+  PRUNE_INSTANCE,
+  pruneBounds,
+  summarize,
   type FindingRecord,
   type FlightStore,
   goodSteps,
@@ -28,7 +32,6 @@ import {
   recordPruned,
   type Retention,
   runId,
-  type RunSummary,
   retention,
   selectOpen,
   selectRuns,
@@ -153,8 +156,8 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
     return out.sort((a, b) => a.minute - b.minute);
   }
 
-  type Stored = StepRecord & { seq: number; file: string };
-  const strip = ({ seq: _s, file: _f, ...s }: Stored): StepRecord => s;
+  type Stored = StepRecord & { seq: number; file: string; mtimeMs: number };
+  const strip = ({ seq: _s, file: _f, mtimeMs: _m, ...s }: Stored): StepRecord => s;
 
   /**
    * Parsed segments, kept while their size and time are unchanged, so a checker pass (which reads the steps of
@@ -164,11 +167,11 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
   const cache = new Map<string, { size: number; mtimeMs: number; steps: StepRecord[] }>();
   let idle: ReturnType<typeof setTimeout> | null = null;
 
-  async function readSegment(file: string): Promise<StepRecord[] | null> {
+  async function readSegment(file: string): Promise<{ steps: StepRecord[]; mtimeMs: number } | null> {
     const st = await stat(file).catch(() => null);
     if (!st || !st.isFile()) return null; // pruned while listing, or not a file
     const hit = cache.get(file);
-    if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.steps;
+    if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return { steps: hit.steps, mtimeMs: st.mtimeMs };
     let text = '';
     try {
       text = await readFile(file, 'utf8');
@@ -190,7 +193,7 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
     }
     // Only a segment read whole, at the size seen, is kept: one still being appended to is read again.
     if (Buffer.byteLength(text) === st.size) cache.set(file, { size: st.size, mtimeMs: st.mtimeMs, steps });
-    return steps;
+    return { steps, mtimeMs: st.mtimeMs };
   }
 
   async function readSteps(): Promise<Stored[]> {
@@ -201,8 +204,8 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
     for (const f of files) {
       const file = join(stepsDir, f);
       seen.add(file);
-      const steps = await readSegment(file);
-      if (steps) for (const s of steps) out.push({ ...s, seq: seq++, file });
+      const seg = await readSegment(file);
+      if (seg) for (const s of seg.steps) out.push({ ...s, seq: seq++, file, mtimeMs: seg.mtimeMs });
     }
     for (const file of cache.keys()) if (!seen.has(file)) cache.delete(file);
     if (idle) clearTimeout(idle);
@@ -236,7 +239,7 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
             }
             const take = rest.slice(0, SEGMENT_LINES - seg.lines);
             rest = rest.slice(take.length);
-            await appendFile(seg.file, take.map((s) => JSON.stringify({ process: s.process, key: s.key, step: s.step, at: s.at, instance: s.instance }) + '\n').join(''), { mode: 0o600 });
+            await appendFile(seg.file, take.map(line).join(''), { mode: 0o600 });
             seg.lines += take.length;
           }
         }
@@ -289,55 +292,41 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
       queued(async () => {
         const k = retention({ ...keep, ...r2 });
         const cut = now - k.maxAgeMs;
-        // Steps: whole runs only, never single steps (B3, B7). By age, a run goes when its newest step is before
-        // the cut. By count, the oldest segments are taken first (never one this store object is still
-        // appending to), and every run with a step in them goes whole. A segment left with no steps is deleted;
-        // one left with some is rewritten without the removed runs.
-        const open = new Set([...segments.values()].map((s) => s.file));
-        const all = await readSteps();
-        const runs = new Map<string, RunSummary & { files: Set<string> }>();
-        const perFile = new Map<string, Stored[]>();
-        for (const s of all) {
-          const id = runId(s.process, s.key);
-          let r = runs.get(id);
-          if (!r) runs.set(id, (r = { process: s.process, key: s.key, last: s.at, size: 0, steps: [], files: new Set() }));
-          r.steps.push(s);
-          r.size++;
-          if (s.at > r.last) r.last = s.at;
-          r.files.add(s.file);
-          const f = perFile.get(s.file);
-          if (f) f.push(s);
-          else perFile.set(s.file, [s]);
+        // Steps: whole runs only (B3, B7), oldest first, each leaving a marker (planPrune). A segment modified
+        // within the last hour may still be appended to by a writer (a writer starts a new segment each hour),
+        // so it is never rewritten or deleted: a run with a step in one is left for a later prune. Markers are
+        // written first, so a crash part way leaves a run partial (and known to be), never silently gone.
+        const runs = summarize(await readSteps());
+        const young = (r: { steps: Stored[] }) => r.steps.some((s) => s.mtimeMs > now - HOUR);
+        const plan = planPrune(runs.values(), pruneBounds(k, now), young);
+        if (plan.mark.length) {
+          const file = join(stepsDir, `${Date.now()}-${safe(PRUNE_INSTANCE)}-${randomBytes(3).toString('hex')}.jsonl`);
+          await appendFile(file, plan.mark.map((r) => line(markerOf(r))).join(''), { mode: 0o600 });
         }
-        const gone = new Set(planPrune(runs.values(), cut, Infinity));
-        let total = all.length;
-        for (const r of gone) total -= r.size;
-        if (total > k.maxSteps) {
-          for (const [file, steps] of perFile) {
-            if (total <= k.maxSteps) break;
-            if (open.has(file)) continue;
-            for (const s of steps) {
-              const r = runs.get(runId(s.process, s.key))!;
-              if (gone.has(r)) continue;
-              gone.add(r);
-              total -= r.size;
-            }
+        const goneIds = new Set(plan.gone.map((r) => runId(r.process, r.key)));
+        const touched = new Set(plan.gone.flatMap((r) => r.steps.map((s) => s.file)));
+        const left = new Map<string, Stored[]>();
+        for (const r of runs.values()) {
+          if (goneIds.has(runId(r.process, r.key))) continue;
+          for (const s of r.steps) {
+            if (!touched.has(s.file)) continue;
+            const l = left.get(s.file);
+            if (l) l.push(s);
+            else left.set(s.file, [s]);
           }
         }
-        const goneIds = new Set([...gone].map((r) => runId(r.process, r.key)));
-        const touched = new Set([...gone].flatMap((r) => [...r.files]));
         for (const file of touched) {
-          const kept = (perFile.get(file) || []).filter((s) => !goneIds.has(runId(s.process, s.key)));
+          const kept = (left.get(file) || []).sort((a, b) => a.seq - b.seq);
           if (!kept.length) {
             await unlink(file).catch(() => {});
             for (const [i, s] of segments) if (s.file === file) segments.delete(i);
           } else {
-            await writeAtomic(file, kept.map((s) => JSON.stringify({ process: s.process, key: s.key, step: s.step, at: s.at, instance: s.instance }) + '\n').join(''));
+            await writeAtomic(file, kept.map(line).join(''));
             for (const s of segments.values()) if (s.file === file) s.lines = kept.length;
           }
           cache.delete(file);
         }
-        const counts = countOpen(gone, ends);
+        const counts = countOpen(plan.gone, ends);
         for (const f of await listFiles(minutesDir)) {
           const hour = Number(f.slice(f.lastIndexOf('-') + 1, -5));
           if (f.endsWith('.json') && hour + HOUR < cut) await unlink(join(minutesDir, f)).catch(() => {});
@@ -362,6 +351,9 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
       }),
   };
 }
+
+/** One step as a segment line. */
+const line = (s: StepRecord) => JSON.stringify({ process: s.process, key: s.key, step: s.step, at: s.at, instance: s.instance }) + '\n';
 
 /** Segment files sort by their start time, the number before the first `-`. */
 const byStart = (a: string, b: string) => Number(a.split('-')[0]) - Number(b.split('-')[0]) || (a < b ? -1 : a > b ? 1 : 0);

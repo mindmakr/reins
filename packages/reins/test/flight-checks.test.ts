@@ -201,8 +201,77 @@ describe('retention never leaves part of a run (F3)', () => {
     await s.addSteps([step('p1', 'bank.settled', NOW - 3 * H), step('p1', 'ledger.debited', NOW - 2 * H), step('p2', 'requested', NOW - 2 * DAY), step('p2', 'bank.sent', NOW - 4 * H)]);
     const r = await check(s, manifest(), { now: NOW });
     expect(get(r, 'debit-after-settle')).toMatchObject({ state: 'held' });
-    expect((await s.runSteps('payout', 0)).map((x) => x.key)).toEqual(['p1', 'p1']);
+    expect((await s.runSteps('payout', 0)).filter((x) => x.step !== '(pruned)').map((x) => x.key)).toEqual(['p1', 'p1']);
     expect(r.blind).toContainEqual({ kind: 'overdue-pruned', process: 'payout', count: 1, since: NOW - DAY });
+  });
+
+  it('G5: the memory store flight makes is given the end steps at start, so the cap counts open runs before the first prune', async () => {
+    const s = memoryStore({ maxSteps: 3, ends });
+    await s.addSteps([step('p1', 'bank.settled', NOW - 3 * H), step('p1', 'ledger.debited', NOW - 2 * H), step('p2', 'requested', NOW - 2 * DAY), step('p2', 'bank.sent', NOW - 4 * H)]);
+    expect((await check(s, manifest(), { now: NOW })).blind).toContainEqual({ kind: 'overdue-pruned', process: 'payout', count: 1, since: NOW - DAY });
+  });
+});
+
+describe('runs retention removed part of (G3)', () => {
+  const ends = { payout: ['ledger.debited', 'bank.failed'] };
+
+  it('a step after its run was removed joins a partial run: once, order and retries skip it with a blind fact, other runs are judged', async () => {
+    const T = NOW - 10 * DAY;
+    const s = await storeWith(
+      ['p1', 'requested', T], ['p1', 'bank.settled', T + 1000], ['p1', 'ledger.debited', T + 2000], // debited once, long ago
+      ['slow', 'requested', T], ['slow', 'bank.settled', T + 1000], // settled, then quiet
+      ['p2', 'bank.settled', T], ['p2', 'ledger.debited', T + 1000],
+    );
+    await s.prune({ maxAgeMs: 7 * DAY }, NOW - 2 * H, ends);
+    await s.addSteps([
+      step('p1', 'ledger.debited', NOW - H), // a real second debit of p1: not provable from what is left
+      step('slow', 'ledger.debited', NOW - H), // the slow payout's debit: no order breach
+      step('p2', 'ledger.debited', NOW - H), step('p2', 'ledger.debited', NOW - H + 1), // p2 is gone too: partial
+      step('p3', 'bank.settled', NOW - 3 * H), step('p3', 'ledger.debited', NOW - 2 * H), step('p3', 'ledger.debited', NOW - H), // whole: judged
+      step('p4', 'ledger.debited', NOW - H), // whole, no settle: an order breach
+    ]);
+    const r = await check(s, manifest(), { now: NOW });
+    expect(get(r, 'one-debit')).toMatchObject({ state: 'broken', keys: ['p3'], partial: 3 });
+    expect(get(r, 'debit-after-settle')).toMatchObject({ state: 'broken', keys: ['p4'], partial: 3 });
+    expect(get(r, 'retries:bank.sent')).toMatchObject({ partial: 3 });
+    expect(get(r, 'payout-ends')).toMatchObject({ state: 'held', partial: 3 });
+    expect(r.blind).toContainEqual({ kind: 'runs-partial', process: 'payout', count: 3, since: NOW - DAY });
+  });
+
+  it('a run holding only its marker is neither judged nor partial, and a removed open run is overdue-pruned, not overdue again', async () => {
+    const T = NOW - 10 * DAY;
+    const s = await storeWith(['stuck', 'requested', T], ['stuck', 'bank.pending', T + 1000]);
+    await s.prune({ maxAgeMs: 7 * DAY }, NOW - 2 * H, ends);
+    let r = await check(s, manifest(), { now: NOW });
+    expect(get(r, 'payout-ends')).toMatchObject({ state: 'held', runs: 0, partial: 0 });
+    expect(r.blind.filter((b) => b.kind === 'runs-partial')).toEqual([]);
+    expect(r.blind).toContainEqual({ kind: 'overdue-pruned', process: 'payout', count: 1, since: NOW - DAY });
+    // Its next step comes: the run is partial, and not reported overdue for its first part a second time.
+    await s.addSteps([step('stuck', 'bank.sent', NOW - H)]);
+    r = await check(s, manifest(), { now: NOW });
+    expect(get(r, 'payout-ends')).toMatchObject({ state: 'held', runs: 0, partial: 1 });
+  });
+
+  it('in a running flight with the default memory store and a small cap (the critic probe), no false order breach and no missed double debit reported as held', async () => {
+    const f = newFlight();
+    const man = { schema: 1, service: 's', processes: [{ name: 'payout', key: 'id', steps: ['requested', 'bank.settled', 'ledger.debited'], ends: ['ledger.debited'], promises: [{ id: 'debit-after-settle', kind: 'order', first: 'bank.settled', then: 'ledger.debited' }, { id: 'one-debit', kind: 'once', step: 'ledger.debited' }] }], probes: [] };
+    f.start({ manifest: man, checkEveryMs: 0, retention: { maxSteps: 20 }, instance: 'i1' });
+    f.step('payout', 'p1', 'requested');
+    f.step('payout', 'p1', 'bank.settled');
+    f.step('payout', 'p1', 'ledger.debited');
+    f.step('payout', 'slow', 'requested');
+    f.step('payout', 'slow', 'bank.settled');
+    await f.flush();
+    for (let i = 0; i < 30; i++) {
+      f.step('payout', `busy${i}`, 'requested');
+      await f.flush();
+    }
+    f.step('payout', 'slow', 'ledger.debited');
+    f.step('payout', 'p1', 'ledger.debited');
+    await f.flush();
+    const r = (await f.checkNow())!;
+    for (const id of ['debit-after-settle', 'one-debit']) expect(get(r, id)).toMatchObject({ state: 'held', partial: 2 });
+    expect(r.blind).toContainEqual(expect.objectContaining({ kind: 'runs-partial', process: 'payout', count: 2 }));
   });
 });
 

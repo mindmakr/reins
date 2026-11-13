@@ -12,6 +12,9 @@ import {
   lockUntil,
   MAX_LOCK_MS,
   type ProbeResult,
+  PRUNE_INSTANCE,
+  pruneBounds,
+  PRUNED_STEP,
   recordPruned,
   type Retention,
   retention,
@@ -165,31 +168,48 @@ export function pgStore(o: PgStoreOptions): FlightStore {
     },
     async prune(r2 = {}, now = Date.now(), ends = {}) {
       const k = retention({ ...keep, ...r2 });
-      const cut = now - k.maxAgeMs;
-      // Whole runs only, in one statement (B3, B7): a run goes when its newest step is before the cut; then,
-      // while more than maxSteps steps are left, the runs whose newest step is oldest go first. The statement
-      // returns, per process named in `ends`, the runs it removed that had reached no end step. End steps go
-      // as `process step` pairs, as parameters.
+      const b = pruneBounds(k, now);
+      const cut = b.cut;
+      // planPrune in one statement (B3, B7): whole runs go, oldest first, by age and then by count of steps other
+      // than markers; each leaves a marker at its newest step's time; runs holding only a marker go past their
+      // own age and count bounds. The delete and the insert see the table as the statement began, so a step
+      // added for a removed run while this runs stays, beside its marker: the run is known to be partial. It
+      // returns, per process named in `ends`, the runs removed that had reached no end step and held no marker.
+      // End steps go as `process step` pairs; every value is a parameter.
       const processes = Object.keys(ends);
       const pairs = processes.flatMap((p) => (Array.isArray(ends[p]) ? ends[p] : []).map((s) => `${p} ${s}`));
       const rows = await q(
         `with runs as (
-           select process, key, max(at) as last, count(*) as n,
+           select process, key, max(at) as last, count(*) filter (where step <> $6::text) as n, bool_or(step = $6::text) as marked,
                   bool_or((process || ' ' || step) = any($4::text[])) as ended
            from reins_flight_steps group by process, key
          ), ranked as (
-           select process, key, ended,
+           select process, key,
                   sum(n) over (order by last desc, process desc, key desc rows between unbounded preceding and current row) as kept
-           from runs where last >= $1::bigint
+           from runs where n > 0 and last >= $1::bigint
          ), gone as (
-           select process, key, ended from runs where last < $1::bigint
+           select process, key, last, marked, ended from runs where n > 0 and last < $1::bigint
            union all
-           select process, key, ended from ranked where kept > $2::bigint
+           select r.process, r.key, r.last, r.marked, r.ended from runs r join ranked k on k.process = r.process and k.key = r.key where k.kept > $2::bigint
+         ), marks as (
+           select process, key, last, false as fresh from runs where n = 0
+           union all
+           select process, key, last, true from gone
+         ), kept_marks as (
+           select process, key, last, fresh from (
+             select m.*, row_number() over (order by last desc, process desc, key desc) as i from marks m where last >= $5::bigint
+           ) x where i <= $8::bigint
          ), removed as (
-           delete from reins_flight_steps s using gone g where s.process = g.process and s.key = g.key
+           delete from reins_flight_steps s using (
+             select process, key from gone
+             union all
+             select m.process, m.key from marks m where not m.fresh and not exists (select 1 from kept_marks k where k.process = m.process and k.key = m.key)
+           ) g where s.process = g.process and s.key = g.key
+         ), added as (
+           insert into reins_flight_steps (process, key, step, at, instance) select process, key, $6::text, last, $7::text from kept_marks where fresh
          )
-         select process, count(*) as n from gone where not ended and process = any($3::text[]) group by process`,
-        [cut, k.maxSteps, processes, pairs],
+         select process, count(*) as n from gone where not ended and not marked and process = any($3::text[]) group by process`,
+        [cut, k.maxSteps, processes, pairs, b.markCut, PRUNED_STEP, PRUNE_INSTANCE, b.maxMarks],
       );
       const counts: Record<string, number> = {};
       for (const r of rows) if (typeof r?.process === 'string' && Number.isFinite(num(r.n))) counts[r.process] = num(r.n);
