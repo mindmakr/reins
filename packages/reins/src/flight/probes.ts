@@ -41,7 +41,32 @@ export function createProbes() {
       const busy = new Map<string, number>();
       const every = new Map(o.declared.map((p) => [p.id, p.everyMs]));
       const timeoutMs = Math.max(1, o.timeoutMs ?? PROBE_TIMEOUT_MS);
-      const put = (r: ProbeResult) => o.store.putProbe(r).catch(() => o.onError?.());
+      /** Probes with a store write that has not settled. At most one write per probe is outstanding: while
+       * one hangs (a lock on the probes table, a full pool), a newer result is skipped and counted as a store
+       * error, so a hung store never collects one more pending write, and one more pool connection, per period. */
+      const putting = new Set<string>();
+      const put = (r: ProbeResult): Promise<void> => {
+        if (putting.has(r.id)) {
+          o.onError?.();
+          return Promise.resolve();
+        }
+        putting.add(r.id);
+        let write: Promise<unknown>;
+        try {
+          write = Promise.resolve(o.store.putProbe(r));
+        } catch (e) {
+          write = Promise.reject(e);
+        }
+        return write.then(
+          () => {
+            putting.delete(r.id);
+          },
+          () => {
+            putting.delete(r.id);
+            o.onError?.();
+          },
+        );
+      };
       const tick = (id: string) => {
         const fn = fns.get(id);
         if (!fn) return;

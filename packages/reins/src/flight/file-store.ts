@@ -10,7 +10,7 @@
 //   lock/<n>.json                          the checker lock: numbered generations, the highest one counts
 // Imports: Node built-ins and reins' shared modules only (the flight safety test walks this file).
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { type Dirent, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { appendFile, open, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -29,6 +29,7 @@ import {
   lockUntil,
   planPrune,
   type ProbeResult,
+  perProcess,
   recordPruned,
   type Retention,
   runId,
@@ -296,6 +297,10 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
         // within the last hour may still be appended to by a writer (a writer starts a new segment each hour),
         // so it is never rewritten or deleted: a run with a step in one is left for a later prune. Markers are
         // written first, so a crash part way leaves a run partial (and known to be), never silently gone.
+        // So the bound on disk is not maxSteps alone: it is maxSteps steps, plus the markers (see
+        // `Retention.maxSteps`), plus the runs with a step in a segment written to within the last hour: one to
+        // two hours of writes (a segment spans up to an hour and stays an hour after its last write), however
+        // many steps that is.
         const runs = summarize(await readSteps());
         const young = (r: { steps: Stored[] }) => r.steps.some((s) => s.mtimeMs > now - HOUR);
         const plan = planPrune(runs.values(), pruneBounds(k, now), young);
@@ -347,7 +352,7 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
         }
         if (changed) await writeAtomic(fFile, JSON.stringify(Object.fromEntries(found)));
         // Inside the queue already: write through the unqueued writer.
-        await recordPruned({ minutes: readMinutes, putMinute: writeMinute }, counts, now);
+        await recordPruned({ minutes: readMinutes, putMinute: writeMinute }, counts, now, perProcess(plan.unmarked));
       }),
   };
 }
@@ -365,7 +370,9 @@ const byStart = (a: string, b: string) => Number(a.split('-')[0]) - Number(b.spl
 // with an exclusive create: of the checkers that read n, only one can make n + 1. It then lists the folder again
 // and holds the lock only if n + 1 is still the highest (a checker that read the folder late can only make a
 // number below the top, and loses here). Nothing is ever renamed or written over; the holder removes the
-// generations below its own, so the folder holds one or two files.
+// generations below its own, so the folder holds one or two files. Only regular files are generations: anything
+// else named like one (a folder, a link) is not read as the lock, and a new generation skips its number, since
+// unlink cannot remove a folder and a folder at the top would otherwise block the lock for good.
 
 /** Generation file names: a number without leading zeros, at most 15 digits, so n + 1 is always exact. */
 const GEN = /^(0|[1-9]\d{0,14})\.json$/;
@@ -373,18 +380,25 @@ const GEN = /^(0|[1-9]\d{0,14})\.json$/;
 const MAX_GEN = 999_999_999_999_999;
 /**
  * A generation file that cannot be read as a lock (empty because its maker died between creating and writing
- * it, cut short, unreadable, not a file, or planted) counts as held until this long after its modification time,
- * then as free, so nothing in the folder can block takeover for longer than this, or a valid lock's own time
- * (at most MAX_LOCK_MS).
+ * it, cut short, unreadable, or planted) counts as held until this long after its modification time, then as
+ * free, so nothing in the folder can block takeover for longer than this, or a valid lock's own time (at most
+ * MAX_LOCK_MS).
+ *
+ * This is also the lease's limit: a holder that stalls more than this between its exclusive create and its
+ * write (a long GC pause, a suspended process, a very slow disk) can be taken over while it still goes on to
+ * hold: another checker reads the empty generation as broken, the stalled one then writes it and finds it on
+ * top, and the other makes the next generation and finds that on top too. For that pass two checkers hold at
+ * once; the stalled one loses at its next renewal, when it finds the other's generation above its own.
+ * The bound is a trade: longer makes this rarer, but a checker that died there blocks the lock for that long.
  */
 export const BROKEN_LOCK_MS = 10_000;
 
 /** The top generation and whether it holds at `now`; null when there is none. */
 async function topGen(lockDir: string, now: number): Promise<{ n: number; owner?: string; held: boolean } | null> {
   let n = -1;
-  for (const f of await readdir(lockDir).catch(() => [] as string[])) {
-    const m = GEN.exec(f);
-    if (m && Number(m[1]) > n) n = Number(m[1]);
+  for (const d of await readdir(lockDir, { withFileTypes: true }).catch(() => [] as Dirent[])) {
+    const m = GEN.exec(d.name);
+    if (m && d.isFile() && Number(m[1]) > n) n = Number(m[1]);
   }
   if (n < 0) return null;
   const file = join(lockDir, `${n}.json`);
@@ -397,6 +411,18 @@ async function topGen(lockDir: string, now: number): Promise<{ n: number; owner?
   const st = await stat(file).catch(() => null);
   const age = st ? Date.now() - st.mtimeMs : Infinity;
   return { n, held: age > -BROKEN_LOCK_MS && age < BROKEN_LOCK_MS };
+}
+
+/** The first number above `n` that no entry in the folder uses: an entry that is not a regular file is skipped. */
+async function freeAbove(lockDir: string, n: number): Promise<number> {
+  const taken = new Set<number>();
+  for (const d of await readdir(lockDir, { withFileTypes: true }).catch(() => [] as Dirent[])) {
+    const m = GEN.exec(d.name);
+    if (m && !d.isFile()) taken.add(Number(m[1]));
+  }
+  let next = n + 1;
+  while (taken.has(next)) next++;
+  return next;
 }
 
 /** Makes generation `n` holding `lock`; false when it exists already. */
@@ -432,24 +458,27 @@ async function takeLock(lockDir: string, owner: string, ttlMs: number, now: numb
   const top = await topGen(lockDir, now);
   if (top && top.held && top.owner !== owner) return false;
   const n = top ? top.n : 0;
-  if (n + 1 >= MAX_GEN) {
+  const next = await freeAbove(lockDir, n);
+  if (next >= MAX_GEN) {
     // A planted number at the end of the range: remove it (it is free or ours) and start below it next time.
     await unlink(join(lockDir, `${n}.json`)).catch(() => {});
     return false;
   }
-  if (!(await makeGen(lockDir, n + 1, { owner, until: lockUntil(now, ttlMs) }))) return false;
+  if (!(await makeGen(lockDir, next, { owner, until: lockUntil(now, ttlMs) }))) return false;
   const after = await topGen(lockDir, now);
-  if (after?.n !== n + 1) {
-    await unlink(join(lockDir, `${n + 1}.json`)).catch(() => {});
+  if (after?.n !== next) {
+    await unlink(join(lockDir, `${next}.json`)).catch(() => {});
     return false;
   }
-  await dropBelow(lockDir, n + 1);
+  await dropBelow(lockDir, next);
   return true;
 }
 
 /** Gives the lock up if `owner` holds the top generation, by making the next one free; never writes over another's. */
 async function dropLock(lockDir: string, owner: string): Promise<void> {
   const top = await topGen(lockDir, Date.now());
-  if (!top || top.owner !== owner || top.n + 1 >= MAX_GEN) return;
-  if (await makeGen(lockDir, top.n + 1, { owner, until: 0 })) await dropBelow(lockDir, top.n + 1);
+  if (!top || top.owner !== owner) return;
+  const next = await freeAbove(lockDir, top.n);
+  if (next >= MAX_GEN) return;
+  if (await makeGen(lockDir, next, { owner, until: 0 })) await dropBelow(lockDir, next);
 }

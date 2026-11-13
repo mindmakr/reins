@@ -546,6 +546,36 @@ describe('probes that never settle (F6) and probe writes that fail (F15)', () =>
     expect(Date.now() - r.at).toBeLessThan(150); // rewritten each period, so never stale
   });
 
+  it('a hung probe write is not started again: over 50 periods one write is pending, and a later settle lets the next result be written', async () => {
+    const base = memoryStore();
+    let pending = 0;
+    let release!: () => void;
+    let hang = true;
+    let errors = 0;
+    const store: FlightStore = {
+      ...base,
+      putProbe: (r) => {
+        if (!hang) return base.putProbe(r);
+        pending++;
+        return new Promise<void>((res) => (release = () => (pending--, res())));
+      },
+    };
+    let calls = 0;
+    const p = createProbes();
+    p.register('pool', () => (calls++, new Promise(() => {})));
+    p.start({ store, instance: 'i1', declared: [{ id: 'pool', every: '1s', everyMs: 10 } as any], timeoutMs: 5, onError: () => errors++ });
+    for (let i = 0; i < 500 && errors < 50; i++) await sleep(10); // 50 periods whose write was skipped
+    expect(errors).toBeGreaterThanOrEqual(50); // each skipped write is counted
+    expect(pending).toBe(1);
+    expect(calls).toBe(1);
+    hang = false;
+    release();
+    for (let i = 0; i < 50 && !(await base.probes()).length; i++) await sleep(10);
+    p.stop();
+    expect(pending).toBe(0);
+    expect((await base.probes())[0]).toMatchObject({ id: 'pool', ok: false, reason: 'timeout' });
+  });
+
   it('a probe that settles is called again on its next period', async () => {
     let calls = 0;
     const p = createProbes();
@@ -573,6 +603,21 @@ describe('folds (F9, F10, F16)', () => {
     const s = memoryStore();
     await s.putMinute(minute('(prune)', NOW - 2 * DAY, { runsPruned: { payout: 2 } }));
     expect((await check(s, m, { now: NOW })).blind).toContainEqual({ kind: 'overdue-pruned', process: 'payout', count: 2, since: NOW - 3 * DAY });
+  });
+
+  it('markers dropped by the count bound are reported as a blind fact for their process, for the widest window', async () => {
+    const s = memoryStore();
+    await s.putMinute(minute('(prune)', NOW - 2 * H, { markersDropped: { payout: 3 } } as any));
+    const r = await check(s, manifest(), { now: NOW });
+    expect(r.blind).toContainEqual({ kind: 'markers-dropped', process: 'payout', count: 3, since: NOW - DAY });
+    expect(r.blind.filter((b) => b.kind === 'markers-dropped')).toHaveLength(1);
+  });
+
+  it('a prune whose marker count bound drops markers leads to the blind fact, end to end', async () => {
+    const s = memoryStore();
+    await s.addSteps(Array.from({ length: 6 }, (_, i) => step(`r${i}`, 'requested', NOW - 3 * H + i)));
+    await s.prune({ maxSteps: 2 }, NOW - H);
+    expect((await check(s, manifest(), { now: NOW })).blind).toContainEqual({ kind: 'markers-dropped', process: 'payout', count: 2, since: NOW - DAY });
   });
 
   it('drops counted under (other) count for every process', async () => {

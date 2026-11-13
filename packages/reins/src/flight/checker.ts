@@ -78,6 +78,11 @@ export type BlindFact =
    * each is gone, so once, order, retries, within and ends do not judge them (the other runs are judged).
    */
   | { kind: 'runs-partial'; process: string; count: number; since: number }
+  /**
+   * Markers retention removed, or did not leave, because more runs held only a marker than its count bound
+   * allows: a later step for one of those keys starts a new run that is judged with no trace of the part removed.
+   */
+  | { kind: 'markers-dropped'; process: string; count: number; since: number }
   | { kind: 'store-write-failed'; count: number; since: number }
   | { kind: 'no-instance'; since: number }
   | { kind: 'probe-stale'; id: string; lastAt: number; everyMs: number }
@@ -165,6 +170,9 @@ export async function check(store: FlightStore, manifest: ManifestResult | null,
       const runs = group(await store.runSteps(p.name, since));
       const partial = [...runs.values()].filter((r) => isPartial(r) && r.some((s) => s.step !== PRUNED_STEP && s.at >= since)).length;
       if (partial) out.blind.push({ kind: 'runs-partial', process: p.name, count: partial, since });
+      // Kept for as long as the widest promise window, like `overdue-pruned`.
+      const unmarked = minutes.reduce((n, x) => n + (Number(x.markersDropped && own(x.markersDropped, p.name)) || 0), 0);
+      if (unmarked) out.blind.push({ kind: 'markers-dropped', process: p.name, count: unmarked, since: now - widest });
       const timed = p.promises.some((x) => x.kind === 'within' || x.kind === 'ends');
       // A marker counts as an end here: a partial run is not judged overdue (`overdue-pruned` covers it).
       const open = timed ? group(await store.openRuns(p.name, [...p.ends, PRUNED_STEP])) : new Map<string, StepRecord[]>();
@@ -245,7 +253,7 @@ function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string
   const { checked, partial } = inWindow(runs, since);
   if (promise.kind === 'within' || promise.kind === 'ends') {
     const seen = new Set(checked.map(([k]) => k));
-    for (const [k, steps] of open) if (!seen.has(k) && !isPartial(steps)) checked.push([k, steps]);
+    for (const [k, steps] of open) if (!seen.has(k)) checked.push([k, steps]);
   }
   const base: CheckBase = { process: p.name, id: promise.id, kind: promise.kind, windowMs: promise.windowMs, since, runs: checked.length, partial, stepsDropped: droppedIn(minutes, p.name, since) };
   const breaches: Breach[] = [];

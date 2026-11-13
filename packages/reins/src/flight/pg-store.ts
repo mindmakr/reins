@@ -174,7 +174,8 @@ export function pgStore(o: PgStoreOptions): FlightStore {
       // than markers; each leaves a marker at its newest step's time; runs holding only a marker go past their
       // own age and count bounds. The delete and the insert see the table as the statement began, so a step
       // added for a removed run while this runs stays, beside its marker: the run is known to be partial. It
-      // returns, per process named in `ends`, the runs removed that had reached no end step and held no marker.
+      // returns, per process named in `ends`, the runs removed that had reached no end step and held no marker
+      // (`open`), and per process the runs left with no marker by the count bound on markers (`markers`).
       // End steps go as `process step` pairs; every value is a parameter.
       const processes = Object.keys(ends);
       const pairs = processes.flatMap((p) => (Array.isArray(ends[p]) ? ends[p] : []).map((s) => `${p} ${s}`));
@@ -208,15 +209,20 @@ export function pgStore(o: PgStoreOptions): FlightStore {
          ), added as (
            insert into reins_flight_steps (process, key, step, at, instance) select process, key, $6::text, last, $7::text from kept_marks where fresh
          )
-         select process, count(*) as n from gone where not ended and not marked and process = any($3::text[]) group by process`,
+         select 'open' as what, process, count(*) as n from gone where not ended and not marked and process = any($3::text[]) group by process
+         union all
+         select 'markers', m.process, count(*) from marks m
+         where m.last >= $5::bigint and not exists (select 1 from kept_marks k where k.process = m.process and k.key = m.key)
+         group by m.process`,
         [cut, k.maxSteps, processes, pairs, b.markCut, PRUNED_STEP, PRUNE_INSTANCE, b.maxMarks],
       );
       const counts: Record<string, number> = {};
-      for (const r of rows) if (typeof r?.process === 'string' && Number.isFinite(num(r.n))) counts[r.process] = num(r.n);
+      const markers: Record<string, number> = {};
+      for (const r of rows) if (typeof r?.process === 'string' && Number.isFinite(num(r.n))) (r.what === 'markers' ? markers : counts)[r.process] = num(r.n);
       await q(`delete from reins_flight_minutes where minute < $1`, [cut]);
       await q(`delete from reins_flight_probes where at < $1`, [cut]);
       await q(`delete from reins_flight_findings where state = 'resolved' and updated_at < $1`, [cut]);
-      await recordPruned(self, counts, now);
+      await recordPruned(self, counts, now, markers);
     },
   };
   return self;

@@ -63,6 +63,12 @@ export interface InstanceMinute {
    * been overdue. Written by `prune`, under the instance PRUNE_INSTANCE, so a checker in any process sees it.
    */
   runsPruned?: Record<string, number>;
+  /**
+   * Markers of each process that retention removed, or did not leave, because more runs held only a marker than
+   * its count bound allows (not because of their age): a later step for one of those keys starts a run with no
+   * trace of the part removed. Written by `prune` under PRUNE_INSTANCE, beside `runsPruned`.
+   */
+  markersDropped?: Record<string, number>;
   /** Step writes the store refused in this minute. */
   storeErrors: number;
   /** Probe ids registered on this instance (sorted). */
@@ -99,6 +105,9 @@ export interface Retention {
    * At most this many steps; whole runs go, those with the oldest newest step first. Default 1,000,000 (memory
    * store 100,000). Each run removed leaves one marker step (PRUNED_STEP); markers are not counted here but have
    * their own bounds: at most this many runs holding only a marker, each kept for MARKER_AGE_FACTOR times maxAgeMs.
+   * Runs that hold real steps and a marker (part of them was removed, then a step came again) hold one more
+   * marker each, so the worst case after a prune is about 3 x maxSteps rows: maxSteps real steps (up to maxSteps
+   * runs, each with a marker) and maxSteps marker-only runs. Measured: 12 rows at maxSteps 4.
    */
   maxSteps?: number;
 }
@@ -207,8 +216,10 @@ export const PRUNE_INSTANCE = '(prune)';
 
 /**
  * The step name of a retention marker. When retention removes a run it leaves this one step in its place, at the
- * time of the run's newest step, so a key keeps naming one run for good (C18): a later step for that key joins a
- * run known to be partial, which once, order and retries do not judge (blind fact `runs-partial`). No manifest
+ * time of the run's newest step, so a key keeps naming one run while its marker stays (C18): a later step for that
+ * key joins a run known to be partial, which once, order and retries do not judge (blind fact `runs-partial`).
+ * A marker goes after MARKER_AGE_FACTOR times the age bound, with no trace, or earlier when more runs hold only a
+ * marker than the count bound allows, which is counted (blind fact `markers-dropped`). No manifest
  * name can equal it (names are lowercase letters, digits, dots and hyphens), so `goodStep` refuses it from callers.
  */
 export const PRUNED_STEP = '(pruned)';
@@ -253,6 +264,8 @@ export interface PrunePlan<R> {
   gone: R[];
   /** Those of `gone` that get one marker at their `last` in their place. */
   mark: R[];
+  /** Runs left with no marker by the count bound on markers (not by their age): removed ones, or marker-only ones. */
+  unmarked: R[];
 }
 
 /**
@@ -290,14 +303,18 @@ export function planPrune<R extends RunSummary<any>>(runs: Iterable<R>, o: { cut
   marks.push(...gone);
   marks.sort((a, b) => b.last - a.last);
   const mark: R[] = [];
+  const unmarked: R[] = [];
   let kept = 0;
   for (const r of marks) {
     if (fixed(r) || (r.last >= o.markCut && kept < o.maxMarks)) {
       kept++;
       if (removed.has(r)) mark.push(r);
-    } else if (!removed.has(r)) gone.push(r);
+    } else {
+      if (!removed.has(r)) gone.push(r);
+      if (r.last >= o.markCut) unmarked.push(r);
+    }
   }
-  return { gone, mark };
+  return { gone, mark, unmarked };
 }
 
 /** The bounds `planPrune` takes, from a retention and the time of the prune. */
@@ -317,17 +334,41 @@ export function countOpen(gone: Iterable<Pick<RunSummary, 'process' | 'steps' | 
   return out;
 }
 
+/** Counts runs per process. */
+export function perProcess(runs: Iterable<Pick<RunSummary, 'process'>>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const r of runs) out[r.process] = (out[r.process] || 0) + 1;
+  return out;
+}
+
 /** The marker step left for a removed run. */
 export const markerOf = (r: Pick<RunSummary, 'process' | 'key' | 'last'>): StepRecord => ({ process: r.process, key: r.key, step: PRUNED_STEP, at: r.last, instance: PRUNE_INSTANCE });
 
-/** Adds pruned-run counts to this minute's PRUNE_INSTANCE record in the store. */
-export async function recordPruned(store: Pick<FlightStore, 'minutes' | 'putMinute'>, counts: Record<string, number>, now: number): Promise<void> {
-  if (!Object.keys(counts).length) return;
+/**
+ * Adds pruned-run counts (`runsPruned`) and dropped-marker counts (`markersDropped`) to this minute's
+ * PRUNE_INSTANCE record in the store.
+ */
+export async function recordPruned(store: Pick<FlightStore, 'minutes' | 'putMinute'>, counts: Record<string, number>, now: number, markers: Record<string, number> = {}): Promise<void> {
+  if (!Object.keys(counts).length && !Object.keys(markers).length) return;
   const minute = now - (now % 60_000);
   const old = (await store.minutes(minute)).find((m) => m.instance === PRUNE_INSTANCE && m.minute === minute);
-  const runsPruned: Record<string, number> = { ...(old?.runsPruned || {}) };
-  for (const [p, n] of Object.entries(counts)) runsPruned[p] = (runsPruned[p] || 0) + n;
-  await store.putMinute({ instance: PRUNE_INSTANCE, minute, basics: null, stepsDropped: {}, stepsInvalid: 0, storeErrors: 0, probes: [], runsPruned });
+  const add = (into: Record<string, number>, from: Record<string, number>) => {
+    for (const [p, n] of Object.entries(from)) into[p] = (Number(into[p]) || 0) + n;
+    return into;
+  };
+  const runsPruned = add({ ...(old?.runsPruned || {}) }, counts);
+  const markersDropped = add({ ...(old?.markersDropped || {}) }, markers);
+  await store.putMinute({
+    instance: PRUNE_INSTANCE,
+    minute,
+    basics: null,
+    stepsDropped: {},
+    stepsInvalid: 0,
+    storeErrors: 0,
+    probes: [],
+    runsPruned,
+    ...(Object.keys(markersDropped).length && { markersDropped }),
+  });
 }
 
 /** Keeps the later of two probe results. */
@@ -335,8 +376,9 @@ export const laterProbe = (old: ProbeResult | undefined, r: ProbeResult) => !old
 
 /**
  * The memory store's default cap on steps, where the file and Postgres stores keep RETENTION_DEFAULTS.maxSteps.
- * 100,000 steps with 200-character keys measured about 47 MB of heap; up to as many runs holding only a marker
- * can come on top (one step each). `memoryStore({ maxSteps })` sets it.
+ * 100,000 steps with 200-character keys measured about 47 MB of heap on their own; with the markers that can come
+ * on top (up to 3 x maxSteps rows in all, see `Retention.maxSteps`) the worst case measured about 118 MB of heap.
+ * `memoryStore({ maxSteps })` sets it.
  */
 export const MEMORY_MAX_STEPS = 100_000;
 
@@ -380,7 +422,7 @@ export function memoryStore(r: Retention & { ends?: Record<string, string[]> } =
       if (!m) runs.set(run.process, (m = new Map()));
       m.set(run.key, { process: run.process, key: run.key, last: run.last, real: 0, marked: true, steps: [{ ...markerOf(run), seq: seq++ }] });
     }
-    await recordPruned(self, countOpen(plan.gone, ends), now);
+    await recordPruned(self, countOpen(plan.gone, ends), now, perProcess(plan.unmarked));
   };
   const read = (process: string, pick: (run: Run) => boolean): StepRecord[] => {
     const out: Stored[] = [];

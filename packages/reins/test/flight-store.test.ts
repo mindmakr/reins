@@ -251,6 +251,19 @@ describe('file store', () => {
       expect(await fileStore({ dir }).lock('b', 1000, t + 5000)).toBe(true);
     });
 
+    it('a folder named like a generation, at the end of the number range or just above the top, never blocks the lock', async () => {
+      const dir = await fresh();
+      const t = Date.now();
+      mkdirSync(join(lockDir(dir), '999999999999999.json')); // unlink cannot remove it
+      mkdirSync(join(lockDir(dir), '2.json'));
+      mkdirSync(join(lockDir(dir), '3.json'));
+      const s = fileStore({ dir });
+      for (let i = 0; i < 5; i++) expect(await s.lock('b', 1000, t + 5000 + i)).toBe(true);
+      expect(topLock(dir)).toMatchObject({ owner: 'b' });
+      await s.unlock('b');
+      expect(await fileStore({ dir }).lock('c', 1000, t + 6000)).toBe(true);
+    });
+
     it('a planted generation at the end of the number range is removed once free, then the lock works again', async () => {
       const dir = await fresh();
       const t = Date.now();
@@ -276,7 +289,9 @@ describe('file store', () => {
 
 /** The lock as the file store holds it: the generation with the highest number. */
 function topLock(dir: string): { owner: string; until: number } {
-  const ns = readdirSync(join(dir, 'lock')).filter((f) => /^\d+\.json$/.test(f)).map((f) => Number(f.slice(0, -5)));
+  const ns = readdirSync(join(dir, 'lock'), { withFileTypes: true })
+    .filter((d) => d.isFile() && /^\d+\.json$/.test(d.name))
+    .map((d) => Number(d.name.slice(0, -5)));
   return JSON.parse(readFileSync(join(dir, 'lock', `${Math.max(...ns)}.json`), 'utf8'));
 }
 

@@ -289,6 +289,14 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     await store.addSteps(Array.from({ length: 6 }, (_, i) => step(`r${i}`, 'requested', t + i)));
     await store.prune({ maxSteps: 2 }, t + 2 * 3_600_000);
     expect(await store.runSteps('payout', 0)).toEqual([marker('r2', t + 2), marker('r3', t + 3), step('r4', 'requested', t + 4), step('r5', 'requested', t + 5)]);
+    // r0 and r1 were left with no marker by the count bound on markers: counted, so the checker can say so.
+    const rec = (await store.minutes(0)).find((m) => m.instance === '(prune)');
+    expect(rec?.markersDropped).toEqual({ payout: 2 });
+    // A second prune drops the marker-only runs past the bound again: r2 goes, and the count adds up.
+    await store.addSteps([step('r6', 'requested', t + 6)]);
+    await store.prune({ maxSteps: 2 }, t + 2 * 3_600_000);
+    const all = (await store.minutes(0)).filter((m) => m.instance === '(prune)');
+    expect(all.reduce((n, m) => n + (m.markersDropped?.payout || 0), 0)).toBe(3);
   });
 
   it('prune without end steps writes no count', async () => {
