@@ -42,8 +42,27 @@ export interface FileStoreOptions extends Retention {
   dir?: string;
 }
 
-/** Instance names go into file names: anything but letters, digits, `_` and `-` becomes `_`. */
-const safe = (s: string) => String(s).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64) || '_';
+/**
+ * Instance names go into file names. Letters, digits and `-` stay; every other character (`_` too) becomes
+ * `_` and its code in hex, so two names never share a file. A long result is replaced by a hash of the name.
+ */
+export const safe = (s: string) => {
+  const out = String(s).replace(/[^A-Za-z0-9-]/g, (c) => `_${c.charCodeAt(0).toString(16).padStart(4, '0')}`) || '_';
+  return out.length <= 96 ? out : `_h${createHash('sha256').update(String(s)).digest('hex').slice(0, 40)}`;
+};
+
+/** Findings by key, kept in a Map (a key such as `__proto__` is a key like any other); records of the wrong shape are skipped. */
+async function readFindings(file: string): Promise<Map<string, FindingRecord>> {
+  const out = new Map<string, FindingRecord>();
+  const all = await readJson<unknown>(file);
+  if (!all || typeof all !== 'object' || Array.isArray(all)) return out;
+  for (const [key, f] of Object.entries(all as Record<string, any>)) {
+    if (f && typeof f === 'object' && f.key === key && (f.state === 'open' || f.state === 'resolved') && Number.isFinite(f.updatedAt) && f.data && typeof f.data === 'object' && !Array.isArray(f.data)) {
+      out.set(key, { key, state: f.state, updatedAt: f.updatedAt, data: f.data });
+    }
+  }
+  return out;
+}
 
 async function readJson<T>(file: string): Promise<T | undefined> {
   try {
@@ -56,7 +75,7 @@ async function readJson<T>(file: string): Promise<T | undefined> {
 /** Writes a whole file through a temporary file and a rename, so a reader never sees half of it. */
 async function writeAtomic(file: string, text: string): Promise<void> {
   const tmp = `${file}.${randomBytes(4).toString('hex')}.tmp`;
-  await writeFile(tmp, text);
+  await writeFile(tmp, text, { mode: 0o600 });
   // Windows refuses a rename over a file another process has open for a moment; try a few times.
   for (let i = 0; ; i++) {
     try {
@@ -111,11 +130,12 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
 
   function ensure() {
     if (made) return;
-    mkdirSync(stepsDir, { recursive: true });
-    mkdirSync(minutesDir, { recursive: true });
+    // Owner-only, as the bridge keeps its token: files 0o600, folders 0o700.
+    mkdirSync(stepsDir, { recursive: true, mode: 0o700 });
+    mkdirSync(minutesDir, { recursive: true, mode: 0o700 });
     // Same rule as the bridge: the .reins folder holds its own .gitignore so nothing in it is committed.
     const top = join(dir, '..');
-    if (top.endsWith('.reins') && !existsSync(join(top, '.gitignore'))) writeFileSync(join(top, '.gitignore'), '*\n');
+    if (top.endsWith('.reins') && !existsSync(join(top, '.gitignore'))) writeFileSync(join(top, '.gitignore'), '*\n', { mode: 0o600 });
     made = true;
   }
 
@@ -220,7 +240,7 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
             }
             const take = rest.slice(0, SEGMENT_LINES - seg.lines);
             rest = rest.slice(take.length);
-            await appendFile(seg.file, take.map((s) => JSON.stringify({ process: s.process, key: s.key, step: s.step, at: s.at, instance: s.instance }) + '\n').join(''));
+            await appendFile(seg.file, take.map((s) => JSON.stringify({ process: s.process, key: s.key, step: s.step, at: s.at, instance: s.instance }) + '\n').join(''), { mode: 0o600 });
             seg.lines += take.length;
           }
         }
@@ -256,12 +276,12 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
       queued(async () => {
         ensure();
         const file = join(dir, 'findings.json');
-        const all = (await readJson<Record<string, FindingRecord>>(file)) || {};
-        for (const f of list2) all[f.key] = f;
-        await writeAtomic(file, JSON.stringify(all));
+        const all = await readFindings(file);
+        for (const f of list2) all.set(f.key, f);
+        await writeAtomic(file, JSON.stringify(Object.fromEntries(all)));
       }),
     async findings() {
-      return Object.values((await readJson<Record<string, FindingRecord>>(join(dir, 'findings.json'))) || {});
+      return [...(await readFindings(join(dir, 'findings.json'))).values()];
     },
     lock: (owner, ttlMs, now = Date.now()) => queued(() => takeLock(dir, lockFile, owner, ttlMs, now, ensure, sweep)),
     unlock: (owner) => queued(() => dropLock(dir, lockFile, owner)),
@@ -328,17 +348,15 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
           if (st && st.mtimeMs < cut) await unlink(join(dir, f)).catch(() => {});
         }
         const fFile = join(dir, 'findings.json');
-        const found = await readJson<Record<string, FindingRecord>>(fFile);
-        if (found) {
-          let changed = false;
-          for (const [key, f] of Object.entries(found)) {
-            if (f.state === 'resolved' && f.updatedAt < cut) {
-              delete found[key];
-              changed = true;
-            }
+        const found = await readFindings(fFile);
+        let changed = false;
+        for (const [key, f] of found) {
+          if (f.state === 'resolved' && f.updatedAt < cut) {
+            found.delete(key);
+            changed = true;
           }
-          if (changed) await writeAtomic(fFile, JSON.stringify(found));
         }
+        if (changed) await writeAtomic(fFile, JSON.stringify(Object.fromEntries(found)));
         // Inside the queue already: write through the unqueued writer.
         await recordPruned({ minutes: readMinutes, putMinute: writeMinute }, counts, now);
       }),

@@ -1,10 +1,10 @@
 // Design B2, B3, B4: the memory and file stores meet one contract; the Postgres store's statements carry every
 // value as a parameter (its run against a real Postgres is flight-pg.test.ts).
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { fileStore } from '../src/flight/file-store.js';
+import { fileStore, safe } from '../src/flight/file-store.js';
 import { PG_TABLES, pgStore } from '../src/flight/pg-store.js';
 import { isStore, memoryStore } from '../src/flight/store.js';
 import { DAY, step, storeContract } from './flight-store-contract.js';
@@ -116,6 +116,55 @@ describe('file store', () => {
     expect(multi).toBe(0);
     expect(won).toBeGreaterThan(900);
   }, 60_000);
+
+  it('gives instances a.b and a_b their own files', async () => {
+    const dir = join(tmp(), 'flight');
+    const store = fileStore({ dir });
+    const t = Date.now();
+    await store.putMinute({ instance: 'a.b', minute: t - (t % 60_000), basics: null, stepsDropped: { payout: 1 }, stepsInvalid: 0, storeErrors: 0, probes: [] });
+    await store.putMinute({ instance: 'a_b', minute: t - (t % 60_000), basics: null, stepsDropped: { payout: 2 }, stepsInvalid: 0, storeErrors: 0, probes: [] });
+    expect((await store.minutes(0)).map((m) => m.instance).sort()).toEqual(['a.b', 'a_b']);
+    expect(new Set(readdirSync(join(dir, 'minutes'))).size).toBe(2);
+    expect(safe('a.b')).not.toBe(safe('a_b'));
+    expect(safe('x'.repeat(500))).not.toBe(safe('x'.repeat(499)));
+  });
+
+  it('keeps a finding keyed __proto__, and skips records of the wrong shape', async () => {
+    const dir = join(tmp(), 'flight');
+    const store = fileStore({ dir });
+    await store.putFindings([{ key: '__proto__', state: 'open', updatedAt: 1, data: { n: 1 } }, { key: 'ok', state: 'open', updatedAt: 1, data: {} }]);
+    expect((await store.findings()).map((f) => f.key).sort()).toEqual(['__proto__', 'ok']);
+    const file = join(dir, 'findings.json');
+    const all = JSON.parse(readFileSync(file, 'utf8'));
+    all.bad = { key: 'bad', state: 'maybe', updatedAt: 1, data: {} };
+    all.other = { key: 'not-other', state: 'open', updatedAt: 1, data: {} };
+    all.nodata = 'text';
+    writeFileSync(file, JSON.stringify(all));
+    expect((await store.findings()).map((f) => f.key).sort()).toEqual(['__proto__', 'ok']);
+  });
+
+  it('skips a folder named like a segment', async () => {
+    const dir = join(tmp(), 'flight');
+    const store = fileStore({ dir });
+    await store.addSteps([step('p1', 'requested', Date.now())]);
+    mkdirSync(join(dir, 'steps', '1-x-y.jsonl'));
+    mkdirSync(join(dir, 'minutes', 'x-1.json'));
+    expect((await store.runSteps('payout', 0)).map((s) => s.key)).toEqual(['p1']);
+    expect(await store.minutes(0)).toEqual([]);
+    await store.prune({ maxSteps: 1 }, Date.now());
+  });
+
+  it.skipIf(process.platform === 'win32')('writes its files 0o600 and its folders 0o700', async () => {
+    const dir = join(tmp(), '.reins', 'flight');
+    const store = fileStore({ dir });
+    await store.addSteps([step('p1', 'requested', Date.now())]);
+    await store.putProbe({ id: 'pool', instance: 'i', at: 1, ok: true, ms: 1 });
+    await store.lock('a', 1000);
+    const steps = join(dir, 'steps');
+    expect(statSync(steps).mode & 0o777).toBe(0o700);
+    expect(statSync(join(steps, readdirSync(steps)[0])).mode & 0o777).toBe(0o600);
+    for (const f of readdirSync(dir).filter((x) => x.endsWith('.json'))) expect(statSync(join(dir, f)).mode & 0o777).toBe(0o600);
+  });
 
   it('takes over a lock file cut short', async () => {
     const dir = join(tmp(), 'flight');
