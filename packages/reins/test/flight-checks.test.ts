@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createFlight, type Flight } from '../src/flight.js';
 import { check, type PromiseCheck } from '../src/flight/checker.js';
 import { validateManifest } from '../src/flight/manifest.js';
-import { runProbe } from '../src/flight/probes.js';
+import { createProbes, runProbe } from '../src/flight/probes.js';
 import { createStepWriter } from '../src/flight/steps.js';
 import { type FlightStore, memoryStore } from '../src/flight/store.js';
 import { minute, step } from './flight-store-contract.js';
@@ -380,6 +380,122 @@ describe('one checker at a time (B4)', () => {
     expect(await fileStore({ dir }).lock('dead', 180_000, t)).toBe(true);
     expect(await fileStore({ dir }).lock('live', 180_000, t + 179_000)).toBe(false);
     expect(await fileStore({ dir }).lock('live', 180_000, t + 181_000)).toBe(true);
+  });
+});
+
+describe('a checker that cannot take the lock or reach the store (F4, F5)', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('when taking the lock fails, it neither checks nor prunes, and a blind fact says so', async () => {
+    const store = memoryStore();
+    let pruned = 0;
+    let read = 0;
+    const s: FlightStore = {
+      ...store,
+      lock: async () => Promise.reject(Object.assign(new Error('relation "reins_flight_lock" does not exist'), { code: '42P01' })),
+      prune: async (...a) => (pruned++, store.prune(...a)),
+      minutes: async (x) => (read++, store.minutes(x)),
+    };
+    const f = newFlight();
+    f.start({ manifest: manifestData(), store: s, checkEveryMs: 0 });
+    const r = (await f.checkNow())!;
+    expect(r.blind).toContainEqual({ kind: 'lock-unavailable', error: expect.any(String) });
+    expect(JSON.stringify(r)).not.toContain('reins_flight_lock');
+    expect(r.promises).toHaveLength(5);
+    expect(r.promises.every((p) => p.state === 'not-checked' && p.reason === 'lock-unavailable')).toBe(true);
+    expect(r.probes).toMatchObject([{ state: 'not-checked', reason: 'lock-unavailable' }]);
+    expect({ pruned, read }).toEqual({ pruned: 0, read: 0 });
+    expect(f.lastCheck()).toBe(r);
+  });
+
+  it('a pass past its time limit ends with a blind fact, the next pass starts, and the late result is ignored', async () => {
+    const store = memoryStore();
+    let release!: () => void;
+    const hang = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    const s: FlightStore = { ...store, minutes: async (x) => (++calls === 1 && (await hang), store.minutes(x)) };
+    const f = newFlight();
+    f.start({ manifest: manifestData(), store: s, checkEveryMs: 0, checkTimeoutMs: 50 });
+    const r1 = (await f.checkNow())!;
+    expect(r1.blind).toContainEqual({ kind: 'store-unreachable', error: 'timeout' });
+    expect(r1.promises.every((p) => p.state === 'not-checked' && p.reason === 'store-unreachable')).toBe(true);
+    expect(f.lastCheck()).toBe(r1);
+    const r2 = (await f.checkNow())!;
+    expect(calls).toBe(2);
+    expect(r2.blind).not.toContainEqual({ kind: 'store-unreachable', error: 'timeout' });
+    release();
+    await sleep(30);
+    expect(f.lastCheck()).toBe(r2);
+  });
+});
+
+describe('probes that never settle (F6) and probe writes that fail (F15)', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('a probe is not called again while its last call is outstanding, and stays broken by timeout', async () => {
+    const store = memoryStore();
+    let calls = 0;
+    const p = createProbes();
+    p.register('pool', () => (calls++, new Promise(() => {})));
+    p.start({ store, instance: 'i1', declared: [{ id: 'pool', every: '1s', everyMs: 20 } as any], timeoutMs: 10 });
+    await sleep(250);
+    p.stop();
+    expect(calls).toBe(1);
+    const [r] = await store.probes();
+    expect(r).toMatchObject({ id: 'pool', ok: false, reason: 'timeout' });
+    expect(Date.now() - r.at).toBeLessThan(150); // rewritten each period, so never stale
+  });
+
+  it('a probe that settles is called again on its next period', async () => {
+    let calls = 0;
+    const p = createProbes();
+    p.register('pool', async () => (calls++, { ok: true }));
+    p.start({ store: memoryStore(), instance: 'i1', declared: [{ id: 'pool', every: '1s', everyMs: 20 } as any] });
+    await sleep(150);
+    p.stop();
+    expect(calls).toBeGreaterThan(2);
+  });
+
+  it('a probe result the store refuses is counted as a store error', async () => {
+    const store = memoryStore();
+    const f = newFlight();
+    f.probe('pool-matches-ledger', () => ({ ok: true }));
+    f.start({ manifest: manifestData(), store: { ...store, putProbe: async () => Promise.reject(new Error('down')) }, checkEveryMs: 0 });
+    for (let i = 0; i < 50 && !f.stepStats()!.storeErrors; i++) await sleep(10);
+    expect(f.stepStats()!.storeErrors).toBe(1);
+  });
+});
+
+describe('folds (F9, F10, F16)', () => {
+  it('overdue-pruned is kept for as long as the widest promise window', async () => {
+    const p = manifestData().processes[0];
+    const m = manifest({ processes: [{ ...p, retries: {}, promises: [{ id: 'payout-ends', kind: 'ends', within: '24h', window: '3d' }] }] });
+    const s = memoryStore();
+    await s.putMinute(minute('(prune)', NOW - 2 * DAY, { runsPruned: { payout: 2 } }));
+    expect((await check(s, m, { now: NOW })).blind).toContainEqual({ kind: 'overdue-pruned', process: 'payout', count: 2, since: NOW - 3 * DAY });
+  });
+
+  it('drops counted under (other) count for every process', async () => {
+    const s = await storeWith(['p1', 'ledger.debited', NOW - H]);
+    await s.putMinute(minute('i1', NOW - H, { stepsDropped: { '(other)': 3 } }));
+    const r = await check(s, manifest(), { now: NOW });
+    expect(get(r, 'one-debit')).toMatchObject({ state: 'not-checked', reason: 'steps-dropped', stepsDropped: 3 });
+  });
+
+  it('while minute writes keep failing, the counts held in memory stay bounded', async () => {
+    const store = memoryStore();
+    const w = createStepWriter({ store: { ...store, putMinute: async () => Promise.reject(new Error('down')) }, instance: 'i1' });
+    const real = Date.now;
+    try {
+      for (let i = 0; i < 500; i++) {
+        Date.now = () => real() + i * 60_000;
+        w.step('payout', '', 'requested'); // invalid: counted in this minute
+        await w.flush();
+      }
+    } finally {
+      Date.now = real;
+    }
+    expect(w.heldMinutes()).toBeLessThanOrEqual(60);
   });
 });
 

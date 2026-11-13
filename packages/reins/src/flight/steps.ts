@@ -17,6 +17,8 @@ const MAX_PROCESSES = 200;
 export const OTHER_PROCESS = '(other)';
 /** Minutes of drop counts kept in memory after they were written. */
 const KEEP_MINUTES = 5;
+/** Minutes of counts held at most while they cannot be written; the oldest go first. */
+export const MAX_FACT_MINUTES = 60;
 
 export interface StepWriterOptions {
   store: FlightStore;
@@ -74,7 +76,11 @@ export function createStepWriter(o: StepWriterOptions) {
   const factsOf = (t: number) => {
     const m = minuteOf(t);
     let f = facts.get(m);
-    if (!f) facts.set(m, (f = { dropped: {}, invalid: 0, storeErrors: 0 }));
+    if (!f) {
+      // While the store refuses minute writes, counts wait here; keep at most MAX_FACT_MINUTES of them.
+      if (facts.size >= MAX_FACT_MINUTES) facts.delete(Math.min(...facts.keys()));
+      facts.set(m, (f = { dropped: {}, invalid: 0, storeErrors: 0 }));
+    }
     return f;
   };
 
@@ -228,6 +234,15 @@ export function createStepWriter(o: StepWriterOptions) {
       } catch {}
     },
     stats: () => ({ ...totals, queued: queue.length }),
+    /** Counts a store write that failed elsewhere (a probe result), in this minute's record. */
+    storeError(): void {
+      try {
+        factsOf(Date.now()).storeErrors++;
+        totals.storeErrors++;
+      } catch {}
+    },
+    /** Minutes of counts held in memory (bounded by MAX_FACT_MINUTES). */
+    heldMinutes: () => facts.size,
   };
 }
 

@@ -6,7 +6,7 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { check, type CheckResult, endsOf } from './flight/checker.js';
+import { check, type CheckResult, endsOf, notCheckedResult } from './flight/checker.js';
 import { DEFAULT_WINDOW_MS, MANIFEST_FILE, type ManifestResult, readManifest, validateManifest } from './flight/manifest.js';
 import { createProbes, PROBE_TIMEOUT_MS } from './flight/probes.js';
 import { createStepWriter, type StepWriter } from './flight/steps.js';
@@ -22,6 +22,7 @@ import {
   type StrictOptions,
   type StrictRecorder,
   wrapHandler,
+  errorCode,
 } from './recorder.js';
 
 export const VERSION = '0.1.0';
@@ -45,6 +46,8 @@ export interface FlightOptions extends StrictOptions {
   flushMs?: number;
   /** How often the checker runs a pass, if it holds the store lock. Default 60 s; 0 turns the checker off here. */
   checkEveryMs?: number;
+  /** How long a checker pass (lock, reads, prune) may take; past it the pass ends with a `store-unreachable` (timeout) blind fact and a late result is ignored. Default 30 s. */
+  checkTimeoutMs?: number;
   /** How long a probe may run before its run is a timeout. Default 10 s. */
   probeTimeoutMs?: number;
   /** What the store keeps. Default 7 days (or the widest promise window and a day, if longer), and the store's own step cap: 100,000 steps in memory, 1,000,000 in a file or Postgres store. Whole runs go, never single steps. */
@@ -56,7 +59,7 @@ export type { FindingRecord, FlightStore, InstanceMinute, ProbeResult, Retention
 export type { BlindFact, CheckResult, LateRun, ProbeCheck, PromiseCheck } from './flight/checker.js';
 export type { FlightManifest, ManifestProblem, ManifestResult } from './flight/manifest.js';
 export type { QueryFn } from './flight/pg-store.js';
-export { memoryStore, RETENTION_DEFAULTS } from './flight/store.js';
+export { MAX_LOCK_MS, MEMORY_MAX_STEPS, memoryStore, RETENTION_DEFAULTS } from './flight/store.js';
 export { fileStore } from './flight/file-store.js';
 export { PG_TABLES, pgStore } from './flight/pg-store.js';
 export { check, endsOf } from './flight/checker.js';
@@ -64,6 +67,8 @@ export { check, endsOf } from './flight/checker.js';
 const INSTANCE = /^[A-Za-z0-9._-]{1,64}$/;
 /** How often the lock holder prunes the store. */
 const PRUNE_EVERY_MS = 3_600_000;
+/** How long a checker pass may take before it ends as store-unreachable (timeout). */
+const CHECK_TIMEOUT_MS = 30_000;
 
 /** Reads the manifest option: an object is validated, a string is a file; none means the default file, if any. */
 function loadManifest(m: unknown): ManifestResult | null {
@@ -90,8 +95,11 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     lastCheck: CheckResult | null;
     lastPrune: number;
     passing: Promise<CheckResult | null> | null;
+    /** The live pass; work of a pass that ran past its time limit is ignored. */
+    token: object | null;
   } | null = null;
   let checkEvery = 60_000;
+  let checkTimeout = CHECK_TIMEOUT_MS;
 
   /** One checker pass, when this server holds the store lock; null when another checker holds it. */
   async function pass(): Promise<CheckResult | null> {
@@ -100,25 +108,42 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     if (r.passing) return r.passing;
     // A lock its checker stopped renewing is taken over after three periods (at least three minutes).
     const ttl = 3 * Math.max(checkEvery, 60_000);
-    r.passing = (async () => {
+    // This pass is live until it ends or runs past its time limit; work that finishes later is ignored.
+    const token = {};
+    r.token = token;
+    const live = () => run === r && r.token === token;
+    const work = (async (): Promise<CheckResult | null> => {
       try {
         if (!(await r.store.lock(r.owner, ttl))) return null;
-      } catch {
-        // The store cannot be reached: the pass still runs, and says so.
+      } catch (e) {
+        // Without the lock this checker neither checks nor prunes (another may hold it), and says why.
+        return notCheckedResult(r.manifest, Date.now(), { kind: 'lock-unavailable', error: errorCode(e) }, 'lock-unavailable');
       }
       const result = await check(r.store, r.manifest);
-      r.lastCheck = result;
-      if (Date.now() - r.lastPrune >= PRUNE_EVERY_MS) {
+      if (live() && Date.now() - r.lastPrune >= PRUNE_EVERY_MS) {
         r.lastPrune = Date.now();
         await r.store.prune(r.retention, Date.now(), endsOf(r.manifest)).catch(() => {});
       }
       return result;
-    })()
+    })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const limit = new Promise<CheckResult>((resolve) => {
+      timer = setTimeout(() => resolve(notCheckedResult(r.manifest, Date.now(), { kind: 'store-unreachable', error: 'timeout' }, 'store-unreachable')), checkTimeout);
+      (timer as any).unref?.();
+    });
+    const p: Promise<CheckResult | null> = Promise.race([work, limit])
+      .then((res) => {
+        if (res && live()) r.lastCheck = res;
+        return res;
+      })
       .catch(() => null)
       .finally(() => {
-        r.passing = null;
+        clearTimeout(timer);
+        if (r.token === token) r.token = null;
+        if (r.passing === p) r.passing = null;
       });
-    return r.passing;
+    r.passing = p;
+    return p;
   }
 
   return {
@@ -153,9 +178,10 @@ export function createFlight(env: Record<string, string | undefined> = process.e
         const m = manifest?.ok ? manifest.manifest : undefined;
         const widest = Math.max(DEFAULT_WINDOW_MS, ...(m?.processes || []).flatMap((p) => p.promises.map((x) => x.windowMs)));
         const keep: Retention = { maxAgeMs: Math.max(RETENTION_DEFAULTS.maxAgeMs, widest + 86_400_000), ...(opts.retention && typeof opts.retention === 'object' ? opts.retention : {}) };
-        run = { store, writer, manifest, owner: `${instance}-${randomBytes(4).toString('hex')}`, retention: keep, timer: null, lastCheck: null, lastPrune: 0, passing: null };
-        probes.start({ store, instance, declared: m?.probes || [], timeoutMs: nonNeg(opts.probeTimeoutMs, PROBE_TIMEOUT_MS) || PROBE_TIMEOUT_MS });
+        run = { store, writer, manifest, owner: `${instance}-${randomBytes(4).toString('hex')}`, retention: keep, timer: null, lastCheck: null, lastPrune: 0, passing: null, token: null };
+        probes.start({ store, instance, declared: m?.probes || [], timeoutMs: nonNeg(opts.probeTimeoutMs, PROBE_TIMEOUT_MS) || PROBE_TIMEOUT_MS, onError: () => writer.storeError() });
         checkEvery = nonNeg(opts.checkEveryMs, 60_000);
+        checkTimeout = Math.min(nonNeg(opts.checkTimeoutMs, CHECK_TIMEOUT_MS) || CHECK_TIMEOUT_MS, 3 * Math.max(checkEvery, 60_000));
         if (checkEvery > 0) {
           run.timer = setInterval(() => void pass(), checkEvery);
           (run.timer as any).unref?.();

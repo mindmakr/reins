@@ -37,15 +37,38 @@ export function createProbes() {
     start(o: { store: FlightStore; instance: string; declared: FlightProbe[]; timeoutMs?: number; onError?: () => void }) {
       running?.stop();
       const timers = new Map<string, ReturnType<typeof setInterval>>();
-      const busy = new Set<string>();
+      /** Probes with a call to the app's function that has not settled, and when it started. */
+      const busy = new Map<string, number>();
       const every = new Map(o.declared.map((p) => [p.id, p.everyMs]));
+      const timeoutMs = Math.max(1, o.timeoutMs ?? PROBE_TIMEOUT_MS);
+      const put = (r: ProbeResult) => o.store.putProbe(r).catch(() => o.onError?.());
       const tick = (id: string) => {
         const fn = fns.get(id);
-        if (!fn || busy.has(id)) return;
-        busy.add(id);
-        runProbe(id, fn, o.instance, o.timeoutMs)
-          .then((r) => o.store.putProbe(r))
-          .catch(() => o.onError?.())
+        if (!fn) return;
+        const started = busy.get(id);
+        if (started !== undefined) {
+          // The last call has not settled: it is not called again (it may hold one of the app's database
+          // connections), and while it is past its time the probe stays reported as broken by timeout.
+          const now = Date.now();
+          if (now - started >= timeoutMs) void put({ id, instance: o.instance, at: now, ok: false, reason: 'timeout', ms: now - started });
+          return;
+        }
+        busy.set(id, Date.now());
+        let settled!: () => void;
+        const done = new Promise<void>((resolve) => (settled = resolve));
+        const watched: ProbeFn = () => {
+          try {
+            const v = fn();
+            Promise.resolve(v).then(settled, settled);
+            return v;
+          } catch (e) {
+            settled();
+            throw e;
+          }
+        };
+        void runProbe(id, watched, o.instance, timeoutMs)
+          .then(put)
+          .then(() => done)
           .finally(() => busy.delete(id));
       };
       const schedule = (id: string) => {

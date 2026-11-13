@@ -5,6 +5,7 @@
 import { DEFAULT_WINDOW_MS, type FlightManifest, type FlightProcess, type FlightPromise, type ManifestProblem, type ManifestResult, type PromiseKind } from './manifest.js';
 import { type FlightStore, type InstanceMinute, PRUNE_INSTANCE, type ProbeFailure, type ProbeResult, type StepRecord } from './store.js';
 import { errorCode } from '../recorder.js';
+import { OTHER_PROCESS } from './steps.js';
 
 /** Keys listed per result at most; `count` always has the full number. */
 export const MAX_KEYS = 20;
@@ -13,7 +14,7 @@ export const RECENT_MS = 5 * 60_000;
 /** A probe result older than this many of its periods is too old. */
 export const STALE_PERIODS = 2;
 
-export type NotCheckedReason = 'steps-dropped' | 'store-unreachable';
+export type NotCheckedReason = 'steps-dropped' | 'store-unreachable' | 'lock-unavailable';
 
 /** A run whose expected step came, but late (within, ends). It is not a breach now (design section 5). */
 export interface LateRun {
@@ -58,12 +59,15 @@ export type PromiseCheck = CheckBase &
 export type ProbeCheck = { id: string; everyMs: number; lastAt: number | null } & (
   | { state: 'held' }
   | { state: 'broken'; reason: ProbeFailure }
-  | { state: 'not-checked'; reason: 'not-registered' | 'no-result' | 'stale' | 'no-instance' | 'store-unreachable' }
+  | { state: 'not-checked'; reason: 'not-registered' | 'no-result' | 'stale' | 'no-instance' | 'store-unreachable' | 'lock-unavailable' }
 );
 
 export type BlindFact =
   | { kind: 'manifest-invalid'; problems: ManifestProblem[] }
+  /** The store could not be read; `error` is a code only, `timeout` when the pass ran past its time limit. */
   | { kind: 'store-unreachable'; error: string }
+  /** Taking the checker lock failed (say, the lock table is missing): this checker did not check or prune. */
+  | { kind: 'lock-unavailable'; error: string }
   | { kind: 'steps-dropped'; process: string; count: number; since: number }
   /** Runs retention removed while they had reached no end step, so they may have been overdue (B7). */
   | { kind: 'overdue-pruned'; process: string; count: number; since: number }
@@ -89,11 +93,42 @@ export interface CheckOptions {
 
 const minuteOf = (t: number) => t - (t % 60_000);
 
-/** Steps dropped for `process` in minutes that overlap `[since, now]`. */
+/**
+ * Steps dropped for `process` in minutes that overlap `[since, now]`. Drops a writer counted under
+ * OTHER_PROCESS (past its limit of process names in one minute) may be of any process, so they count for each.
+ */
 function droppedIn(minutes: InstanceMinute[], process: string, since: number): number {
   let n = 0;
-  for (const m of minutes) if (m.minute >= minuteOf(since)) n += Number(m.stepsDropped?.[process]) || 0;
+  for (const m of minutes) {
+    if (m.minute < minuteOf(since) || !m.stepsDropped) continue;
+    n += Number(own(m.stepsDropped, process)) || 0;
+    if (process !== OTHER_PROCESS) n += Number(own(m.stepsDropped, OTHER_PROCESS)) || 0;
+  }
   return n;
+}
+
+const own = (o: Record<string, unknown>, k: string) => (Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined);
+
+/**
+ * A result with every promise and probe of the manifest not checked, for `reason`, and `fact` as a blind fact:
+ * what a pass gives when the store cannot be read, the pass runs past its time, or the lock cannot be taken.
+ */
+export function notCheckedResult(manifest: ManifestResult | null, now: number, fact: BlindFact, reason: 'store-unreachable' | 'lock-unavailable', done: PromiseCheck[] = []): CheckResult {
+  const out: CheckResult = { at: now, manifest: !manifest ? 'none' : manifest.ok ? 'ok' : 'invalid', promises: [...done], probes: [], blind: [] };
+  if (manifest && !manifest.ok) out.blind.push({ kind: 'manifest-invalid', problems: manifest.problems });
+  out.blind.push(fact);
+  const m = manifest?.ok ? manifest.manifest : undefined;
+  if (!m) return out;
+  const seen = new Set(done.map((x) => `${x.process} ${x.id}`));
+  for (const p of m.processes) {
+    const all = [...p.promises.map((x) => ({ id: x.id, kind: x.kind, windowMs: x.windowMs })), ...Object.keys(p.retries || {}).map((s) => ({ id: `retries:${s}`, kind: 'retries' as const, windowMs: DEFAULT_WINDOW_MS }))];
+    for (const x of all) {
+      if (seen.has(`${p.name} ${x.id}`)) continue;
+      out.promises.push({ process: p.name, ...x, since: now - x.windowMs, runs: 0, stepsDropped: 0, state: 'not-checked', reason });
+    }
+  }
+  out.probes = m.probes.map((x) => ({ id: x.id, everyMs: x.everyMs, lastAt: null, state: 'not-checked', reason }));
+  return out;
 }
 
 /** The window of each check of a process: its promises' windows, and the default one for retries. */
@@ -124,26 +159,17 @@ export async function check(store: FlightStore, manifest: ManifestResult | null,
       const timed = p.promises.some((x) => x.kind === 'within' || x.kind === 'ends');
       const open = timed ? group(await store.openRuns(p.name, p.ends)) : new Map<string, StepRecord[]>();
       if (timed) {
-        const pruned = minutes.filter((x) => x.minute >= minuteOf(now - DEFAULT_WINDOW_MS)).reduce((n, x) => n + (Number(x.runsPruned?.[p.name]) || 0), 0);
-        if (pruned) out.blind.push({ kind: 'overdue-pruned', process: p.name, count: pruned, since: now - DEFAULT_WINDOW_MS });
+        // Kept for as long as the widest promise window (at least a day), so the fact does not vanish a day
+        // after the prune while a longer window still covers it.
+        const pruned = minutes.reduce((n, x) => n + (Number(x.runsPruned && own(x.runsPruned, p.name)) || 0), 0);
+        if (pruned) out.blind.push({ kind: 'overdue-pruned', process: p.name, count: pruned, since: now - widest });
       }
       for (const promise of p.promises) out.promises.push(checkPromise(p, promise, runs, open, minutes, now));
       for (const [step, n] of Object.entries(p.retries || {})) out.promises.push(checkRetries(p.name, step, n, runs, minutes, now));
     }
     out.probes = checkProbes(m, minutes, await store.probes(), now, out.blind);
   } catch (e) {
-    out.blind.push({ kind: 'store-unreachable', error: errorCode(e) });
-    if (m) {
-      const done = new Set(out.promises.map((x) => `${x.process} ${x.id}`));
-      for (const p of m.processes) {
-        const all = [...p.promises.map((x) => ({ id: x.id, kind: x.kind, windowMs: x.windowMs })), ...Object.keys(p.retries || {}).map((s) => ({ id: `retries:${s}`, kind: 'retries' as const, windowMs: DEFAULT_WINDOW_MS }))];
-        for (const x of all) {
-          if (done.has(`${p.name} ${x.id}`)) continue;
-          out.promises.push({ process: p.name, ...x, since: now - x.windowMs, runs: 0, stepsDropped: 0, state: 'not-checked', reason: 'store-unreachable' });
-        }
-      }
-      out.probes = m.probes.map((x) => ({ id: x.id, everyMs: x.everyMs, lastAt: null, state: 'not-checked', reason: 'store-unreachable' }));
-    }
+    return notCheckedResult(manifest, now, { kind: 'store-unreachable', error: errorCode(e) }, 'store-unreachable', out.promises);
   }
   return out;
 }
