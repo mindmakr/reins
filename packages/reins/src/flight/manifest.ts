@@ -101,6 +101,8 @@ const MAX_DURATION_MS = 365 * 86_400_000;
 /** Names of processes and steps, and ids of promises and probes. */
 const NAME = /^[a-z0-9.-]+$/;
 const MAX_NAME = 100;
+/** Whether `s` is a valid process or step name: lowercase letters, digits, dots and hyphens, at most 100. */
+export const isName = (s: unknown): s is string => typeof s === 'string' && s.length > 0 && s.length <= MAX_NAME && NAME.test(s);
 const MAX_TEXT = 1000;
 const MAX_RETRIES = 1000;
 
