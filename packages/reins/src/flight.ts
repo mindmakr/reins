@@ -47,7 +47,7 @@ export interface FlightOptions extends StrictOptions {
   checkEveryMs?: number;
   /** How long a probe may run before its run is a timeout. Default 10 s. */
   probeTimeoutMs?: number;
-  /** What the store keeps. Default 7 days (or the widest promise window and a day, if longer) and 1,000,000 steps. */
+  /** What the store keeps. Default 7 days (or the widest promise window and a day, if longer), and the store's own step cap: 100,000 steps in memory, 1,000,000 in a file or Postgres store. Whole runs go, never single steps. */
   retention?: Retention;
 }
 
@@ -85,7 +85,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     writer: StepWriter;
     manifest: ManifestResult | null;
     owner: string;
-    retention: Required<Retention>;
+    retention: Retention;
     timer: ReturnType<typeof setInterval> | null;
     lastCheck: CheckResult | null;
     lastPrune: number;
@@ -152,8 +152,8 @@ export function createFlight(env: Record<string, string | undefined> = process.e
         writer.start();
         const m = manifest?.ok ? manifest.manifest : undefined;
         const widest = Math.max(DEFAULT_WINDOW_MS, ...(m?.processes || []).flatMap((p) => p.promises.map((x) => x.windowMs)));
-        const keep = { maxAgeMs: Math.max(RETENTION_DEFAULTS.maxAgeMs, widest + 86_400_000), maxSteps: RETENTION_DEFAULTS.maxSteps, ...(opts.retention || {}) };
-        run = { store, writer, manifest, owner: `${instance}-${randomBytes(4).toString('hex')}`, retention: keep as Required<Retention>, timer: null, lastCheck: null, lastPrune: 0, passing: null };
+        const keep: Retention = { maxAgeMs: Math.max(RETENTION_DEFAULTS.maxAgeMs, widest + 86_400_000), ...(opts.retention && typeof opts.retention === 'object' ? opts.retention : {}) };
+        run = { store, writer, manifest, owner: `${instance}-${randomBytes(4).toString('hex')}`, retention: keep, timer: null, lastCheck: null, lastPrune: 0, passing: null };
         probes.start({ store, instance, declared: m?.probes || [], timeoutMs: nonNeg(opts.probeTimeoutMs, PROBE_TIMEOUT_MS) || PROBE_TIMEOUT_MS });
         checkEvery = nonNeg(opts.checkEveryMs, 60_000);
         if (checkEvery > 0) {

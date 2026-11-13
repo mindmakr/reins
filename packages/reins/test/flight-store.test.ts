@@ -31,12 +31,14 @@ describe('memory store', () => {
     expect((await store.runSteps('payout', 0)).map((s) => s.key)).toEqual(['k3', 'k4', 'k5']);
   });
 
-  it('counts an open run only when retention removes it whole, also when the cap on add removes it', async () => {
+  it('removes whole runs only, and counts the open ones it removes, also when the cap on add removes them', async () => {
+    // Round 2 (F3): this test used to lock in pruning single steps, which left the run `part` without its first
+    // step. Retention now keeps a run whole while its newest step is inside the bounds.
     const store = memoryStore({ maxSteps: 4 });
     const t = Date.now();
     await store.addSteps([step('part', 'requested', t - 3 * DAY), step('part', 'bank.sent', t), step('gone', 'requested', t - 3 * DAY)]);
     await store.prune({ maxAgeMs: DAY }, t, { payout: ['ledger.debited'] });
-    expect((await store.openRuns('payout', ['ledger.debited'])).map((s) => s.key)).toEqual(['part']);
+    expect((await store.openRuns('payout', ['ledger.debited'])).map((s) => `${s.key}:${s.step}`)).toEqual(['part:requested', 'part:bank.sent']);
     expect((await store.minutes(0)).find((m) => m.instance === '(prune)')!.runsPruned).toEqual({ payout: 1 });
     await store.addSteps([1, 2, 3, 4].map((i) => step(`n${i}`, 'requested', t + i)));
     const counts = (await store.minutes(0)).filter((m) => m.instance === '(prune)').reduce((n, m) => n + (m.runsPruned?.payout || 0), 0);
@@ -75,10 +77,12 @@ describe('file store', () => {
   it('prunes by count a whole segment at a time, oldest first, never one still being written', async () => {
     const dir = join(tmp(), 'flight');
     const a = fileStore({ dir });
-    await a.addSteps([step('a1', 'requested', 1), step('a2', 'requested', 2)]);
+    // Steps at real times: retention now goes by step time in every store (it went by segment file time here).
+    const t = Date.now();
+    await a.addSteps([step('a1', 'requested', t + 1), step('a2', 'requested', t + 2)]);
     await new Promise((r) => setTimeout(r, 5));
     const b = fileStore({ dir });
-    await b.addSteps([step('b1', 'requested', 3, 'payout', 'i2')]);
+    await b.addSteps([step('b1', 'requested', t + 3, 'payout', 'i2')]);
     await b.prune({ maxSteps: 2 });
     expect((await b.runSteps('payout', 0)).map((s) => s.key)).toEqual(['b1']);
     // b's own open segment is never removed, even when it alone is over the bound.

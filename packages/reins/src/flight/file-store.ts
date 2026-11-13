@@ -15,16 +15,19 @@ import { appendFile, link, open, readdir, readFile, rename, stat, unlink, writeF
 import { join } from 'node:path';
 import {
   byTime,
-  countOpenRemoved,
+  countOpen,
   type FindingRecord,
   type FlightStore,
   type InstanceMinute,
   laterProbe,
   lockHeld,
   lockUntil,
+  planPrune,
   type ProbeResult,
   recordPruned,
   type Retention,
+  runId,
+  type RunSummary,
   retention,
   selectOpen,
   selectRuns,
@@ -69,14 +72,18 @@ async function writeAtomic(file: string, text: string): Promise<void> {
   }
 }
 
-const list = async (dir: string) => {
+/** The regular files in a folder: anything else (a folder named like a segment, say) is skipped. */
+const listFiles = async (dir: string): Promise<string[]> => {
   try {
-    return await readdir(dir);
+    return (await readdir(dir, { withFileTypes: true })).filter((d) => d.isFile()).map((d) => d.name);
   } catch (e: any) {
     if (e?.code === 'ENOENT') return [];
     throw e;
   }
 };
+
+/** How long parsed segments are kept after the last read. */
+const CACHE_IDLE_MS = 5000;
 
 export function fileStore(o: FileStoreOptions = {}): FlightStore {
   const dir = o.dir || join(process.cwd(), '.reins', 'flight');
@@ -122,7 +129,7 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
 
   async function readMinutes(since: number): Promise<InstanceMinute[]> {
     const out: InstanceMinute[] = [];
-    for (const f of await list(minutesDir)) {
+    for (const f of await listFiles(minutesDir)) {
       const hour = Number(f.slice(f.lastIndexOf('-') + 1, -5));
       if (!f.endsWith('.json') || !(hour + HOUR > since)) continue;
       const all = await readJson<Record<string, InstanceMinute>>(join(minutesDir, f));
@@ -134,30 +141,58 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
   type Stored = StepRecord & { seq: number; file: string };
   const strip = ({ seq: _s, file: _f, ...s }: Stored): StepRecord => s;
 
-  async function readSteps(): Promise<Stored[]> {
-    const files = (await list(stepsDir)).filter((f) => f.endsWith('.jsonl')).sort(byStart);
-    const out: Stored[] = [];
-    let seq = 0;
-    for (const f of files) {
-      let text = '';
+  /**
+   * Parsed segments, kept while their size and time are unchanged, so a checker pass (which reads the steps of
+   * each process twice) parses each segment once. Dropped CACHE_IDLE_MS after the last read, so the steps are
+   * not held in memory between passes.
+   */
+  const cache = new Map<string, { size: number; mtimeMs: number; steps: StepRecord[] }>();
+  let idle: ReturnType<typeof setTimeout> | null = null;
+
+  async function readSegment(file: string): Promise<StepRecord[] | null> {
+    const st = await stat(file).catch(() => null);
+    if (!st || !st.isFile()) return null; // pruned while listing, or not a file
+    const hit = cache.get(file);
+    if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.steps;
+    let text = '';
+    try {
+      text = await readFile(file, 'utf8');
+    } catch (e: any) {
+      if (e?.code === 'ENOENT' || e?.code === 'EISDIR') return null;
+      throw e;
+    }
+    const steps: StepRecord[] = [];
+    for (const line of text.split('\n')) {
+      if (!line) continue;
       try {
-        text = await readFile(join(stepsDir, f), 'utf8');
-      } catch (e: any) {
-        if (e?.code === 'ENOENT') continue; // pruned while listing
-        throw e;
-      }
-      for (const line of text.split('\n')) {
-        if (!line) continue;
-        try {
-          const s = JSON.parse(line);
-          if (typeof s.process === 'string' && typeof s.key === 'string' && typeof s.step === 'string' && typeof s.at === 'number') {
-            out.push({ process: s.process, key: s.key, step: s.step, at: s.at, instance: String(s.instance), seq: seq++, file: join(stepsDir, f) });
-          }
-        } catch {
-          // A line cut short by a crash mid-append: skip it.
+        const s = JSON.parse(line);
+        if (s && typeof s.process === 'string' && typeof s.key === 'string' && typeof s.step === 'string' && typeof s.at === 'number') {
+          steps.push({ process: s.process, key: s.key, step: s.step, at: s.at, instance: String(s.instance) });
         }
+      } catch {
+        // A line cut short by a crash mid-append: skip it.
       }
     }
+    // Only a segment read whole, at the size seen, is kept: one still being appended to is read again.
+    if (Buffer.byteLength(text) === st.size) cache.set(file, { size: st.size, mtimeMs: st.mtimeMs, steps });
+    return steps;
+  }
+
+  async function readSteps(): Promise<Stored[]> {
+    const files = (await listFiles(stepsDir)).filter((f) => f.endsWith('.jsonl')).sort(byStart);
+    const out: Stored[] = [];
+    let seq = 0;
+    const seen = new Set<string>();
+    for (const f of files) {
+      const file = join(stepsDir, f);
+      seen.add(file);
+      const steps = await readSegment(file);
+      if (steps) for (const s of steps) out.push({ ...s, seq: seq++, file });
+    }
+    for (const file of cache.keys()) if (!seen.has(file)) cache.delete(file);
+    if (idle) clearTimeout(idle);
+    idle = setTimeout(() => cache.clear(), CACHE_IDLE_MS);
+    (idle as any).unref?.();
     return out;
   }
 
@@ -209,7 +244,7 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
       }),
     async probes() {
       const latest = new Map<string, ProbeResult>();
-      for (const f of await list(dir)) {
+      for (const f of await listFiles(dir)) {
         if (!f.startsWith('probes-') || !f.endsWith('.json')) continue;
         for (const r of Object.values((await readJson<Record<string, ProbeResult>>(join(dir, f))) || {})) {
           if (r && typeof r.id === 'string' && typeof r.at === 'number' && laterProbe(latest.get(r.id), r)) latest.set(r.id, r);
@@ -234,43 +269,60 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
       queued(async () => {
         const k = retention({ ...keep, ...r2 });
         const cut = now - k.maxAgeMs;
-        // Steps: whole segments only. By age when the segment was last written before the cut (nothing was
-        // appended since, so its writer has moved on to a new hour's segment); by count from the oldest
-        // segment, never a segment this store object is still appending to.
+        // Steps: whole runs only, never single steps (B3, B7). By age, a run goes when its newest step is before
+        // the cut. By count, the oldest segments are taken first (never one this store object is still
+        // appending to), and every run with a step in them goes whole. A segment left with no steps is deleted;
+        // one left with some is rewritten without the removed runs.
         const open = new Set([...segments.values()].map((s) => s.file));
         const all = await readSteps();
-        const lines = new Map<string, number>();
-        for (const s of all) lines.set(s.file, (lines.get(s.file) || 0) + 1);
-        const gone = new Set<string>();
-        const segs: Array<{ file: string; lines: number }> = [];
-        for (const f of (await list(stepsDir)).filter((x) => x.endsWith('.jsonl')).sort(byStart)) {
-          const file = join(stepsDir, f);
-          const st = await stat(file).catch(() => null);
-          if (!st) continue;
-          if (st.mtimeMs < cut) gone.add(file);
-          else segs.push({ file, lines: lines.get(file) || 0 });
+        const runs = new Map<string, RunSummary & { files: Set<string> }>();
+        const perFile = new Map<string, Stored[]>();
+        for (const s of all) {
+          const id = runId(s.process, s.key);
+          let r = runs.get(id);
+          if (!r) runs.set(id, (r = { process: s.process, key: s.key, last: s.at, size: 0, steps: [], files: new Set() }));
+          r.steps.push(s);
+          r.size++;
+          if (s.at > r.last) r.last = s.at;
+          r.files.add(s.file);
+          const f = perFile.get(s.file);
+          if (f) f.push(s);
+          else perFile.set(s.file, [s]);
         }
-        let total = segs.reduce((n, s) => n + s.lines, 0);
-        for (const s of segs) {
-          if (total <= k.maxSteps) break;
-          if (open.has(s.file)) continue;
-          gone.add(s.file);
-          total -= s.lines;
+        const gone = new Set(planPrune(runs.values(), cut, Infinity));
+        let total = all.length;
+        for (const r of gone) total -= r.size;
+        if (total > k.maxSteps) {
+          for (const [file, steps] of perFile) {
+            if (total <= k.maxSteps) break;
+            if (open.has(file)) continue;
+            for (const s of steps) {
+              const r = runs.get(runId(s.process, s.key))!;
+              if (gone.has(r)) continue;
+              gone.add(r);
+              total -= r.size;
+            }
+          }
         }
-        const counts = countOpenRemoved(
-          all.filter((s) => gone.has(s.file)),
-          all.filter((s) => !gone.has(s.file)),
-          ends,
-        );
-        for (const file of gone) {
-          await unlink(file).catch(() => {});
-          for (const [i, s] of segments) if (s.file === file) segments.delete(i);
+        const goneIds = new Set([...gone].map((r) => runId(r.process, r.key)));
+        const touched = new Set([...gone].flatMap((r) => [...r.files]));
+        for (const file of touched) {
+          const kept = (perFile.get(file) || []).filter((s) => !goneIds.has(runId(s.process, s.key)));
+          if (!kept.length) {
+            await unlink(file).catch(() => {});
+            for (const [i, s] of segments) if (s.file === file) segments.delete(i);
+          } else {
+            await writeAtomic(file, kept.map((s) => JSON.stringify({ process: s.process, key: s.key, step: s.step, at: s.at, instance: s.instance }) + '\n').join(''));
+            for (const s of segments.values()) if (s.file === file) s.lines = kept.length;
+          }
+          cache.delete(file);
         }
-        for (const f of await list(minutesDir)) {
+        const counts = countOpen(gone, ends);
+        for (const f of await listFiles(minutesDir)) {
           const hour = Number(f.slice(f.lastIndexOf('-') + 1, -5));
           if (f.endsWith('.json') && hour + HOUR < cut) await unlink(join(minutesDir, f)).catch(() => {});
         }
-        for (const f of await list(dir)) {
+        for (const f of await listFiles(dir)) {
           if (!f.startsWith('probes-') || !f.endsWith('.json')) continue;
           const st = await stat(join(dir, f)).catch(() => null);
           if (st && st.mtimeMs < cut) await unlink(join(dir, f)).catch(() => {});
@@ -395,7 +447,7 @@ async function dropLock(dir: string, file: string, owner: string): Promise<void>
 
 async function sweepClaims(dir: string): Promise<void> {
   const old = Date.now() - CLAIM_KEEP_MS;
-  for (const f of await list(dir).catch(() => [] as string[])) {
+  for (const f of await listFiles(dir).catch(() => [] as string[])) {
     if (!f.endsWith('.claim') && !(f.startsWith('lock.json.') && f.endsWith('.tmp'))) continue;
     const st = await stat(join(dir, f)).catch(() => null);
     if (st && st.isFile() && st.mtimeMs < old) await unlink(join(dir, f)).catch(() => {});

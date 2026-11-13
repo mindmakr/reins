@@ -194,6 +194,44 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     expect((await store.minutes(0)).find((m) => m.instance === '(prune)')!.runsPruned).toEqual({ payout: 3 });
   });
 
+  it('prune by age removes whole runs: a run stays whole while its newest step is inside the bounds', async () => {
+    const { store } = await make();
+    const t = Date.now() - 8 * DAY;
+    await store.addSteps([
+      step('long', 'requested', t), // open, last step at t + 6.5 days
+      step('long', 'bank.pending', t + 6.5 * DAY),
+      step('ord', 'bank.settled', t), // order: its first step is old, its then step recent
+      step('ord', 'ledger.debited', t + 6.5 * DAY),
+      step('old', 'requested', t), // open, wholly old
+      step('oldend', 'requested', t),
+      step('oldend', 'bank.failed', t + 1000),
+    ]);
+    await store.prune({ maxAgeMs: 7 * DAY }, t + 7 * DAY + 3_600_000, { payout: ['ledger.debited', 'bank.failed'] });
+    const got = await store.runSteps('payout', 0);
+    expect(got.map((s) => `${s.key}:${s.step}`).sort()).toEqual(['long:bank.pending', 'long:requested', 'ord:bank.settled', 'ord:ledger.debited']);
+    expect((await store.minutes(0)).find((m) => m.instance === '(prune)')!.runsPruned).toEqual({ payout: 1 });
+  });
+
+  it('prune by count removes whole runs, oldest first, and counts the open ones', async () => {
+    const { store, second } = await make();
+    const t = Date.now();
+    // Ten runs of three steps; the even ones reached an end step.
+    await store.addSteps(Array.from({ length: 10 }, (_, i) => [step(`r${i}`, 'requested', t + i), step(`r${i}`, 'bank.sent', t + i), step(`r${i}`, i % 2 ? 'bank.pending' : 'ledger.debited', t + i)]).flat());
+    // Another handle prunes (a store object never prunes the segment it is still appending to).
+    await second().prune({ maxSteps: 10 }, t + 100, { payout: ['ledger.debited'] });
+    const got = await store.runSteps('payout', 0);
+    expect(got.length).toBeLessThanOrEqual(10);
+    const left = new Map<string, number>();
+    for (const s of got) left.set(s.key, (left.get(s.key) || 0) + 1);
+    for (const n of left.values()) expect(n).toBe(3);
+    const removedOpen = Array.from({ length: 10 }, (_, i) => i).filter((i) => i % 2 && !left.has(`r${i}`)).length;
+    expect(removedOpen).toBeGreaterThan(0);
+    expect((await store.minutes(0)).find((m) => m.instance === '(prune)')!.runsPruned).toEqual({ payout: removedOpen });
+    // What is left is the newest runs.
+    const kept = [...left.keys()].map((k) => Number(k.slice(1))).sort((a, b) => a - b);
+    expect(kept).toEqual(kept.length ? Array.from({ length: kept.length }, (_, i) => 10 - kept.length + i) : []);
+  });
+
   it('prune without end steps writes no count', async () => {
     const { store } = await make();
     const t = Date.now();

@@ -63,9 +63,9 @@ export interface FindingRecord {
 
 /** Bounds on what a store keeps. Applied by `prune`, which the lock holder calls. */
 export interface Retention {
-  /** Steps, summaries and resolved findings older than this go. Default 7 days. */
+  /** Runs whose newest step is older than this go whole; so do summaries and resolved findings older than this. Default 7 days. */
   maxAgeMs?: number;
-  /** At most this many steps; the oldest go first. Default 1,000,000. */
+  /** At most this many steps; whole runs go, those with the oldest newest step first. Default 1,000,000 (memory store 100,000). */
   maxSteps?: number;
 }
 
@@ -116,8 +116,8 @@ export interface FlightStore {
   /** Gives the lock up, if `owner` holds it. */
   unlock(owner: string): Promise<void>;
   /**
-   * Removes what is past the retention bounds. With `ends` (the end steps per process), runs of those processes
-   * removed whole while they had reached no end step are counted and written as `runsPruned`, so retention
+   * Removes what is past the retention bounds, always whole runs. With `ends` (the end steps per process), runs of those
+   * processes removed while they had reached no end step are counted and written as `runsPruned`, so retention
    * never silently drops a run that may be overdue.
    */
   prune(r?: Retention, now?: number, ends?: Record<string, string[]>): Promise<void>;
@@ -170,24 +170,55 @@ export function selectOpen<T extends StepRecord>(all: Iterable<T>, process: stri
 /** The minute records `prune` writes its counts under. */
 export const PRUNE_INSTANCE = '(prune)';
 
+/** One run as retention sees it. */
+export interface RunSummary {
+  process: string;
+  key: string;
+  /** Time of its newest step. */
+  last: number;
+  /** Its number of steps. */
+  size: number;
+  /** Its steps. */
+  steps: StepRecord[];
+}
+
+/** One id per run: the process and key, without any way for two pairs to give the same text. */
+export const runId = (process: string, key: string) => `${process.length}:${process}${key}`;
+
 /**
- * Counts, per process named in `ends`, the runs whose steps are all in `removed` (none left in `kept`) and
- * that had reached no end step.
+ * Which runs retention removes (design B3, B7). Retention works on whole runs, never single steps, so no
+ * promise is ever judged on a run missing part of its steps: a run goes when its newest step is before `cut`;
+ * then, while more than `maxSteps` steps are left, the runs whose newest step is oldest go first.
  */
-export function countOpenRemoved(removed: Iterable<StepRecord>, kept: Iterable<StepRecord>, ends: Record<string, string[]> = {}): Record<string, number> {
-  const id = (s: StepRecord) => `${s.process}\n${s.key}`;
-  const left = new Set<string>();
-  for (const s of kept) if (ends[s.process]) left.add(id(s));
-  const runs = new Map<string, { process: string; ended: boolean }>();
-  for (const s of removed) {
-    const e = ends[s.process];
-    if (!e || left.has(id(s))) continue;
-    const r = runs.get(id(s)) || { process: s.process, ended: false };
-    r.ended ||= e.includes(s.step);
-    runs.set(id(s), r);
+export function planPrune<R extends Pick<RunSummary, 'last' | 'size'>>(runs: Iterable<R>, cut: number, maxSteps: number): R[] {
+  const gone: R[] = [];
+  const left: R[] = [];
+  let total = 0;
+  for (const r of runs) {
+    if (r.last < cut) gone.push(r);
+    else {
+      left.push(r);
+      total += r.size;
+    }
   }
+  if (total > maxSteps) {
+    left.sort((a, b) => a.last - b.last);
+    for (const r of left) {
+      if (total <= maxSteps) break;
+      gone.push(r);
+      total -= r.size;
+    }
+  }
+  return gone;
+}
+
+/** Counts, per process named in `ends`, the removed runs that had reached no end step: they may have been overdue. */
+export function countOpen(gone: Iterable<Pick<RunSummary, 'process' | 'steps'>>, ends: Record<string, string[]> = {}): Record<string, number> {
   const out: Record<string, number> = {};
-  for (const r of runs.values()) if (!r.ended) out[r.process] = (out[r.process] || 0) + 1;
+  for (const r of gone) {
+    const e = Object.prototype.hasOwnProperty.call(ends, r.process) ? ends[r.process] : undefined;
+    if (Array.isArray(e) && !r.steps.some((s) => e.includes(s.step))) out[r.process] = (out[r.process] || 0) + 1;
+  }
   return out;
 }
 
@@ -205,12 +236,23 @@ export async function recordPruned(store: Pick<FlightStore, 'minutes' | 'putMinu
 export const laterProbe = (old: ProbeResult | undefined, r: ProbeResult) => !old || r.at >= old.at;
 
 /**
+ * The memory store's default cap on steps: small enough that the app does not feel it (some tens of MB at
+ * most), where the file and Postgres stores keep RETENTION_DEFAULTS.maxSteps. `memoryStore({ maxSteps })` sets it.
+ */
+export const MEMORY_MAX_STEPS = 100_000;
+
+/**
  * The memory store: for tests and a single process. Two checkers given the same memory store share its lock.
- * It applies `maxSteps` as steps are added, so it cannot grow without limit even if nothing prunes it.
+ * Steps are held per process and per run, so reads touch only the runs of one process. It applies `maxSteps`
+ * as steps are added (removing whole runs, oldest first, down to nine tenths of the cap so that this happens
+ * seldom), so it cannot grow without limit even if nothing prunes it.
  */
 export function memoryStore(r: Retention = {}): FlightStore {
-  const keep = retention(r);
-  let steps: Array<StepRecord & { seq: number }> = [];
+  const keep = { maxAgeMs: retention(r).maxAgeMs, maxSteps: posInt(r?.maxSteps, MEMORY_MAX_STEPS) };
+  type Stored = StepRecord & { seq: number };
+  type Run = { process: string; key: string; last: number; size: number; steps: Stored[] };
+  const runs = new Map<string, Map<string, Run>>();
+  let total = 0;
   let seq = 0;
   const minutes = new Map<string, InstanceMinute>();
   const probes = new Map<string, ProbeResult>();
@@ -218,26 +260,48 @@ export function memoryStore(r: Retention = {}): FlightStore {
   let held: { owner: string; until: number } | null = null;
   /** The end steps the last prune was given, so the cap applied on add counts open runs it removes too. */
   let lastEnds: Record<string, string[]> = {};
+
+  const allRuns = function* () {
+    for (const m of runs.values()) yield* m.values();
+  };
+  /** Removes whole runs and records the open ones among them. */
+  const remove = async (gone: Run[], ends: Record<string, string[]>, now: number) => {
+    for (const run of gone) {
+      const m = runs.get(run.process);
+      if (!m?.delete(run.key)) continue;
+      total -= run.size;
+      if (!m.size) runs.delete(run.process);
+    }
+    await recordPruned(self, countOpen(gone, ends), now);
+  };
+  const read = (process: string, pick: (run: Run) => boolean): StepRecord[] => {
+    const out: Stored[] = [];
+    for (const run of runs.get(process)?.values() || []) if (pick(run)) out.push(...run.steps);
+    return out.sort(byTime).map(({ seq: _, ...s }) => s);
+  };
+
   const self: FlightStore = {
     kind: 'memory',
     async addSteps(list) {
-      for (const s of list) steps.push({ ...s, seq: seq++ });
-      if (steps.length > keep.maxSteps) {
-        const cut = steps.length - keep.maxSteps;
-        const removed = steps.slice(0, cut);
-        steps = steps.slice(cut);
-        await recordPruned(self, countOpenRemoved(removed, steps, lastEnds), Date.now());
+      for (const s of list) {
+        let m = runs.get(s.process);
+        if (!m) runs.set(s.process, (m = new Map()));
+        let run = m.get(s.key);
+        if (!run) m.set(s.key, (run = { process: s.process, key: s.key, last: s.at, size: 0, steps: [] }));
+        run.steps.push({ process: s.process, key: s.key, step: s.step, at: s.at, instance: s.instance, seq: seq++ });
+        run.size++;
+        if (s.at > run.last) run.last = s.at;
+        total++;
+      }
+      if (total > keep.maxSteps) {
+        await remove(planPrune(allRuns(), -Infinity, keep.maxSteps - Math.floor(keep.maxSteps / 10)), lastEnds, Date.now());
       }
     },
     async runSteps(process, since) {
-      return selectRuns(steps, process, since)
-        .sort(byTime)
-        .map(({ seq: _, ...s }) => s);
+      return read(process, (run) => run.last >= since);
     },
     async openRuns(process, ends) {
-      return selectOpen(steps, process, ends)
-        .sort(byTime)
-        .map(({ seq: _, ...s }) => s);
+      return read(process, (run) => !run.steps.some((s) => ends.includes(s.step)));
     },
     async putMinute(m) {
       minutes.set(`${m.instance} ${m.minute}`, structuredClone(m));
@@ -269,14 +333,10 @@ export function memoryStore(r: Retention = {}): FlightStore {
       lastEnds = ends;
       const k = retention({ ...keep, ...r2 });
       const cut = now - k.maxAgeMs;
-      const before = steps;
-      steps = steps.filter((s) => s.at >= cut);
-      if (steps.length > k.maxSteps) steps = steps.slice(steps.length - k.maxSteps);
-      const kept = new Set(steps);
       for (const [id, m] of minutes) if (m.minute < cut) minutes.delete(id);
       for (const [id, p] of probes) if (p.at < cut) probes.delete(id);
       for (const [id, f] of findings) if (f.state === 'resolved' && f.updatedAt < cut) findings.delete(id);
-      await recordPruned(self, countOpenRemoved(before.filter((s) => !kept.has(s)), steps, ends), now);
+      await remove(planPrune(allRuns(), cut, k.maxSteps), ends, now);
     },
   };
   return self;

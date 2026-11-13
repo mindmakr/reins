@@ -177,6 +177,35 @@ describe('overdue runs older than the window (B7)', () => {
   });
 });
 
+describe('retention never leaves part of a run (F3)', () => {
+  const ends = { payout: ['ledger.debited', 'bank.failed'] };
+
+  it('an overdue run whose first step is past the age cut stays whole and still counted', async () => {
+    const T = NOW - 7 * DAY - H;
+    const s = await storeWith(['p1', 'requested', T], ['p1', 'bank.sent', T + 6.5 * DAY]);
+    await s.prune({ maxAgeMs: 7 * DAY }, NOW, ends);
+    const r = await check(s, manifest(), { now: NOW });
+    expect(get(r, 'payout-ends')).toMatchObject({ state: 'broken', count: 1, keys: ['p1'], lastBreachAt: T + DAY });
+  });
+
+  it('an order promise whose first step is past the age cut is not reported broken', async () => {
+    const T = NOW - 7 * DAY - H;
+    const s = await storeWith(['p1', 'bank.settled', T], ['p1', 'ledger.debited', NOW - H]);
+    await s.prune({ maxAgeMs: 7 * DAY }, NOW, ends);
+    expect(get(await check(s, manifest(), { now: NOW }), 'debit-after-settle')).toMatchObject({ state: 'held', runs: 1 });
+  });
+
+  it('the cap on steps removes whole runs, and the open ones it removes are a blind fact', async () => {
+    const s = memoryStore({ maxSteps: 3 });
+    await s.prune({}, NOW - 60_000, ends); // tells the store the end steps
+    await s.addSteps([step('p1', 'bank.settled', NOW - 3 * H), step('p1', 'ledger.debited', NOW - 2 * H), step('p2', 'requested', NOW - 2 * DAY), step('p2', 'bank.sent', NOW - 4 * H)]);
+    const r = await check(s, manifest(), { now: NOW });
+    expect(get(r, 'debit-after-settle')).toMatchObject({ state: 'held' });
+    expect((await s.runSteps('payout', 0)).map((x) => x.key)).toEqual(['p1', 'p1']);
+    expect(r.blind).toContainEqual({ kind: 'overdue-pruned', process: 'payout', count: 1, since: NOW - DAY });
+  });
+});
+
 describe('dropped steps (B9)', () => {
   it('reports once, order and retries for the window as not checked, not as held', async () => {
     const s = await storeWith(['p1', 'bank.settled', NOW - 2 * H], ['p1', 'ledger.debited', NOW - H]);

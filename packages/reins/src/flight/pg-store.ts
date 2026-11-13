@@ -164,27 +164,33 @@ export function pgStore(o: PgStoreOptions): FlightStore {
     async prune(r2 = {}, now = Date.now(), ends = {}) {
       const k = retention({ ...keep, ...r2 });
       const cut = now - k.maxAgeMs;
-      // The highest id the count bound removes (none when under the bound).
-      const [top] = await q(`select id from reins_flight_steps order by id desc offset $1 limit 1`, [k.maxSteps]);
-      const maxId = top ? num(top.id) : 0;
-      // Before deleting: runs of the named processes that go whole (every step older than the cut, or within the
-      // count bound) and have reached no end step. End steps go as `process step` pairs, as parameters.
+      // Whole runs only, in one statement (B3, B7): a run goes when its newest step is before the cut; then,
+      // while more than maxSteps steps are left, the runs whose newest step is oldest go first. The statement
+      // returns, per process named in `ends`, the runs it removed that had reached no end step. End steps go
+      // as `process step` pairs, as parameters.
       const processes = Object.keys(ends);
+      const pairs = processes.flatMap((p) => (Array.isArray(ends[p]) ? ends[p] : []).map((s) => `${p} ${s}`));
+      const rows = await q(
+        `with runs as (
+           select process, key, max(at) as last, count(*) as n,
+                  bool_or((process || ' ' || step) = any($4::text[])) as ended
+           from reins_flight_steps group by process, key
+         ), ranked as (
+           select process, key, ended,
+                  sum(n) over (order by last desc, process desc, key desc rows between unbounded preceding and current row) as kept
+           from runs where last >= $1::bigint
+         ), gone as (
+           select process, key, ended from runs where last < $1::bigint
+           union all
+           select process, key, ended from ranked where kept > $2::bigint
+         ), removed as (
+           delete from reins_flight_steps s using gone g where s.process = g.process and s.key = g.key
+         )
+         select process, count(*) as n from gone where not ended and process = any($3::text[]) group by process`,
+        [cut, k.maxSteps, processes, pairs],
+      );
       const counts: Record<string, number> = {};
-      if (processes.length) {
-        const pairs = processes.flatMap((p) => (ends[p] || []).map((s) => `${p} ${s}`));
-        const rows = await q(
-          `select process, count(*) as n from (
-             select process, key from reins_flight_steps where process = any($1::text[])
-             group by process, key
-             having bool_and(at < $2 or id <= $3) and not bool_or((process || ' ' || step) = any($4::text[]))
-           ) r group by process`,
-          [processes, cut, maxId, pairs],
-        );
-        for (const r of rows) counts[r.process] = num(r.n);
-      }
-      await q(`delete from reins_flight_steps where at < $1`, [cut]);
-      if (maxId) await q(`delete from reins_flight_steps where id <= $1`, [maxId]);
+      for (const r of rows) if (typeof r?.process === 'string' && Number.isFinite(num(r.n))) counts[r.process] = num(r.n);
       await q(`delete from reins_flight_minutes where minute < $1`, [cut]);
       await q(`delete from reins_flight_probes where at < $1`, [cut]);
       await q(`delete from reins_flight_findings where state = 'resolved' and updated_at < $1`, [cut]);
