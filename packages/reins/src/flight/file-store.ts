@@ -23,6 +23,7 @@ import {
   type FindingRecord,
   type FlightStore,
   goodSteps,
+  storableFindings,
   type InstanceMinute,
   laterProbe,
   lockHeld,
@@ -277,7 +278,7 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
         ensure();
         const file = join(dir, 'findings.json');
         const all = await readFindings(file);
-        for (const f of list2) all.set(f.key, f);
+        for (const f of storableFindings(list2)) all.set(f.key, f);
         await writeAtomic(file, JSON.stringify(Object.fromEntries(all)));
       }),
     async findings() {

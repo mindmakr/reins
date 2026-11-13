@@ -97,6 +97,45 @@ export interface FindingRecord {
   data: Record<string, unknown>;
 }
 
+const NUL_ALL = /\u0000/g;
+const LONE_ALL = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/** Text every store keeps the same: U+0000 removed (Postgres refuses it), a lone surrogate made U+FFFD. */
+export const storableText = (s: string): string => s.replace(NUL_ALL, '').replace(LONE_ALL, '�');
+
+/** A JSON value with every string and object key made storable; what JSON cannot hold is left out, as JSON.stringify would. */
+function storableJson(v: unknown, depth = 0): unknown {
+  if (typeof v === 'string') return storableText(v);
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'boolean' || v === null) return v;
+  if (depth > 32 || typeof v !== 'object') return undefined;
+  if (Array.isArray(v)) return v.map((x) => storableJson(x, depth + 1) ?? null);
+  const out: Record<string, unknown> = {};
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    const y = storableJson(x, depth + 1);
+    if (y !== undefined) Object.defineProperty(out, storableText(k), { value: y, enumerable: true, writable: true, configurable: true });
+  }
+  return out;
+}
+
+/**
+ * The findings as every store keeps them (the door of each store's `putFindings`): records of the wrong shape are
+ * left out, and the key and every string in `data` are made storable, so a finding whose text holds U+0000 or a
+ * lone surrogate is kept, cleaned the same way, by memory, file and Postgres alike.
+ */
+export function storableFindings(list: FindingRecord[]): FindingRecord[] {
+  if (!Array.isArray(list)) return [];
+  const out: FindingRecord[] = [];
+  for (const f of list) {
+    if (!f || typeof f !== 'object' || typeof f.key !== 'string' || (f.state !== 'open' && f.state !== 'resolved') || !Number.isFinite(f.updatedAt)) continue;
+    const key = storableText(f.key);
+    if (!key) continue;
+    const data = f.data && typeof f.data === 'object' && !Array.isArray(f.data) ? (storableJson(f.data) as Record<string, unknown>) : {};
+    out.push({ key, state: f.state, updatedAt: f.updatedAt, data });
+  }
+  return out;
+}
+
 /** Bounds on what a store keeps. Applied by `prune`, which the lock holder calls. */
 export interface Retention {
   /** Runs whose newest step is older than this go whole; so do summaries and resolved findings older than this. Default 7 days. */
@@ -467,7 +506,7 @@ export function memoryStore(r: Retention & { ends?: Record<string, string[]> } =
       return [...probes.values()].map((p) => ({ ...p }));
     },
     async putFindings(list) {
-      for (const f of list) findings.set(f.key, structuredClone(f));
+      for (const f of storableFindings(list)) findings.set(f.key, f);
     },
     async findings() {
       return [...findings.values()].map((f) => structuredClone(f));

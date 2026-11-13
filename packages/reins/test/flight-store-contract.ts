@@ -121,6 +121,16 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     expect(got).toEqual([f('blind:store', 'open', 1000), f('promise:payout:one-debit', 'resolved', 2000)]);
   });
 
+  it('keeps finding data that holds U+0000 or a lone surrogate, cleaned the same way in every store (u3 follow-up)', async () => {
+    const { store } = await make();
+    const nul = String.fromCharCode(0);
+    const data = { text: `route /a${nul}b`, tags: [`x${nul}`, 'ok\ud800'], nested: { [`k${nul}`]: 'v\udc00w' }, count: 2 };
+    await store.putFindings([{ key: `basic:slow-route:GET /a${nul}b`, state: 'open', updatedAt: 1000, data }]);
+    expect(await store.findings()).toEqual([
+      { key: 'basic:slow-route:GET /ab', state: 'open', updatedAt: 1000, data: { text: 'route /ab', tags: ['x', 'ok�'], nested: { k: 'v�w' }, count: 2 } },
+    ]);
+  });
+
   it('gives the lock to one checker at a time, and takes over a lock its checker left', async () => {
     const { store, second } = await make();
     const other = second();

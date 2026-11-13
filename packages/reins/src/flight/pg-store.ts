@@ -12,6 +12,7 @@ import {
   lockUntil,
   MAX_LOCK_MS,
   type ProbeResult,
+  storableFindings,
   PRUNE_INSTANCE,
   pruneBounds,
   PRUNED_STEP,
@@ -138,7 +139,7 @@ export function pgStore(o: PgStoreOptions): FlightStore {
       return rows.map((r) => ({ id: r.id, instance: r.instance, at: num(r.at), ok: !!r.ok, ...(r.reason ? { reason: r.reason } : {}), ms: num(r.ms) }));
     },
     async putFindings(list: FindingRecord[]) {
-      for (const f of list) {
+      for (const f of storableFindings(list)) {
         await q(
           `insert into reins_flight_findings (key, state, updated_at, data) values ($1, $2, $3, $4::jsonb)
            on conflict (key) do update set state = excluded.state, updated_at = excluded.updated_at, data = excluded.data`,
