@@ -7,11 +7,11 @@
 //   minutes/<instance>-<hour>.json         that instance's minutes of one hour
 //   probes-<instance>.json                 the latest result of each probe that instance ran
 //   findings.json                          written only by the lock holder
-//   lock.json                              the checker lock
+//   lock/<n>.json                          the checker lock: numbered generations, the highest one counts
 // Imports: Node built-ins and reins' shared modules only (the flight safety test walks this file).
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { appendFile, link, open, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, open, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   byTime,
@@ -109,17 +109,10 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
   const keep = retention(o);
   const stepsDir = join(dir, 'steps');
   const minutesDir = join(dir, 'minutes');
-  const lockFile = join(dir, 'lock.json');
+  const lockDir = join(dir, 'lock');
   /** This store object's open segment per instance. */
   const segments = new Map<string, { file: string; lines: number; hour: number }>();
   let made = false;
-  let swept = 0;
-  /** Removes old claim files, at most once a minute. */
-  const sweep = async () => {
-    if (Date.now() - swept < 60_000) return;
-    swept = Date.now();
-    await sweepClaims(dir);
-  };
   let serial: Promise<unknown> = Promise.resolve();
   /** Runs read-modify-write work of this store object one at a time. */
   const queued = <T>(fn: () => Promise<T>): Promise<T> => {
@@ -133,6 +126,7 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
     // Owner-only, as the bridge keeps its token: files 0o600, folders 0o700.
     mkdirSync(stepsDir, { recursive: true, mode: 0o700 });
     mkdirSync(minutesDir, { recursive: true, mode: 0o700 });
+    mkdirSync(lockDir, { recursive: true, mode: 0o700 });
     // Same rule as the bridge: the .reins folder holds its own .gitignore so nothing in it is committed.
     const top = join(dir, '..');
     if (top.endsWith('.reins') && !existsSync(join(top, '.gitignore'))) writeFileSync(join(top, '.gitignore'), '*\n', { mode: 0o600 });
@@ -283,8 +277,12 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
     async findings() {
       return [...(await readFindings(join(dir, 'findings.json'))).values()];
     },
-    lock: (owner, ttlMs, now = Date.now()) => queued(() => takeLock(dir, lockFile, owner, ttlMs, now, ensure, sweep)),
-    unlock: (owner) => queued(() => dropLock(dir, lockFile, owner)),
+    lock: (owner, ttlMs, now = Date.now()) =>
+      queued(() => {
+        ensure();
+        return takeLock(lockDir, owner, ttlMs, now);
+      }),
+    unlock: (owner) => queued(() => dropLock(lockDir, owner)),
     prune: (r2 = {}, now = Date.now(), ends = {}) =>
       queued(async () => {
         const k = retention({ ...keep, ...r2 });
@@ -366,108 +364,98 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
 /** Segment files sort by their start time, the number before the first `-`. */
 const byStart = (a: string, b: string) => Number(a.split('-')[0]) - Number(b.split('-')[0]) || (a < b ? -1 : a > b ? 1 : 0);
 
-/** Claim files older than this are removed. A checker never waits this long between reading the lock and claiming it. */
-const CLAIM_KEEP_MS = 3_600_000;
 
-/** Reads the lock file: its text, null when there is none, or undefined when it cannot be read now. */
-async function readLock(file: string): Promise<string | null | undefined> {
-  for (let i = 0; ; i++) {
-    try {
-      return await readFile(file, 'utf8');
-    } catch (e: any) {
-      if (e?.code === 'ENOENT') return null;
-      // Windows refuses a read for a moment while the file is being replaced.
-      if (i >= 5 || !['EPERM', 'EACCES', 'EBUSY'].includes(e?.code)) return undefined;
-      await new Promise((r) => setTimeout(r, 5 * (i + 1)));
-    }
+// The file lock (B4: at most one holder at a time). The folder `lock/` holds numbered generation files
+// `<n>.json`, each `{ owner, until }`; the one with the highest n is the lock. A checker that finds it free (past
+// its time, impossibly far ahead, released, or broken past BROKEN_LOCK_MS), or its own, makes generation n + 1
+// with an exclusive create: of the checkers that read n, only one can make n + 1. It then lists the folder again
+// and holds the lock only if n + 1 is still the highest (a checker that read the folder late can only make a
+// number below the top, and loses here). Nothing is ever renamed or written over; the holder removes the
+// generations below its own, so the folder holds one or two files.
+
+/** Generation file names: a number without leading zeros, at most 15 digits, so n + 1 is always exact. */
+const GEN = /^(0|[1-9]\d{0,14})\.json$/;
+/** Generations stop below this. Only a planted name gets near it; such a top file is removed once it is free. */
+const MAX_GEN = 999_999_999_999_999;
+/**
+ * A generation file that cannot be read as a lock (empty because its maker died between creating and writing
+ * it, cut short, unreadable, not a file, or planted) counts as held until this long after its modification time,
+ * then as free, so nothing in the folder can block takeover for longer than this, or a valid lock's own time
+ * (at most MAX_LOCK_MS).
+ */
+export const BROKEN_LOCK_MS = 10_000;
+
+/** The top generation and whether it holds at `now`; null when there is none. */
+async function topGen(lockDir: string, now: number): Promise<{ n: number; owner?: string; held: boolean } | null> {
+  let n = -1;
+  for (const f of await readdir(lockDir).catch(() => [] as string[])) {
+    const m = GEN.exec(f);
+    if (m && Number(m[1]) > n) n = Number(m[1]);
   }
+  if (n < 0) return null;
+  const file = join(lockDir, `${n}.json`);
+  try {
+    const cur = JSON.parse(await readFile(file, 'utf8'));
+    if (cur && typeof cur.owner === 'string' && typeof cur.until === 'number') return { n, owner: cur.owner, held: lockHeld(cur.until, now) };
+  } catch {
+    // Not a lock: judged by its age below.
+  }
+  const st = await stat(file).catch(() => null);
+  const age = st ? Date.now() - st.mtimeMs : Infinity;
+  return { n, held: age > -BROKEN_LOCK_MS && age < BROKEN_LOCK_MS };
 }
 
-/**
- * Claims the right to change the lock file away from the content `text`. The claim is a file named by a hash
- * of that content, made with an exclusive create, so of the checkers that read the same content only one gets
- * it. Every lock written holds a random nonce, so a content never comes back and a claim is never reused.
- */
-async function claim(dir: string, text: string): Promise<string | null> {
-  const file = join(dir, `lock.${createHash('sha256').update(text).digest('hex').slice(0, 32)}.claim`);
+/** Makes generation `n` holding `lock`; false when it exists already. */
+async function makeGen(lockDir: string, n: number, lock: { owner: string; until: number }): Promise<boolean> {
+  const file = join(lockDir, `${n}.json`);
+  let fh;
   try {
-    await (await open(file, 'wx', 0o600)).close();
-    return file;
-  } catch {
-    return null;
+    fh = await open(file, 'wx', 0o600);
+  } catch (e: any) {
+    if (e?.code === 'EEXIST') return false;
+    throw e;
   }
-}
-
-/**
- * The file lock (B4: at most one holder at a time). `lock.json` holds `{ owner, until, nonce }`.
- * - Free (no file): a complete candidate file is hard-linked into place, which fails when the file exists, so
- *   of two checkers only one makes it, and no reader ever sees half a lock.
- * - Held by another and not past its time: refused.
- * - Anything else (renewing one's own lock, or taking over a lock past its time, impossibly far ahead, or cut
- *   short) is a compare-and-swap: claim the content read (only one checker can), read again to confirm it is
- *   still that content, write the new lock by an atomic rename, and read it back. An expired lock is never
- *   renewed in place: its owner takes it over like anyone else.
- */
-async function takeLock(dir: string, file: string, owner: string, ttlMs: number, now: number, ensure: () => void, sweep: () => Promise<void>): Promise<boolean> {
-  ensure();
-  const mine = JSON.stringify({ owner, until: lockUntil(now, ttlMs), nonce: randomBytes(8).toString('hex') });
-  const put = async () => {
-    const tmp = `${file}.${randomBytes(6).toString('hex')}.tmp`;
-    await writeFile(tmp, mine, { mode: 0o600 });
-    try {
-      await link(tmp, file);
-      return true;
-    } catch (e: any) {
-      if (e?.code === 'EEXIST') return false;
-      throw e;
-    } finally {
-      await unlink(tmp).catch(() => {});
-    }
-  };
-  const text = await readLock(file);
-  if (text === undefined) return false;
-  if (text === null) return put();
-  let cur: { owner?: unknown; until?: unknown } = {};
   try {
-    cur = JSON.parse(text) || {};
+    await fh.writeFile(JSON.stringify(lock));
   } catch {
-    // A lock file cut short: treat it as stale.
-  }
-  if (cur.owner !== owner && lockHeld(cur.until, now)) return false;
-  const claimed = await claim(dir, text);
-  if (!claimed) return false;
-  if ((await readLock(file)) !== text) return false; // changed since it was read: another checker moved first
-  try {
-    await writeAtomic(file, mine);
-  } catch {
-    // Nothing was changed: give the claim back so the lock can still be taken over.
-    await unlink(claimed).catch(() => {});
+    await fh.close().catch(() => {});
+    await unlink(file).catch(() => {});
     return false;
   }
-  if ((await readLock(file)) !== mine) return false;
-  await sweep();
+  await fh.close().catch(() => {});
   return true;
 }
 
-/** Gives the lock up if `owner` holds it, by the same compare-and-swap, so it never removes another's lock. */
-async function dropLock(dir: string, file: string, owner: string): Promise<void> {
-  const text = await readLock(file);
-  if (!text) return;
-  let cur: { owner?: unknown } = {};
-  try {
-    cur = JSON.parse(text) || {};
-  } catch {
-    return;
+/** Removes the generations below `n`, best effort: only the top one counts, so a leftover is harmless. */
+async function dropBelow(lockDir: string, n: number): Promise<void> {
+  for (const f of await readdir(lockDir).catch(() => [] as string[])) {
+    const m = GEN.exec(f);
+    if (m && Number(m[1]) < n) await unlink(join(lockDir, f)).catch(() => {});
   }
-  if (cur.owner !== owner || !(await claim(dir, text))) return;
-  if ((await readLock(file)) === text) await unlink(file).catch(() => {});
 }
 
-async function sweepClaims(dir: string): Promise<void> {
-  const old = Date.now() - CLAIM_KEEP_MS;
-  for (const f of await listFiles(dir).catch(() => [] as string[])) {
-    if (!f.endsWith('.claim') && !(f.startsWith('lock.json.') && f.endsWith('.tmp'))) continue;
-    const st = await stat(join(dir, f)).catch(() => null);
-    if (st && st.isFile() && st.mtimeMs < old) await unlink(join(dir, f)).catch(() => {});
+async function takeLock(lockDir: string, owner: string, ttlMs: number, now: number): Promise<boolean> {
+  const top = await topGen(lockDir, now);
+  if (top && top.held && top.owner !== owner) return false;
+  const n = top ? top.n : 0;
+  if (n + 1 >= MAX_GEN) {
+    // A planted number at the end of the range: remove it (it is free or ours) and start below it next time.
+    await unlink(join(lockDir, `${n}.json`)).catch(() => {});
+    return false;
   }
+  if (!(await makeGen(lockDir, n + 1, { owner, until: lockUntil(now, ttlMs) }))) return false;
+  const after = await topGen(lockDir, now);
+  if (after?.n !== n + 1) {
+    await unlink(join(lockDir, `${n + 1}.json`)).catch(() => {});
+    return false;
+  }
+  await dropBelow(lockDir, n + 1);
+  return true;
+}
+
+/** Gives the lock up if `owner` holds the top generation, by making the next one free; never writes over another's. */
+async function dropLock(lockDir: string, owner: string): Promise<void> {
+  const top = await topGen(lockDir, Date.now());
+  if (!top || top.owner !== owner || top.n + 1 >= MAX_GEN) return;
+  if (await makeGen(lockDir, top.n + 1, { owner, until: 0 })) await dropBelow(lockDir, top.n + 1);
 }

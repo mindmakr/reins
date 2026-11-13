@@ -1,10 +1,10 @@
 // Design B2, B3, B4: the memory and file stores meet one contract; the Postgres store's statements carry every
 // value as a parameter (its run against a real Postgres is flight-pg.test.ts).
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { fileStore, safe } from '../src/flight/file-store.js';
+import { BROKEN_LOCK_MS, fileStore, safe } from '../src/flight/file-store.js';
 import { PG_TABLES, pgStore } from '../src/flight/pg-store.js';
 import { isStore, memoryStore } from '../src/flight/store.js';
 import { DAY, step, storeContract } from './flight-store-contract.js';
@@ -108,9 +108,11 @@ describe('file store', () => {
         if (n === 1) won++;
       }
       // Unlock by a checker that no longer holds the lock leaves the holder's lock alone.
-      const holder = JSON.parse(readFileSync(join(dir, 'lock.json'), 'utf8')).owner;
+      const holder = topLock(dir).owner;
       for (const h of handles) if (h.owner !== holder) await h.store.unlock(h.owner);
-      expect(JSON.parse(readFileSync(join(dir, 'lock.json'), 'utf8')).owner).toBe(holder);
+      expect(topLock(dir).owner).toBe(holder);
+      // The holder removes the generations below its own: the folder never piles up.
+      expect(readdirSync(join(dir, 'lock')).length).toBeLessThanOrEqual(3);
     };
     await Promise.all(Array.from({ length: 8 }, lane));
     expect(multi).toBe(0);
@@ -166,17 +168,100 @@ describe('file store', () => {
     for (const f of readdirSync(dir).filter((x) => x.endsWith('.json'))) expect(statSync(join(dir, f)).mode & 0o777).toBe(0o600);
   });
 
-  it('takes over a lock file cut short', async () => {
-    const dir = join(tmp(), 'flight');
-    const store = fileStore({ dir });
-    await store.addSteps([]);
-    await store.lock('a', 1000, 0);
-    writeFileSync(join(dir, 'lock.json'), '{"owner":"a","unt');
-    expect(await fileStore({ dir }).lock('b', 1000, 10)).toBe(true);
-    expect(existsSync(join(dir, 'lock.json'))).toBe(true);
-    expect(readdirSync(dir).filter((f) => f.endsWith('.stale'))).toEqual([]);
+  // Round 3 (G1): the lock is numbered generation files made by exclusive create; the claim-file tests went with
+  // the claim files. Each case below is a crash at one step, or a planted file, and none blocks for good.
+  describe('file lock: crashes and planted files', () => {
+    const lockDir = (dir: string) => join(dir, 'lock');
+    const gen = (dir: string, n: number | string, text: string, ageMs = 0) => {
+      const f = join(lockDir(dir), `${n}.json`);
+      writeFileSync(f, text);
+      if (ageMs) utimesSync(f, (Date.now() - ageMs) / 1000, (Date.now() - ageMs) / 1000);
+    };
+    const fresh = async () => {
+      const dir = join(tmp(), 'flight');
+      await fileStore({ dir }).lock('first', 1000, Date.now());
+      return dir;
+    };
+
+    it('a generation its maker left empty (died between create and write) holds for BROKEN_LOCK_MS, then is taken over', async () => {
+      const dir = await fresh();
+      const t = Date.now();
+      gen(dir, 2, ''); // created, never written
+      expect(await fileStore({ dir }).lock('b', 1000, t + 5000)).toBe(false);
+      gen(dir, 2, '', BROKEN_LOCK_MS + 1000);
+      expect(await fileStore({ dir }).lock('b', 1000, t + 5000)).toBe(true);
+      expect(topLock(dir)).toMatchObject({ owner: 'b' });
+    });
+
+    it('a generation cut short, unreadable, planted with a future time, or a folder named like one never blocks past the bound', async () => {
+      for (const plant of [
+        (dir: string) => gen(dir, 2, '{"owner":"a","unt', BROKEN_LOCK_MS + 1000),
+        (dir: string) => gen(dir, 2, 'null', BROKEN_LOCK_MS + 1000),
+        (dir: string) => {
+          gen(dir, 2, '');
+          const f = join(lockDir(dir), '2.json');
+          const ahead = (Date.now() + 365 * DAY) / 1000;
+          utimesSync(f, ahead, ahead); // a modification time far ahead does not make it held for longer
+        },
+        (dir: string) => {
+          mkdirSync(join(lockDir(dir), '2.json'));
+          const old = (Date.now() - BROKEN_LOCK_MS - 1000) / 1000;
+          utimesSync(join(lockDir(dir), '2.json'), old, old);
+        },
+      ]) {
+        const dir = await fresh();
+        plant(dir);
+        expect(await fileStore({ dir }).lock('b', 1000, Date.now() + 5000)).toBe(true);
+      }
+    });
+
+    it('a valid lock left by a checker that died after writing it is taken over at its time, at most MAX_LOCK_MS ahead', async () => {
+      const dir = await fresh();
+      const t = Date.now();
+      gen(dir, 5, JSON.stringify({ owner: 'dead', until: t + 60_000 }));
+      expect(await fileStore({ dir }).lock('b', 1000, t + 59_000)).toBe(false);
+      expect(await fileStore({ dir }).lock('b', 1000, t + 60_000)).toBe(true);
+      gen(dir, 9, JSON.stringify({ owner: 'planted', until: t + 10 * 365 * DAY }));
+      expect(await fileStore({ dir }).lock('c', 1000, t + 61_000)).toBe(true);
+    });
+
+    it('lower generations left behind (the holder died before removing them) and other names do not count', async () => {
+      const dir = await fresh();
+      const t = Date.now();
+      gen(dir, 0, JSON.stringify({ owner: 'x', until: t + 60_000 }));
+      gen(dir, '01', JSON.stringify({ owner: 'x', until: t + 60_000 }));
+      gen(dir, 'lock', JSON.stringify({ owner: 'x', until: t + 60_000 }));
+      expect(await fileStore({ dir }).lock('b', 1000, t + 5000)).toBe(true);
+    });
+
+    it('a planted generation at the end of the number range is removed once free, then the lock works again', async () => {
+      const dir = await fresh();
+      const t = Date.now();
+      gen(dir, 999_999_999_999_998, JSON.stringify({ owner: 'planted', until: 1 }));
+      const s = fileStore({ dir });
+      expect(await s.lock('b', 1000, t + 5000)).toBe(false);
+      expect(await s.lock('b', 1000, t + 5000)).toBe(true);
+    });
+
+    it('200 renewals leave one generation file, and unlock makes the lock free for the next checker', async () => {
+      const dir = await fresh();
+      const s = fileStore({ dir });
+      const t = Date.now() + 2000; // past the first checker's lock
+      for (let i = 0; i < 200; i++) expect(await s.lock('a', 60_000, t + i)).toBe(true);
+      expect(readdirSync(lockDir(dir))).toHaveLength(1);
+      expect(await fileStore({ dir }).lock('b', 60_000, t + 300)).toBe(false);
+      await s.unlock('a');
+      expect(readdirSync(lockDir(dir))).toHaveLength(1);
+      expect(await fileStore({ dir }).lock('b', 60_000, t + 301)).toBe(true);
+    });
   });
 });
+
+/** The lock as the file store holds it: the generation with the highest number. */
+function topLock(dir: string): { owner: string; until: number } {
+  const ns = readdirSync(join(dir, 'lock')).filter((f) => /^\d+\.json$/.test(f)).map((f) => Number(f.slice(0, -5)));
+  return JSON.parse(readFileSync(join(dir, 'lock', `${Math.max(...ns)}.json`), 'utf8'));
+}
 
 describe('postgres store statements', () => {
   /** A query function that records statements and answers like an empty database. */
