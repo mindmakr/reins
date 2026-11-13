@@ -1,5 +1,6 @@
 // One contract every flight store meets (design B2, B3, B4): memory, file and Postgres run the same cases.
 import { expect, it } from 'vitest';
+import { createStepWriter } from '../src/flight/steps.js';
 import type { FindingRecord, FlightStore, InstanceMinute, StepRecord } from '../src/flight/store.js';
 
 const DAY = 86_400_000;
@@ -44,6 +45,21 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     const odd = `x'); drop table reins_flight_steps; -- "\\ $1 ${'%'}`;
     await store.addSteps([step(odd, 'bank.sent', 1_000_000)]);
     expect(await store.runSteps('payout', 0)).toEqual([step(odd, 'bank.sent', 1_000_000)]);
+  });
+
+  it('refuses keys with a control character or a lone surrogate before the store, and keeps every good key as given', async () => {
+    const { store } = await make();
+    const w = createStepWriter({ store, instance: 'i1' });
+    const bad = ['a\u0000b', 'tab\there', 'nl\n', 'del\u007f', 'hi\ud800', '\udc00lo', 'x\udc00\ud800y'];
+    const good = ['plain', 'pair-😀', 'é ü 中', `q'"\\%`];
+    for (let i = 0; i < 101; i++) w.step('payout', `k${i}`, 'requested');
+    for (const k of bad) expect(w.step('payout', k, 'requested')).toBe(false);
+    for (const k of good) expect(w.step('payout', k, 'requested')).toBe(true);
+    await w.flush();
+    expect(w.stats()).toMatchObject({ invalid: bad.length, dropped: 0, storeErrors: 0, written: 101 + good.length });
+    const keys = new Set((await store.runSteps('payout', 0)).map((s) => s.key));
+    expect(keys.size).toBe(101 + good.length);
+    for (const k of good) expect(keys.has(k)).toBe(true);
   });
 
   it('keeps one record per instance and minute, the last write winning', async () => {

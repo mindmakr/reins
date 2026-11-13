@@ -309,6 +309,23 @@ describe('flight.step (B1)', () => {
     expect(m.reduce((n, x) => n + x.storeErrors, 0)).toBe(1);
     expect(w.stats()).toMatchObject({ dropped: 2, storeErrors: 1, written: 0 });
   });
+
+  it('a row the store refuses never costs the other rows of its batch: they are saved, and only it is dropped', async () => {
+    const store = memoryStore();
+    let calls = 0;
+    // Like Postgres with a row it cannot take: the whole statement fails while that row is in it.
+    const picky = { ...store, addSteps: async (s: any[]) => (calls++, s.some((x) => x.key === 'poison') ? Promise.reject(new Error('22021')) : store.addSteps(s)) };
+    const w = createStepWriter({ store: picky, instance: 'i1' });
+    for (let i = 0; i < 100; i++) w.step('payout', `k${i}`, 'requested');
+    w.step('refund', 'poison', 'requested');
+    await w.flush();
+    expect(w.stats()).toMatchObject({ written: 100, dropped: 1, storeErrors: 1 });
+    expect(await store.runSteps('payout', 0)).toHaveLength(100);
+    const m = await store.minutes(0);
+    expect(m.reduce((n, x) => n + (x.stepsDropped.refund || 0), 0)).toBe(1);
+    expect(m.reduce((n, x) => n + (x.stepsDropped.payout || 0), 0)).toBe(0);
+    expect(calls).toBeLessThan(20);
+  });
 });
 
 describe('one checker at a time (B4)', () => {
