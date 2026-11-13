@@ -180,6 +180,46 @@ describe('strict recording (flight)', () => {
     for (const [where, secret] of Object.entries(S)) expect(emitted, where).not.toContain(secret);
   });
 
+  /** An Express-style router mounted on `mountPattern`: Express sets `req.baseUrl` to the matched real text. */
+  async function mounted(f: ReturnType<typeof createFlight>, mountDepth: number, pattern: string) {
+    const mw = f.middleware();
+    return serve((req: any, res) =>
+      mw(req, res, () => {
+        req.baseUrl = req.url.split('?')[0].split('/').slice(0, mountDepth + 1).join('/');
+        req.route = { path: pattern };
+        res.end();
+      }),
+    );
+  }
+
+  it('never keeps the real text of an Express mount: an undeclared mount becomes (mount)', async () => {
+    const secret = 'alice.secret@example.com';
+    const f = started();
+    const base = await mounted(f, 2, '/orders');
+    await fetch(`${base}/u/${secret}/orders?x=1`);
+    await settle();
+    const rec = f.recorder()!;
+    expect(rec.requests().map((r) => r.route)).toEqual(['(mount)/orders']);
+    const emitted = JSON.stringify([rec.requests(), rec.upstream(), rec.spans(), rec.summaries(), rec.stats(), rec.drain()]);
+    expect(emitted).not.toContain('alice');
+    expect(emitted).not.toContain('example.com');
+  });
+
+  it('keeps the full pattern when the mount, or the whole route, is declared', async () => {
+    const f = started({ mounts: ['/u/:id', '/api'], routes: ['/t/:team/members'] });
+    const base = await mounted(f, 2, '/orders/:n');
+    await fetch(`${base}/u/bob.secret@example.com/orders/7`);
+    await fetch(`${await mounted(f, 2, '/members')}/t/team-secret-9/members`);
+    await fetch(`${base}/x/other-secret-8/orders/7`);
+    const one = await mounted(f, 1, '/users/:id');
+    await fetch(`${one}/api/users/12`);
+    await settle();
+    const rec = f.recorder()!;
+    expect(rec.requests().map((r) => r.route)).toEqual(['/u/:id/orders/:n', '/t/:team/members', '(mount)/orders/:n', '/api/users/:id']);
+    const emitted = JSON.stringify([rec.requests(), rec.summaries(), rec.drain()]);
+    for (const s of ['bob', 'team-secret-9', 'other-secret-8']) expect(emitted).not.toContain(s);
+  });
+
   it('records calls through node:http and says what this Node version cannot check', async () => {
     const upstream = await serve((_q, res) => {
       res.statusCode = 201;

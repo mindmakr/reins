@@ -17,8 +17,12 @@ export interface Capture {
   method: string;
   /** Raw URL, query string included. Only a recorder's view decides what of it is kept. */
   url: string;
-  /** Route pattern from the framework, when it gives one. */
+  /** Route pattern from the framework, when it gives one. For Express it is `mount + pattern`, so it can hold real path text. */
   route?: string;
+  /** Express only: the route's own pattern (`req.route.path`), without the mount. */
+  pattern?: string;
+  /** Express only: the matched mount (`req.baseUrl`). Real path text, not a pattern: strict mode never keeps it as it is. */
+  mount?: string;
   /** The request's header object, by reference. */
   headers: unknown;
   status: number;
@@ -157,12 +161,21 @@ function end(c: Capture, status: unknown, route?: unknown, aborted = false) {
   deliver((k) => k.request(c));
 }
 
-const expressRoute = (req: any) => (req.route && typeof req.route.path === 'string' ? (req.baseUrl || '') + req.route.path : undefined);
+/** Express: keeps the mount (`req.baseUrl`, real text) apart from the route pattern, and returns the joined route. */
+function expressRoute(c: Capture, req: any): string | undefined {
+  if (!req.route || typeof req.route.path !== 'string') return;
+  const mount = typeof req.baseUrl === 'string' ? req.baseUrl : '';
+  if (!c.done) {
+    c.pattern = req.route.path;
+    c.mount = mount;
+  }
+  return mount + req.route.path;
+}
 
 function track(c: Capture, req: any, res: any, o: HookOptions) {
   const fin = (closed: boolean) => () => {
     try {
-      end(c, res.statusCode, expressRoute(req), closed && res.writableFinished === false);
+      end(c, res.statusCode, expressRoute(c, req), closed && res.writableFinished === false);
     } catch {
       fault();
     }
@@ -426,6 +439,12 @@ export interface StrictStats {
 export interface StrictOptions {
   /** Route patterns (`/api/users/:id`, `/files/*`) to reduce paths to when the framework gives none. */
   routes?: string[];
+  /**
+   * Express mount paths (`/api`, `/u/:id`), as given to `app.use(path, router)`. A route under a router is
+   * recorded with its mount only when the mount matches one of these; otherwise the mount is recorded as
+   * `(mount)`, because Express gives the mount as real path text, not as a pattern.
+   */
+  mounts?: string[];
   /** Requests kept in memory. Default 1000; top-level spans and calls keep half as many each. */
   bufferSize?: number;
   /** Minutes of summaries kept. Default 60. */
@@ -435,6 +454,8 @@ export interface StrictOptions {
 }
 
 export const UNMATCHED = '(unmatched)';
+/** Stands in for an Express mount that the app did not declare in `mounts`. */
+export const MOUNT = '(mount)';
 const OTHER = '(other)';
 const MAX_KEYS = 300;
 const BOUNDS = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, Infinity];
@@ -550,6 +571,7 @@ export function createStrictRecorder(o: StrictOptions = {}) {
   const size = int(o.bufferSize, 1000, 10, 100000);
   const keep = int(o.minutes, 60, 1, 1440);
   const match = routeMatcher(o.routes);
+  const matchMount = routeMatcher(o.mounts);
   const onRecord = typeof o.onRecord === 'function' ? o.onRecord : undefined;
   const loop = createLoop();
   const stats: StrictStats = { recorded: 0, dropped: 0, errors: 0, unmatched: 0, overflow: 0 };
@@ -576,8 +598,21 @@ export function createStrictRecorder(o: StrictOptions = {}) {
     ...(k.failed ? { error: errorCode(k.error) } : {}),
   });
 
+  const clean = (s: string) => s.split(/[?#]/)[0].slice(0, 200);
+
+  // Never keeps real path text: an Express mount (`req.baseUrl`) is kept only when it matches a declared
+  // mount pattern (the pattern is kept, not the text); else a declared route for the whole path is used;
+  // else the mount becomes `(mount)`. Fastify gives the full pattern (`routeOptions.url`), kept as it is.
   function route(c: Capture): string {
-    if (c.route) return c.route.split(/[?#]/)[0].slice(0, 200);
+    if (typeof c.pattern === 'string' && typeof c.mount === 'string') {
+      if (!c.mount) return clean(c.pattern);
+      const path = c.url.split(/[?#]/)[0];
+      const m = c.mount.startsWith('/') ? matchMount(c.mount) : undefined;
+      if (m) return clean(trim(m) + c.pattern);
+      const r = path.startsWith('/') ? match(path) : undefined;
+      return clean(r || MOUNT + c.pattern);
+    }
+    if (c.route) return clean(c.route);
     const path = c.url.split(/[?#]/)[0];
     const r = path.startsWith('/') ? match(path) : undefined;
     if (r) return r;
