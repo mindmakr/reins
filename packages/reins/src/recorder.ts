@@ -476,7 +476,10 @@ export interface StrictStats {
   dropped: number;
   /** Request records pushed out of the full buffer. */
   droppedRequests: number;
-  /** Upstream calls pushed out of the full top-level buffer, or past `CAPTURE_MAX` in one request. */
+  /**
+   * Upstream calls pushed out of the full top-level buffer, or past `CAPTURE_MAX` in one request. Calls past
+   * that per-request cap are counted only here: they are not in the minute summaries' upstream counts.
+   */
   droppedCalls: number;
   /** Spans pushed out of the full top-level buffer, or past `CAPTURE_MAX` in one request. */
   droppedSpans: number;
@@ -512,11 +515,12 @@ const OTHER = '(other)';
 const MAX_KEYS = 300;
 const BOUNDS = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, Infinity];
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT']);
-// Short known forms only, at most 24 characters: an errno-style code (`ECONNREFUSED`, letters only), a code
-// with an underscore (`UND_ERR_SOCKET`, `ERR_INVALID_URL`), or a class name ending in `Error`. Anything else,
-// such as a key-shaped `AKIAIOSFODNN7EXAMPLE` set as a code or a name, becomes `error`.
-const CODE = /^(?=.{2,24}$)(?:E[A-Z]+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)$/;
-const ERROR_NAME = /^[A-Z][A-Za-z]{0,18}Error$/;
+// Known prefixes and shapes only: an errno-style code (`E` and upper-case letters, at most 16 characters, such
+// as `ECONNREFUSED`), or `ERR_`/`UND_ERR_` and upper-case letters and underscores, at most 40 characters (such
+// as `ERR_INVALID_URL`); and a built-in class name from a fixed list. Anything else, such as a key-shaped
+// `AKIAIOSFODNN7_EXAMPLE` set as a code or a name, becomes `error`.
+const CODE = /^(?:E[A-Z]{1,15}|(?=.{5,40}$)(?:UND_)?ERR_[A-Z_]+)$/;
+const ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError', 'AbortError', 'TimeoutError']);
 const SPAN_NAME = /^[\w.:-]{1,64}$/;
 const HOST = /^(?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63}$|^\[[0-9a-f:.]{2,45}\]$/;
 
@@ -531,7 +535,7 @@ export function errorCode(e: unknown): string {
     const o: any = e;
     for (const v of [o?.code, o?.cause?.code]) if (typeof v === 'string' && CODE.test(v)) return v;
     const name = o?.name;
-    if (typeof name === 'string' && name !== 'Error' && ERROR_NAME.test(name)) return name;
+    if (typeof name === 'string' && ERROR_NAMES.has(name)) return name;
   } catch {}
   return 'error';
 }
@@ -698,6 +702,10 @@ export function createStrictRecorder(o: StrictOptions = {}) {
     roll(key);
     let m = minutes.get(key);
     if (!m) {
+      // A wall clock that stepped back past every kept minute: count the request in the oldest kept minute, so
+      // that the summaries still add up to what was recorded.
+      const oldest = minutes.size >= keep ? Math.min(...minutes.keys()) : -Infinity;
+      if (key < oldest) return minutes.get(oldest)!;
       m = { minute: key, requests: new Map(), upstream: new Map(), unmatched: 0, runtime: null };
       minutes.set(key, m);
       // Evict the oldest minute, not the first inserted: a wall clock that steps back must not evict the current one.

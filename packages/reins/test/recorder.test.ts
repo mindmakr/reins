@@ -131,7 +131,7 @@ describe('strict recording (flight)', () => {
   it('keeps an error as a short code, never its message', async () => {
     expect(errorCode(Object.assign(new Error('card 4111 declined'), { code: 'ECONNRESET' }))).toBe('ECONNRESET');
     expect(errorCode(new TypeError('token abc is bad'))).toBe('TypeError');
-    expect(errorCode(new Error('password=hunter2'))).toBe('error');
+    expect(errorCode(new Error('password=hunter2'))).toBe('Error');
     expect(errorCode({ code: 'lowercase secret', name: 'my secret' })).toBe('error');
     expect(errorCode(new Error('x', { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } }))).toBe('UND_ERR_CONNECT_TIMEOUT');
 
@@ -397,12 +397,37 @@ describe('strict recording (flight)', () => {
   it('keeps only short, known error codes', () => {
     expect(errorCode({ code: 'AKIAIOSFODNN7EXAMPLE' })).toBe('error');
     expect(errorCode(Object.assign(new Error('x'), { name: 'AKIAIOSFODNN7EXAMPLE' }))).toBe('error');
-    expect(errorCode({ code: 'ERR_' + 'A'.repeat(30) })).toBe('error');
+    expect(errorCode({ code: 'ERR_' + 'A'.repeat(30) })).toBe('ERR_' + 'A'.repeat(30));
+    expect(errorCode({ code: 'ERR_' + 'A'.repeat(37) })).toBe('error');
     expect(errorCode({ code: 'EABC123SECRET' })).toBe('error');
     expect(errorCode({ name: 'SessionTokenAbcdefghijklmnopError' })).toBe('error');
     expect(errorCode({ code: 'ECONNREFUSED' })).toBe('ECONNREFUSED');
     expect(errorCode({ code: 'ERR_INVALID_URL' })).toBe('ERR_INVALID_URL');
     expect(errorCode({ name: 'AbortError' })).toBe('AbortError');
+    for (const code of ['AKIAIOSFODNN7_EXAMPLE', 'SK_LIVE_4EC39HQLYJWDARJK', 'ESECRETTOKENABCDEFGHIJ', 'ERR_TOKEN_4EC39', 'MY_CODE']) {
+      expect(errorCode({ code }), code).toBe('error');
+      expect(errorCode({ cause: { code } }), code).toBe('error');
+    }
+    expect(errorCode({ cause: { code: 'ETIMEDOUT' } })).toBe('ETIMEDOUT');
+    expect(errorCode({ code: 'EPROTO', name: 'TypeError' })).toBe('EPROTO');
+    expect(errorCode({ name: 'CustomAppError' })).toBe('error');
+    expect(errorCode({ name: 'TimeoutError' })).toBe('TimeoutError');
+  });
+
+  it('counts a request whose minute is older than every kept minute in the oldest kept one', () => {
+    const f = started({ minutes: 2, bufferSize: 100 });
+    const hook = f.wrapHandler((_q: unknown, res: EventEmitter) => res.emit('finish'));
+    fakeRequest(hook, 10 * 60000 + 5);
+    fakeRequest(hook, 11 * 60000 + 5);
+    fakeRequest(hook, 5 * 60000 + 5);
+    fakeRequest(hook, 3 * 60000 + 5);
+    const rec = f.recorder()!;
+    const ms = rec.summaries();
+    expect(ms.map((m) => m.minute)).toEqual([10 * 60000, 11 * 60000]);
+    expect(ms.map((m) => m.requests.reduce((a, x) => a + x.count, 0))).toEqual([3, 1]);
+    const { recorded, droppedRequests } = rec.stats();
+    expect(recorded).toBe(4);
+    expect(droppedRequests).toBe(0);
   });
 
   it('keeps its buffers as rings, in order, with constant-time pushes', () => {
@@ -493,6 +518,35 @@ describe('one set of hooks feeds the development pairing and flight', () => {
     await fetch(base);
     await late;
     expect(rn.report().requests[0].spans).toHaveLength(CAPTURE_MAX);
+  });
+
+  it('leaves late calls to the bridge out of the development view before they use its CAPTURE_MAX slots', async () => {
+    const bridge = await serve((_q, res) => res.end());
+    const other = await serve((_q, res) => res.end());
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    // A socket that cannot open: the bridge address is still set, and standalone records anyway.
+    const NoSocket = class {
+      constructor() {
+        throw new Error('no bridge');
+      }
+    };
+    await rn.connect({ standalone: true, reconnect: false, token: 't', url: bridge.replace(/^http/, 'ws'), WebSocket: NoSocket as any });
+    stops.push(() => rn.disconnect());
+    let late: Promise<unknown> = Promise.resolve();
+    const base = await serve(
+      rn.wrapHandler((_q: IncomingMessage, res: ServerResponse) => {
+        res.end();
+        late = (async () => {
+          await wait(30);
+          await Promise.all(Array.from({ length: CAPTURE_MAX }, () => fetch(bridge).then((r) => r.text())));
+          await fetch(other).then((r) => r.text());
+        })();
+      }),
+    );
+    await fetch(base);
+    await late;
+    await settle();
+    expect(rn.report().requests[0].outbound.map((o) => o.url)).toEqual([`${other}/`]);
   });
 
   it('copies request headers for the development view when the request begins', async () => {

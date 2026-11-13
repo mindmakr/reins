@@ -152,7 +152,8 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
     // A late span or call joins its request's view, which is bounded by CAPTURE_MAX.
     // (Another development instance may have added it already.)
     span: (s, late) => void (late ? late.spans.includes(s) || keepSpan(late, s) : spans.push(devSpan(s))),
-    call: (k, late) => void (late ? late.calls.includes(k) || keepCall(late, k) : !toBridge(k) && outbound.push(devCall(k))),
+    // Calls to the bridge are left out before they are kept, so they use none of the view's CAPTURE_MAX slots.
+    call: (k, late) => void (toBridge(k) || (late ? late.calls.includes(k) || keepCall(late, k) : outbound.push(devCall(k)))),
     fault: () => {},
   };
 

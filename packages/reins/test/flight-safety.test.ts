@@ -14,27 +14,75 @@ const CHANNELS = ['undici:request:create', 'undici:request:headers', 'undici:req
 /** Development-only modules the flight entry must never reach (bridge, pairing, actions, DOM and state reading). */
 const FORBIDDEN = /^(bridge\/.*|index|node|record|record-stub|dom|adapters|react|expo|server|stub|webmcp|env|next|next-token-route|vite|metro|cli|verify|verify-cli)$/;
 
+/** Built-ins that load or run code the walk cannot follow. */
+const LOADERS = /^(?:node:)?(?:module|worker_threads|vm|child_process)$/;
+const REGEX_BEFORE = /[(,=:[!&|?{};+\-*%<>~^]/;
+const REGEX_AFTER_WORD = /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|void|yield|await|delete|throw|new)\s*$/;
+
+/** Blanks comments, keeping strings, template literals and regex literals whole, so a comment marker in one is text. */
 function stripComments(code: string): string {
-  return code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:\\])\/\/.*$/gm, '$1');
+  let out = '';
+  let prev = '';
+  for (let i = 0; i < code.length; ) {
+    const c = code[i];
+    const d = code[i + 1];
+    if (c === '/' && d === '/') {
+      while (i < code.length && code[i] !== '\n') i++;
+      out += ' ';
+      continue;
+    }
+    if (c === '/' && d === '*') {
+      const e = code.indexOf('*/', i + 2);
+      i = e < 0 ? code.length : e + 2;
+      out += ' ';
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`' || (c === '/' && (!prev || REGEX_BEFORE.test(prev) || REGEX_AFTER_WORD.test(out)))) {
+      let j = i + 1;
+      let cls = false;
+      for (; j < code.length; j++) {
+        const x = code[j];
+        if (x === '\\') j++;
+        else if (c === '/' && x === '[') cls = true;
+        else if (c === '/' && x === ']') cls = false;
+        else if ((x === c && !cls) || (x === '\n' && c !== '`')) break;
+      }
+      out += code.slice(i, j + 1);
+      i = j + 1;
+      prev = c;
+      continue;
+    }
+    out += c;
+    if (!/\s/.test(c)) prev = c;
+    i++;
+  }
+  return out;
 }
 
 /**
  * What a module loads at run time: static imports and re-exports (not type-only ones), with or without
  * whitespace, and dynamic imports of a literal. `bad` lists what the walk cannot follow and so refuses:
- * an `import(` of anything but a string literal, any `require(` and any `createRequire`.
+ * an `import(` of anything but a string literal, any `require(`, `createRequire`, `getBuiltinModule` and
+ * `new Worker(`. `import type from '...'` is a default import named `type`, and is followed.
  */
 function scan(code: string): { specs: string[]; bad: string[] } {
   const src = stripComments(code);
   const specs: string[] = [];
   const bad: string[] = [];
-  const re = /\b(?:import|export)\s*(type\b\s*)?(?:[\w*{}\s,$]+?\s*\bfrom\s*)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  const re = /\b(?:import|export)\s*(type\b(?!\s*from\s*['"])\s*)?(?:[\w*{}\s,$]+?\s*\bfrom\s*)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   for (const m of src.matchAll(re)) {
     if (m[1]) continue;
     specs.push(m[2] || m[3]);
   }
   for (const m of src.matchAll(/\bimport\s*\((?!\s*['"][^'"]+['"]\s*\))/g)) bad.push(src.slice(m.index!, m.index! + 40));
-  for (const m of src.matchAll(/\brequire\s*\(|\bcreateRequire\b/g)) bad.push(src.slice(m.index!, m.index! + 40));
+  for (const m of src.matchAll(/\brequire\s*\(|\bcreateRequire\b|\bgetBuiltinModule\b|\bnew\s+Worker\s*\(/g)) bad.push(src.slice(m.index!, m.index! + 40));
   return { specs, bad };
+}
+
+/** Everything the walk refuses in one file: what `scan` cannot follow, and the built-ins that load code. */
+function refused(code: string): string[] {
+  const { specs, bad } = scan(code);
+  return [...bad, ...specs.filter((s) => LOADERS.test(s))];
 }
 
 const specifiers = (code: string): string[] => scan(code).specs;
@@ -49,8 +97,9 @@ function walk(entry: string, ts: boolean) {
     const file = todo.pop()!;
     if (files.has(file)) continue;
     files.add(file);
-    const found = scan(readFileSync(file, 'utf8'));
-    bad.push(...found.bad.map((b) => `${relative(root, file)}: ${b}`));
+    const code = readFileSync(file, 'utf8');
+    const found = scan(code);
+    bad.push(...refused(code).map((b) => `${relative(root, file)}: ${b}`));
     for (const s of found.specs) {
       if (!s.startsWith('.')) {
         bare.add(s);
@@ -133,6 +182,24 @@ describe('@mindmakr/reins/flight safety (design section 7)', () => {
     expect(scan(`const r = require ('ws')`).bad).toHaveLength(1);
     expect(scan(`import { createRequire } from 'node:module'; const r = createRequire(import.meta.url);`).bad).toHaveLength(2);
     expect(scan(`// require('ws') in a comment\nconst meta = import.meta.url;`).bad).toEqual([]);
+    // Comment markers inside strings and regex literals are text, not comments.
+    expect(specifiers(`const a = "/*"; import {a} from './node.js'; const b = "*/";`)).toEqual(['./node.js']);
+    expect(specifiers(`const s = "a//b"; import x from './node.js';`)).toEqual(['./node.js']);
+    expect(specifiers(`const r = /\\/\\//; import x from './node.js';`)).toEqual(['./node.js']);
+    expect(specifiers('const t = `//`; export * from "./bridge/hub.js";')).toEqual(['./bridge/hub.js']);
+    expect(specifiers(`/* a */ import x from './a.js'; // b\nimport y from './b.js'`)).toEqual(['./a.js', './b.js']);
+    // A default import named `type` is a real import.
+    expect(specifiers(`import type from './node.js'`)).toEqual(['./node.js']);
+    expect(specifiers(`import type from"./node.js"`)).toEqual(['./node.js']);
+    // Loaders the walk cannot follow.
+    expect(refused(`const w = new Worker(new URL('./node.js', import.meta.url));`)).toHaveLength(1);
+    expect(refused(`const m = process.getBuiltinModule('node:module');`)).toHaveLength(1);
+    for (const s of ['module', 'worker_threads', 'vm', 'child_process']) {
+      expect(refused(`import x from 'node:${s}';`), s).toHaveLength(1);
+      expect(refused(`import x from '${s}';`), s).toHaveLength(1);
+      expect(refused(`const x = await import("node:${s}");`), s).toHaveLength(1);
+    }
+    expect(refused(`import { readFileSync } from 'node:fs'; import m from './module.js';`)).toEqual([]);
   });
 
   it('never reaches development reins from the source entry', () => {
