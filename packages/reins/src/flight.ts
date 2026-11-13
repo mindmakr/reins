@@ -6,7 +6,7 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { check, type CheckResult } from './flight/checker.js';
+import { check, type CheckResult, endsOf } from './flight/checker.js';
 import { DEFAULT_WINDOW_MS, MANIFEST_FILE, type ManifestResult, readManifest, validateManifest } from './flight/manifest.js';
 import { createProbes, PROBE_TIMEOUT_MS } from './flight/probes.js';
 import { createStepWriter, type StepWriter } from './flight/steps.js';
@@ -59,7 +59,7 @@ export type { QueryFn } from './flight/pg-store.js';
 export { memoryStore, RETENTION_DEFAULTS } from './flight/store.js';
 export { fileStore } from './flight/file-store.js';
 export { PG_TABLES, pgStore } from './flight/pg-store.js';
-export { check } from './flight/checker.js';
+export { check, endsOf } from './flight/checker.js';
 
 const INSTANCE = /^[A-Za-z0-9._-]{1,64}$/;
 /** How often the lock holder prunes the store. */
@@ -74,7 +74,7 @@ function loadManifest(m: unknown): ManifestResult | null {
   return typeof m === 'string' ? readManifest(m) : validateManifest(m);
 }
 
-const nonNeg = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : d);
+const nonNeg =(v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : d);
 
 /** Creates an instance. Apps use the `flight` singleton; this is for tests. */
 export function createFlight(env: Record<string, string | undefined> = process.env) {
@@ -110,7 +110,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
       r.lastCheck = result;
       if (Date.now() - r.lastPrune >= PRUNE_EVERY_MS) {
         r.lastPrune = Date.now();
-        await r.store.prune(r.retention).catch(() => {});
+        await r.store.prune(r.retention, Date.now(), endsOf(r.manifest)).catch(() => {});
       }
       return result;
     })()

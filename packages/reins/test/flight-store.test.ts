@@ -30,6 +30,18 @@ describe('memory store', () => {
     await store.addSteps([1, 2, 3, 4, 5].map((i) => step(`k${i}`, 'requested', i)));
     expect((await store.runSteps('payout', 0)).map((s) => s.key)).toEqual(['k3', 'k4', 'k5']);
   });
+
+  it('counts an open run only when retention removes it whole, also when the cap on add removes it', async () => {
+    const store = memoryStore({ maxSteps: 4 });
+    const t = Date.now();
+    await store.addSteps([step('part', 'requested', t - 3 * DAY), step('part', 'bank.sent', t), step('gone', 'requested', t - 3 * DAY)]);
+    await store.prune({ maxAgeMs: DAY }, t, { payout: ['ledger.debited'] });
+    expect((await store.openRuns('payout', ['ledger.debited'])).map((s) => s.key)).toEqual(['part']);
+    expect((await store.minutes(0)).find((m) => m.instance === '(prune)')!.runsPruned).toEqual({ payout: 1 });
+    await store.addSteps([1, 2, 3, 4].map((i) => step(`n${i}`, 'requested', t + i)));
+    const counts = (await store.minutes(0)).filter((m) => m.instance === '(prune)').reduce((n, m) => n + (m.runsPruned?.payout || 0), 0);
+    expect(counts).toBe(2);
+  });
 });
 
 describe('file store', () => {
@@ -106,6 +118,8 @@ describe('postgres store statements', () => {
     await store.lock('owner-7', 1000, 0);
     await store.unlock('owner-7');
     await store.prune({}, 0);
+    await store.openRuns('payout', ['bank.sent']);
+    await store.prune({}, 0, { payout: ['bank.sent'] });
     expect(calls.length).toBeGreaterThan(8);
     for (const { text } of calls) {
       for (const v of [odd, 'payout', 'bank.sent', 'inst-9', 'pool-x', 'owner-7', 'one-debit']) expect(text).not.toContain(v);

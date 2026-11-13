@@ -139,6 +139,44 @@ describe('the look-back window (B7)', () => {
   });
 });
 
+describe('overdue runs older than the window (B7)', () => {
+  it('a run pending longer than the window with no new step is still broken, for within and for ends', async () => {
+    const s = await storeWith(['stuck', 'requested', NOW - 40 * H], ['stuck', 'bank.pending', NOW - 30 * H]);
+    const r = await check(s, manifest(), { now: NOW });
+    expect(get(r, 'pending-settles')).toMatchObject({ state: 'broken', count: 1, keys: ['stuck'], lastBreachAt: NOW - 26 * H, runs: 1 });
+    expect(get(r, 'payout-ends')).toMatchObject({ state: 'broken', count: 1, keys: ['stuck'], lastBreachAt: NOW - 16 * H, runs: 1 });
+    // The window still limits once and order: the run has no step inside it.
+    expect(get(r, 'one-debit')).toMatchObject({ state: 'held', runs: 0 });
+  });
+
+  it('leaves the count when the expected or end step arrives, and the late arrival is listed', async () => {
+    const s = await storeWith(['stuck', 'requested', NOW - 40 * H], ['stuck', 'bank.pending', NOW - 30 * H], ['stuck', 'bank.failed', NOW - H]);
+    const r = await check(s, manifest(), { now: NOW });
+    expect(get(r, 'pending-settles')).toMatchObject({ state: 'held', lateCount: 1, late: [{ key: 'stuck', lateMs: 25 * H, at: NOW - H }] });
+    expect(get(r, 'payout-ends')).toMatchObject({ state: 'held', lateCount: 1, late: [{ key: 'stuck', lateMs: 15 * H, at: NOW - H }] });
+  });
+
+  it('a late arrival outside the window is no longer listed', async () => {
+    const s = await storeWith(['old', 'requested', NOW - 80 * H], ['old', 'bank.pending', NOW - 79 * H], ['old', 'bank.failed', NOW - 30 * H]);
+    const r = await check(s, manifest(), { now: NOW });
+    expect(get(r, 'pending-settles')).toMatchObject({ state: 'held', runs: 0, lateCount: 0 });
+    expect(get(r, 'payout-ends')).toMatchObject({ state: 'held', runs: 0, lateCount: 0 });
+  });
+
+  it('a run retention removed while still open is reported as a blind fact', async () => {
+    const s = await storeWith(['stuck', 'requested', NOW - 9 * DAY], ['done', 'requested', NOW - 9 * DAY], ['done', 'ledger.debited', NOW - 9 * DAY]);
+    const m = manifest();
+    const { endsOf } = await import('../src/flight/checker.js');
+    expect(endsOf(m)).toEqual({ payout: ['ledger.debited', 'bank.failed'] });
+    await s.prune({ maxAgeMs: 7 * DAY }, NOW - 60_000, endsOf(m));
+    const r = await check(s, m, { now: NOW });
+    expect(r.blind).toContainEqual({ kind: 'overdue-pruned', process: 'payout', count: 1, since: NOW - DAY });
+    expect(get(r, 'payout-ends')).toMatchObject({ state: 'held', runs: 0 });
+    // The prune record is not an instance: probes are still reported as having no instance.
+    expect(r.probes).toMatchObject([{ reason: 'no-instance' }]);
+  });
+});
+
 describe('dropped steps (B9)', () => {
   it('reports once, order and retries for the window as not checked, not as held', async () => {
     const s = await storeWith(['p1', 'bank.settled', NOW - 2 * H], ['p1', 'ledger.debited', NOW - H]);

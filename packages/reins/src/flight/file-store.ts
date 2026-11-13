@@ -15,13 +15,16 @@ import { appendFile, link, open, readdir, readFile, rename, stat, unlink, writeF
 import { join } from 'node:path';
 import {
   byTime,
+  countOpenRemoved,
   type FindingRecord,
   type FlightStore,
   type InstanceMinute,
   laterProbe,
   type ProbeResult,
+  recordPruned,
   type Retention,
   retention,
+  selectOpen,
   selectRuns,
   type StepRecord,
 } from './store.js';
@@ -100,9 +103,31 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
     made = true;
   }
 
-  async function readSteps(): Promise<Array<StepRecord & { seq: number }>> {
+  async function writeMinute(m: InstanceMinute): Promise<void> {
+    ensure();
+    const file = join(minutesDir, `${safe(m.instance)}-${m.minute - (m.minute % HOUR)}.json`);
+    const all = (await readJson<Record<string, InstanceMinute>>(file)) || {};
+    all[String(m.minute)] = m;
+    await writeAtomic(file, JSON.stringify(all));
+  }
+
+  async function readMinutes(since: number): Promise<InstanceMinute[]> {
+    const out: InstanceMinute[] = [];
+    for (const f of await list(minutesDir)) {
+      const hour = Number(f.slice(f.lastIndexOf('-') + 1, -5));
+      if (!f.endsWith('.json') || !(hour + HOUR > since)) continue;
+      const all = await readJson<Record<string, InstanceMinute>>(join(minutesDir, f));
+      for (const m of Object.values(all || {})) if (m && typeof m.minute === 'number' && m.minute >= since) out.push(m);
+    }
+    return out.sort((a, b) => a.minute - b.minute);
+  }
+
+  type Stored = StepRecord & { seq: number; file: string };
+  const strip = ({ seq: _s, file: _f, ...s }: Stored): StepRecord => s;
+
+  async function readSteps(): Promise<Stored[]> {
     const files = (await list(stepsDir)).filter((f) => f.endsWith('.jsonl')).sort(byStart);
-    const out: Array<StepRecord & { seq: number }> = [];
+    const out: Stored[] = [];
     let seq = 0;
     for (const f of files) {
       let text = '';
@@ -117,7 +142,7 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
         try {
           const s = JSON.parse(line);
           if (typeof s.process === 'string' && typeof s.key === 'string' && typeof s.step === 'string' && typeof s.at === 'number') {
-            out.push({ process: s.process, key: s.key, step: s.step, at: s.at, instance: String(s.instance), seq: seq++ });
+            out.push({ process: s.process, key: s.key, step: s.step, at: s.at, instance: String(s.instance), seq: seq++, file: join(stepsDir, f) });
           }
         } catch {
           // A line cut short by a crash mid-append: skip it.
@@ -157,28 +182,13 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
         }
       }),
     async runSteps(process, since) {
-      return selectRuns(await readSteps(), process, since)
-        .sort(byTime)
-        .map(({ seq: _, ...s }) => s);
+      return selectRuns(await readSteps(), process, since).sort(byTime).map(strip);
     },
-    putMinute: (m) =>
-      queued(async () => {
-        ensure();
-        const file = join(minutesDir, `${safe(m.instance)}-${m.minute - (m.minute % HOUR)}.json`);
-        const all = (await readJson<Record<string, InstanceMinute>>(file)) || {};
-        all[String(m.minute)] = m;
-        await writeAtomic(file, JSON.stringify(all));
-      }),
-    async minutes(since) {
-      const out: InstanceMinute[] = [];
-      for (const f of await list(minutesDir)) {
-        const hour = Number(f.slice(f.lastIndexOf('-') + 1, -5));
-        if (!f.endsWith('.json') || !(hour + HOUR > since)) continue;
-        const all = await readJson<Record<string, InstanceMinute>>(join(minutesDir, f));
-        for (const m of Object.values(all || {})) if (m && typeof m.minute === 'number' && m.minute >= since) out.push(m);
-      }
-      return out.sort((a, b) => a.minute - b.minute);
+    async openRuns(process, ends) {
+      return selectOpen(await readSteps(), process, ends).sort(byTime).map(strip);
     },
+    putMinute: (m) => queued(() => writeMinute(m)),
+    minutes: readMinutes,
     putProbe: (r) =>
       queued(async () => {
         ensure();
@@ -215,36 +225,41 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
         const cur = await readJson<{ owner: string }>(lockFile);
         if (cur?.owner === owner) await unlink(lockFile).catch(() => {});
       }),
-    prune: (r2 = {}, now = Date.now()) =>
+    prune: (r2 = {}, now = Date.now(), ends = {}) =>
       queued(async () => {
         const k = retention({ ...keep, ...r2 });
         const cut = now - k.maxAgeMs;
-        // Steps: whole segments only. By age when the segment was last written before the cut; by count from
-        // the oldest segment, never a segment this store object is still appending to.
+        // Steps: whole segments only. By age when the segment was last written before the cut (nothing was
+        // appended since, so its writer has moved on to a new hour's segment); by count from the oldest
+        // segment, never a segment this store object is still appending to.
         const open = new Set([...segments.values()].map((s) => s.file));
-        const segs: Array<{ file: string; mtime: number; lines: number }> = [];
+        const all = await readSteps();
+        const lines = new Map<string, number>();
+        for (const s of all) lines.set(s.file, (lines.get(s.file) || 0) + 1);
+        const gone = new Set<string>();
+        const segs: Array<{ file: string; lines: number }> = [];
         for (const f of (await list(stepsDir)).filter((x) => x.endsWith('.jsonl')).sort(byStart)) {
           const file = join(stepsDir, f);
-          try {
-            const st = await stat(file);
-            if (st.mtimeMs < cut) {
-              // Nothing was appended since the cut, so its writer has moved on to a new hour's segment.
-              await unlink(file);
-              for (const [i, s] of segments) if (s.file === file) segments.delete(i);
-              continue;
-            }
-            const text = await readFile(file, 'utf8');
-            segs.push({ file, mtime: st.mtimeMs, lines: text.split('\n').filter(Boolean).length });
-          } catch (e: any) {
-            if (e?.code !== 'ENOENT') throw e;
-          }
+          const st = await stat(file).catch(() => null);
+          if (!st) continue;
+          if (st.mtimeMs < cut) gone.add(file);
+          else segs.push({ file, lines: lines.get(file) || 0 });
         }
         let total = segs.reduce((n, s) => n + s.lines, 0);
         for (const s of segs) {
           if (total <= k.maxSteps) break;
           if (open.has(s.file)) continue;
-          await unlink(s.file).catch(() => {});
+          gone.add(s.file);
           total -= s.lines;
+        }
+        const counts = countOpenRemoved(
+          all.filter((s) => gone.has(s.file)),
+          all.filter((s) => !gone.has(s.file)),
+          ends,
+        );
+        for (const file of gone) {
+          await unlink(file).catch(() => {});
+          for (const [i, s] of segments) if (s.file === file) segments.delete(i);
         }
         for (const f of await list(minutesDir)) {
           const hour = Number(f.slice(f.lastIndexOf('-') + 1, -5));
@@ -256,17 +271,19 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
           if (st && st.mtimeMs < cut) await unlink(join(dir, f)).catch(() => {});
         }
         const fFile = join(dir, 'findings.json');
-        const all = await readJson<Record<string, FindingRecord>>(fFile);
-        if (all) {
+        const found = await readJson<Record<string, FindingRecord>>(fFile);
+        if (found) {
           let changed = false;
-          for (const [key, f] of Object.entries(all)) {
+          for (const [key, f] of Object.entries(found)) {
             if (f.state === 'resolved' && f.updatedAt < cut) {
-              delete all[key];
+              delete found[key];
               changed = true;
             }
           }
-          if (changed) await writeAtomic(fFile, JSON.stringify(all));
+          if (changed) await writeAtomic(fFile, JSON.stringify(found));
         }
+        // Inside the queue already: write through the unqueued writer.
+        await recordPruned({ minutes: readMinutes, putMinute: writeMinute }, counts, now);
       }),
   };
 }

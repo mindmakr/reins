@@ -3,7 +3,7 @@
 // the blind facts: what flight itself could not see. Turning these into findings is the next layer's job.
 // Imports: Node built-ins and reins' shared modules only (the flight safety test walks this file).
 import { DEFAULT_WINDOW_MS, type FlightManifest, type FlightProcess, type FlightPromise, type ManifestProblem, type ManifestResult, type PromiseKind } from './manifest.js';
-import type { FlightStore, InstanceMinute, ProbeFailure, ProbeResult, StepRecord } from './store.js';
+import { type FlightStore, type InstanceMinute, PRUNE_INSTANCE, type ProbeFailure, type ProbeResult, type StepRecord } from './store.js';
 import { errorCode } from '../recorder.js';
 
 /** Keys listed per result at most; `count` always has the full number. */
@@ -65,6 +65,8 @@ export type BlindFact =
   | { kind: 'manifest-invalid'; problems: ManifestProblem[] }
   | { kind: 'store-unreachable'; error: string }
   | { kind: 'steps-dropped'; process: string; count: number; since: number }
+  /** Runs retention removed while they had reached no end step, so they may have been overdue (B7). */
+  | { kind: 'overdue-pruned'; process: string; count: number; since: number }
   | { kind: 'store-write-failed'; count: number; since: number }
   | { kind: 'no-instance'; since: number }
   | { kind: 'probe-stale'; id: string; lastAt: number; everyMs: number }
@@ -119,7 +121,13 @@ export async function check(store: FlightStore, manifest: ManifestResult | null,
       const dropped = droppedIn(minutes, p.name, since);
       if (dropped) out.blind.push({ kind: 'steps-dropped', process: p.name, count: dropped, since });
       const runs = group(await store.runSteps(p.name, since));
-      for (const promise of p.promises) out.promises.push(checkPromise(p, promise, runs, minutes, now));
+      const timed = p.promises.some((x) => x.kind === 'within' || x.kind === 'ends');
+      const open = timed ? group(await store.openRuns(p.name, p.ends)) : new Map<string, StepRecord[]>();
+      if (timed) {
+        const pruned = minutes.filter((x) => x.minute >= minuteOf(now - DEFAULT_WINDOW_MS)).reduce((n, x) => n + (Number(x.runsPruned?.[p.name]) || 0), 0);
+        if (pruned) out.blind.push({ kind: 'overdue-pruned', process: p.name, count: pruned, since: now - DEFAULT_WINDOW_MS });
+      }
+      for (const promise of p.promises) out.promises.push(checkPromise(p, promise, runs, open, minutes, now));
       for (const [step, n] of Object.entries(p.retries || {})) out.promises.push(checkRetries(p.name, step, n, runs, minutes, now));
     }
     out.probes = checkProbes(m, minutes, await store.probes(), now, out.blind);
@@ -137,6 +145,16 @@ export async function check(store: FlightStore, manifest: ManifestResult | null,
       out.probes = m.probes.map((x) => ({ id: x.id, everyMs: x.everyMs, lastAt: null, state: 'not-checked', reason: 'store-unreachable' }));
     }
   }
+  return out;
+}
+
+/**
+ * End steps of each process with a `within` or `ends` promise: what `store.prune` needs to count the open runs
+ * it removes. A watcher passes the same to its prune.
+ */
+export function endsOf(m: ManifestResult | null): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  if (m?.ok) for (const p of m.manifest.processes) if (p.promises.some((x) => x.kind === 'within' || x.kind === 'ends')) out[p.name] = p.ends;
   return out;
 }
 
@@ -168,9 +186,18 @@ function verdict(base: CheckBase, breaches: Breach[], late: LateRun[]): PromiseC
   return { ...base, state: 'broken', count: breaches.length, keys: breaches.slice(0, MAX_KEYS).map((b) => b.key), lastBreachAt: breaches[breaches.length - 1].at, ...lates };
 }
 
-function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string, StepRecord[]>, minutes: InstanceMinute[], now: number): PromiseCheck {
+/**
+ * `within` and `ends` count the runs overdue now, whatever their age (B7): an open run older than the window is
+ * checked too, until it reaches its expected or end step or retention removes it. The window still limits
+ * which late arrivals are listed. `once` and `order` check only runs with a step inside the window.
+ */
+function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string, StepRecord[]>, open: Map<string, StepRecord[]>, minutes: InstanceMinute[], now: number): PromiseCheck {
   const since = now - promise.windowMs;
   const checked = inWindow(runs, since);
+  if (promise.kind === 'within' || promise.kind === 'ends') {
+    const seen = new Set(checked.map(([k]) => k));
+    for (const [k, steps] of open) if (!seen.has(k)) checked.push([k, steps]);
+  }
   const base: CheckBase = { process: p.name, id: promise.id, kind: promise.kind, windowMs: promise.windowMs, since, runs: checked.length, stepsDropped: droppedIn(minutes, p.name, since) };
   const breaches: Breach[] = [];
   const late: LateRun[] = [];
@@ -187,7 +214,7 @@ function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string
         const start = steps[a].at;
         const done = steps.slice(a + 1).find((s) => promise.expect.includes(s.step));
         if (done) {
-          if (done.at - start > promise.withinMs) late.push({ key, lateMs: done.at - start - promise.withinMs, at: done.at });
+          if (done.at - start > promise.withinMs && done.at >= since) late.push({ key, lateMs: done.at - start - promise.withinMs, at: done.at });
         } else if (now - start > promise.withinMs) breaches.push({ key, at: start + promise.withinMs });
         break;
       }
@@ -195,7 +222,7 @@ function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string
         const start = steps[0].at;
         const end = steps.find((s) => p.ends.includes(s.step));
         if (end) {
-          if (end.at - start > promise.withinMs) late.push({ key, lateMs: end.at - start - promise.withinMs, at: end.at });
+          if (end.at - start > promise.withinMs && end.at >= since) late.push({ key, lateMs: end.at - start - promise.withinMs, at: end.at });
         } else if (now - start > promise.withinMs) breaches.push({ key, at: start + promise.withinMs });
         break;
       }
@@ -235,7 +262,7 @@ function checkRetries(process: string, step: string, n: number, runs: Map<string
 }
 
 function checkProbes(m: FlightManifest, minutes: InstanceMinute[], results: ProbeResult[], now: number, blind: BlindFact[]): ProbeCheck[] {
-  const recent = minutes.filter((x) => x.minute >= minuteOf(now - RECENT_MS));
+  const recent = minutes.filter((x) => x.minute >= minuteOf(now - RECENT_MS) && x.instance !== PRUNE_INSTANCE);
   const registered = new Set(recent.flatMap((x) => (Array.isArray(x.probes) ? x.probes : [])));
   const declared = new Set(m.probes.map((p) => p.id));
   const latest = new Map(results.map((r) => [r.id, r]));

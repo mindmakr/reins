@@ -28,6 +28,11 @@ export interface InstanceMinute {
   stepsDropped: Record<string, number>;
   /** `flight.step` calls with bad arguments in this minute. They are not steps, so no process is named. */
   stepsInvalid: number;
+  /**
+   * Runs of each process that retention removed whole while they had reached no end step: they may still have
+   * been overdue. Written by `prune`, under the instance PRUNE_INSTANCE, so a checker in any process sees it.
+   */
+  runsPruned?: Record<string, number>;
   /** Step writes the store refused in this minute. */
   storeErrors: number;
   /** Probe ids registered on this instance (sorted). */
@@ -75,6 +80,11 @@ export interface FlightStore {
    * steps from before `since` and after its end (design C15, C18). Ordered by time, then by the order written.
    */
   runSteps(process: string, since: number): Promise<StepRecord[]>;
+  /**
+   * Every step of every run of `process`, of any age, that has reached none of the `ends` steps: the runs that
+   * may be overdue for a `within` or `ends` promise however old they are. Same order as `runSteps`.
+   */
+  openRuns(process: string, ends: string[]): Promise<StepRecord[]>;
   /** Writes one instance's minute, replacing an earlier write of the same instance and minute. */
   putMinute(m: InstanceMinute): Promise<void>;
   /** Instance minutes at or after `since`, oldest first. */
@@ -93,15 +103,19 @@ export interface FlightStore {
   lock(owner: string, ttlMs: number, now?: number): Promise<boolean>;
   /** Gives the lock up, if `owner` holds it. */
   unlock(owner: string): Promise<void>;
-  /** Removes what is past the retention bounds. */
-  prune(r?: Retention, now?: number): Promise<void>;
+  /**
+   * Removes what is past the retention bounds. With `ends` (the end steps per process), runs of those processes
+   * removed whole while they had reached no end step are counted and written as `runsPruned`, so retention
+   * never silently drops a run that may be overdue.
+   */
+  prune(r?: Retention, now?: number, ends?: Record<string, string[]>): Promise<void>;
 }
 
 /** A store must have every method; anything else is refused by `flight.start`. */
 export function isStore(s: unknown): s is FlightStore {
   const o = s as Record<string, unknown> | null;
   if (!o || typeof o !== 'object') return false;
-  for (const m of ['addSteps', 'runSteps', 'putMinute', 'minutes', 'putProbe', 'probes', 'putFindings', 'findings', 'lock', 'unlock', 'prune']) {
+  for (const m of ['addSteps', 'runSteps', 'openRuns', 'putMinute', 'minutes', 'putProbe', 'probes', 'putFindings', 'findings', 'lock', 'unlock', 'prune']) {
     if (typeof o[m] !== 'function') return false;
   }
   return true;
@@ -129,6 +143,52 @@ export function selectRuns<T extends StepRecord>(all: Iterable<T>, process: stri
   return mine.filter((s) => keys.has(s.key));
 }
 
+/** Selects the runs of `process` that have reached none of `ends`, and returns all their steps in order. */
+export function selectOpen<T extends StepRecord>(all: Iterable<T>, process: string, ends: string[]): T[] {
+  const ended = new Set<string>();
+  const mine: T[] = [];
+  for (const s of all) {
+    if (s.process !== process) continue;
+    mine.push(s);
+    if (ends.includes(s.step)) ended.add(s.key);
+  }
+  return mine.filter((s) => !ended.has(s.key));
+}
+
+/** The minute records `prune` writes its counts under. */
+export const PRUNE_INSTANCE = '(prune)';
+
+/**
+ * Counts, per process named in `ends`, the runs whose steps are all in `removed` (none left in `kept`) and
+ * that had reached no end step.
+ */
+export function countOpenRemoved(removed: Iterable<StepRecord>, kept: Iterable<StepRecord>, ends: Record<string, string[]> = {}): Record<string, number> {
+  const id = (s: StepRecord) => `${s.process}\n${s.key}`;
+  const left = new Set<string>();
+  for (const s of kept) if (ends[s.process]) left.add(id(s));
+  const runs = new Map<string, { process: string; ended: boolean }>();
+  for (const s of removed) {
+    const e = ends[s.process];
+    if (!e || left.has(id(s))) continue;
+    const r = runs.get(id(s)) || { process: s.process, ended: false };
+    r.ended ||= e.includes(s.step);
+    runs.set(id(s), r);
+  }
+  const out: Record<string, number> = {};
+  for (const r of runs.values()) if (!r.ended) out[r.process] = (out[r.process] || 0) + 1;
+  return out;
+}
+
+/** Adds pruned-run counts to this minute's PRUNE_INSTANCE record in the store. */
+export async function recordPruned(store: Pick<FlightStore, 'minutes' | 'putMinute'>, counts: Record<string, number>, now: number): Promise<void> {
+  if (!Object.keys(counts).length) return;
+  const minute = now - (now % 60_000);
+  const old = (await store.minutes(minute)).find((m) => m.instance === PRUNE_INSTANCE && m.minute === minute);
+  const runsPruned: Record<string, number> = { ...(old?.runsPruned || {}) };
+  for (const [p, n] of Object.entries(counts)) runsPruned[p] = (runsPruned[p] || 0) + n;
+  await store.putMinute({ instance: PRUNE_INSTANCE, minute, basics: null, stepsDropped: {}, stepsInvalid: 0, storeErrors: 0, probes: [], runsPruned });
+}
+
 /** Keeps the later of two probe results. */
 export const laterProbe = (old: ProbeResult | undefined, r: ProbeResult) => !old || r.at >= old.at;
 
@@ -144,15 +204,26 @@ export function memoryStore(r: Retention = {}): FlightStore {
   const probes = new Map<string, ProbeResult>();
   const findings = new Map<string, FindingRecord>();
   let held: { owner: string; until: number } | null = null;
-
-  return {
+  /** The end steps the last prune was given, so the cap applied on add counts open runs it removes too. */
+  let lastEnds: Record<string, string[]> = {};
+  const self: FlightStore = {
     kind: 'memory',
     async addSteps(list) {
       for (const s of list) steps.push({ ...s, seq: seq++ });
-      if (steps.length > keep.maxSteps) steps = steps.slice(steps.length - keep.maxSteps);
+      if (steps.length > keep.maxSteps) {
+        const cut = steps.length - keep.maxSteps;
+        const removed = steps.slice(0, cut);
+        steps = steps.slice(cut);
+        await recordPruned(self, countOpenRemoved(removed, steps, lastEnds), Date.now());
+      }
     },
     async runSteps(process, since) {
       return selectRuns(steps, process, since)
+        .sort(byTime)
+        .map(({ seq: _, ...s }) => s);
+    },
+    async openRuns(process, ends) {
+      return selectOpen(steps, process, ends)
         .sort(byTime)
         .map(({ seq: _, ...s }) => s);
     },
@@ -182,14 +253,19 @@ export function memoryStore(r: Retention = {}): FlightStore {
     async unlock(owner) {
       if (held?.owner === owner) held = null;
     },
-    async prune(r2 = {}, now = Date.now()) {
+    async prune(r2 = {}, now = Date.now(), ends = {}) {
+      lastEnds = ends;
       const k = retention({ ...keep, ...r2 });
       const cut = now - k.maxAgeMs;
+      const before = steps;
       steps = steps.filter((s) => s.at >= cut);
       if (steps.length > k.maxSteps) steps = steps.slice(steps.length - k.maxSteps);
+      const kept = new Set(steps);
       for (const [id, m] of minutes) if (m.minute < cut) minutes.delete(id);
       for (const [id, p] of probes) if (p.at < cut) probes.delete(id);
       for (const [id, f] of findings) if (f.state === 'resolved' && f.updatedAt < cut) findings.delete(id);
+      await recordPruned(self, countOpenRemoved(before.filter((s) => !kept.has(s)), steps, ends), now);
     },
   };
+  return self;
 }

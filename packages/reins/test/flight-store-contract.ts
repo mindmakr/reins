@@ -122,6 +122,54 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     expect((await store.findings()).map((f) => f.key)).toEqual(['open-one']);
   });
 
+  it('lists every step of the open runs of any age, and none of a run that reached an end step', async () => {
+    const { store } = await make();
+    const t = Date.now() - 30 * DAY;
+    await store.addSteps([
+      step('stuck', 'requested', t),
+      step('stuck', 'bank.pending', t + 1000),
+      step('done', 'requested', t),
+      step('done', 'bank.failed', t + 2000),
+      step('done', 'bank.sent', t + 3000), // after the end: still the same, ended run
+      step('r1', 'requested', t, 'refund'),
+    ]);
+    await store.addSteps([step('fresh', 'requested', Date.now())]);
+    const got = await store.openRuns('payout', ['ledger.debited', 'bank.failed']);
+    expect(got.map((s) => `${s.key}:${s.step}`)).toEqual(['stuck:requested', 'stuck:bank.pending', 'fresh:requested']);
+    expect(got[0]).toEqual(step('stuck', 'requested', t));
+    expect(await store.openRuns('payout', [])).toHaveLength(6);
+  });
+
+  it('prune counts the runs it removes while they had reached no end step, in the store', async () => {
+    const { store, second } = await make();
+    const t = Date.now();
+    await store.addSteps([
+      step('open1', 'requested', t),
+      step('open2', 'bank.pending', t),
+      step('ended', 'requested', t),
+      step('ended', 'ledger.debited', t),
+      step('r1', 'requested', t, 'refund'), // a process not named: not counted
+    ]);
+    await store.prune({ maxAgeMs: DAY }, t + 2 * DAY, { payout: ['ledger.debited', 'bank.failed'] });
+    expect(await store.runSteps('payout', 0)).toEqual([]);
+    // Another handle (a watcher) reads the count back.
+    const got = (await second().minutes(0)).filter((m) => m.instance === '(prune)');
+    expect(got).toHaveLength(1);
+    expect(got[0].runsPruned).toEqual({ payout: 2 });
+    // A second prune in the same minute adds to the count.
+    await store.addSteps([step('open3', 'requested', t)]);
+    await store.prune({ maxAgeMs: DAY }, t + 2 * DAY, { payout: ['ledger.debited'] });
+    expect((await store.minutes(0)).find((m) => m.instance === '(prune)')!.runsPruned).toEqual({ payout: 3 });
+  });
+
+  it('prune without end steps writes no count', async () => {
+    const { store } = await make();
+    const t = Date.now();
+    await store.addSteps([step('open1', 'requested', t)]);
+    await store.prune({ maxAgeMs: DAY }, t + 2 * DAY);
+    expect(await store.minutes(0)).toEqual([]);
+  });
+
   it('prune keeps what is inside the bounds', async () => {
     const { store } = await make();
     const t = Date.now();

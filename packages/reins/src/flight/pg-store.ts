@@ -9,6 +9,7 @@ import {
   type FlightStore,
   type InstanceMinute,
   type ProbeResult,
+  recordPruned,
   type Retention,
   retention,
   type StepRecord,
@@ -76,7 +77,7 @@ export function pgStore(o: PgStoreOptions): FlightStore {
     return Array.isArray(r) ? r : Array.isArray((r as any)?.rows) ? (r as any).rows : [];
   };
 
-  return {
+  const self: FlightStore = {
     kind: 'postgres',
     async addSteps(steps: StepRecord[]) {
       if (!steps.length) return;
@@ -95,6 +96,16 @@ export function pgStore(o: PgStoreOptions): FlightStore {
       );
       return rows.map((r) => ({ process: r.process, key: r.key, step: r.step, at: num(r.at), instance: r.instance }));
     },
+    async openRuns(process, ends) {
+      const rows = await q(
+        `select process, key, step, at, instance from reins_flight_steps
+         where process = $1 and key in (
+           select key from reins_flight_steps where process = $1 group by key having not bool_or(step = any($2::text[])))
+         order by at, id`,
+        [process, ends],
+      );
+      return rows.map((r) => ({ process: r.process, key: r.key, step: r.step, at: num(r.at), instance: r.instance }));
+    },
     async putMinute(m: InstanceMinute) {
       await q(
         `insert into reins_flight_minutes (instance, minute, data) values ($1, $2, $3::jsonb)
@@ -104,7 +115,7 @@ export function pgStore(o: PgStoreOptions): FlightStore {
     },
     async minutes(since) {
       const rows = await q(`select data from reins_flight_minutes where minute >= $1 order by minute, instance`, [since]);
-      return rows.map((r) => json(r.data) as InstanceMinute);
+      return rows.map((r) => json(r.data) as InstanceMinute).filter((m) => m && typeof m === 'object' && typeof m.minute === 'number');
     },
     async putProbe(r: ProbeResult) {
       await q(
@@ -147,14 +158,35 @@ export function pgStore(o: PgStoreOptions): FlightStore {
     async unlock(owner) {
       await q(`delete from reins_flight_lock where name = 'checker' and owner = $1`, [owner]);
     },
-    async prune(r2 = {}, now = Date.now()) {
+    async prune(r2 = {}, now = Date.now(), ends = {}) {
       const k = retention({ ...keep, ...r2 });
       const cut = now - k.maxAgeMs;
+      // The highest id the count bound removes (none when under the bound).
+      const [top] = await q(`select id from reins_flight_steps order by id desc offset $1 limit 1`, [k.maxSteps]);
+      const maxId = top ? num(top.id) : 0;
+      // Before deleting: runs of the named processes that go whole (every step older than the cut, or within the
+      // count bound) and have reached no end step. End steps go as `process step` pairs, as parameters.
+      const processes = Object.keys(ends);
+      const counts: Record<string, number> = {};
+      if (processes.length) {
+        const pairs = processes.flatMap((p) => (ends[p] || []).map((s) => `${p} ${s}`));
+        const rows = await q(
+          `select process, count(*) as n from (
+             select process, key from reins_flight_steps where process = any($1::text[])
+             group by process, key
+             having bool_and(at < $2 or id <= $3) and not bool_or((process || ' ' || step) = any($4::text[]))
+           ) r group by process`,
+          [processes, cut, maxId, pairs],
+        );
+        for (const r of rows) counts[r.process] = num(r.n);
+      }
       await q(`delete from reins_flight_steps where at < $1`, [cut]);
-      await q(`delete from reins_flight_steps where id <= (select id from reins_flight_steps order by id desc offset $1 limit 1)`, [k.maxSteps]);
+      if (maxId) await q(`delete from reins_flight_steps where id <= $1`, [maxId]);
       await q(`delete from reins_flight_minutes where minute < $1`, [cut]);
       await q(`delete from reins_flight_probes where at < $1`, [cut]);
       await q(`delete from reins_flight_findings where state = 'resolved' and updated_at < $1`, [cut]);
+      await recordPruned(self, counts, now);
     },
   };
+  return self;
 }
