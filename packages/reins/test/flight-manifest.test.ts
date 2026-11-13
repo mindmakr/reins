@@ -52,6 +52,11 @@ describe('parseDuration', () => {
     for (const v of ['', '0s', '4', 'h', '4 h', ' 4h', '4h ', '4H', '1.5h', '-1h', '04h', '4hr', '4w', '1h30m', '1e3s', '9999999999s', 4, null, undefined, {}, ['4h']])
       expect(parseDuration(v), String(v)).toBeUndefined();
   });
+  it('caps a duration at 365 days in total', () => {
+    expect(parseDuration('365d')).toBe(365 * 86_400_000);
+    expect(parseDuration('8760h')).toBe(365 * 86_400_000);
+    for (const v of ['366d', '9000h', '999999999d', '525601m', '31536001s']) expect(parseDuration(v), v).toBeUndefined();
+  });
 });
 
 describe('validateManifest', () => {
@@ -181,6 +186,38 @@ describe('validateManifest', () => {
     expect(paths(problems((m) => (promise(m, 0).why = 42)))).toEqual(['processes[0].promises[0].why']);
     expect(paths(problems((m) => Object.assign(promise(m, 2), { first: 'bank.settled', then: 'bank.settled' })))).toEqual(['processes[0].promises[2].then']);
     expect(paths(problems((m) => delete (m.processes[0] as any).ends))).toEqual(['processes[0].promises[3]']);
+  });
+
+  it('refuses a duration longer than 365 days with a plain message', () => {
+    expect(problems((m) => (promise(m, 3).within = '365d'))).toEqual([]);
+    for (const d of ['366d', '9000h']) {
+      expect(problems((m) => (promise(m, 3).within = d))).toEqual([{ path: 'processes[0].promises[3].within', message: `"${d}" is too long: a duration may be at most 365 days` }]);
+    }
+    expect(paths(problems((m) => (m.probes[0].every = '999999999d')))).toEqual(['probes[0].every']);
+  });
+
+  it('reports only the steps list, not every step reference, when steps is missing or invalid', () => {
+    for (const steps of [undefined, 'requested', []]) {
+      const ps = problems((m) => {
+        if (steps === undefined) delete (m.processes[0] as any).steps;
+        else (m.processes[0] as any).steps = steps;
+      });
+      expect(paths(ps), JSON.stringify(steps)).toEqual(['processes[0].steps']);
+    }
+  });
+
+  it('still names fields that belong to no promise kind when the kind is unknown', () => {
+    const ps = problems((m) => Object.assign(promise(m, 0), { kind: 'eventually', level: 'error' }));
+    expect(ps).toEqual([
+      { path: 'processes[0].promises[0].kind', message: expect.stringMatching(/"eventually" is not a promise kind/) },
+      { path: 'processes[0].promises[0].level', message: 'unknown field "level" in a promise' },
+    ]);
+  });
+
+  it('words messages naturally: "an" before a vowel, and undefined without an article', () => {
+    expect(problems((m) => (promise(m, 3).after = 'requested'))).toEqual([{ path: 'processes[0].promises[3].after', message: 'unknown field "after" in an "ends" promise' }]);
+    expect(problems((m) => (promise(m, 0).step = 'requested'))[0].message).toBe('unknown field "step" in a "within" promise');
+    expect(validateManifest(undefined).problems[0].message).toBe('the manifest must be a JSON object, not undefined');
   });
 
   it('B4: accepts each duration form and refuses others in within, ends, window and every', () => {

@@ -96,22 +96,25 @@ export type ManifestResult =
 
 const UNITS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
 const DURATION = /^([1-9][0-9]{0,8})([smhd])$/;
+/** The longest duration: 365 days, well inside safe integers and timer limits. */
+const MAX_DURATION_MS = 365 * 86_400_000;
 /** Names of processes and steps, and ids of promises and probes. */
 const NAME = /^[a-z0-9.-]+$/;
 const MAX_NAME = 100;
 const MAX_TEXT = 1000;
 const MAX_RETRIES = 1000;
 
-/** Parses a duration such as `30s`, `15m`, `4h` or `7d` to milliseconds. Anything else gives undefined. */
+/** Parses a duration such as `30s`, `15m`, `4h` or `7d` to milliseconds, up to 365 days. Anything else gives undefined. */
 export function parseDuration(value: unknown): number | undefined {
   if (typeof value !== 'string') return undefined;
   const m = DURATION.exec(value);
-  return m ? Number(m[1]) * UNITS[m[2]] : undefined;
+  const ms = m ? Number(m[1]) * UNITS[m[2]] : undefined;
+  return ms !== undefined && ms <= MAX_DURATION_MS ? ms : undefined;
 }
 
 const ROOT = '(root)';
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-const typeName = (v: unknown) => (v === null ? 'null' : Array.isArray(v) ? 'an array' : typeof v === 'object' ? 'an object' : `a ${typeof v}`);
+const typeName = (v: unknown) => (v === null ? 'null' : Array.isArray(v) ? 'an array' : typeof v === 'object' ? 'an object' : v === undefined ? 'undefined' : `a ${typeof v}`);
 /** Builds a problem path: `processes[0].retries["bank.sent"]`. Keys that are not plain identifiers are quoted. */
 const join = (path: string, key: string | number) => {
   const base = path === ROOT ? '' : path;
@@ -158,6 +161,7 @@ class Checker {
     }
     const ms = parseDuration(v);
     if (ms === undefined) {
+      if (typeof v === 'string' && DURATION.test(v)) return void this.add(path, `"${v}" is too long: a duration may be at most 365 days`);
       const shown = typeof v === 'string' ? `"${v.slice(0, 40)}"` : typeName(v);
       return void this.add(path, `${shown} is not a duration: write a whole number and s, m, h or d, such as 30s, 15m, 4h or 7d`);
     }
@@ -183,11 +187,11 @@ class Checker {
     return v;
   }
 
-  /** A step reference: a valid name that the process declares. */
-  step(v: unknown, path: string, declared: Set<string>, processName: string): string | undefined {
+  /** A step reference: a valid name that the process declares. With `declared` null (the steps list itself failed), only the name is checked. */
+  step(v: unknown, path: string, declared: Set<string> | null, processName: string): string | undefined {
     const s = this.name(v, path, 'step');
     if (s === undefined) return undefined;
-    if (!declared.has(s)) return void this.add(path, `step "${s}" is not declared in the steps of process "${processName}"`);
+    if (declared && !declared.has(s)) return void this.add(path, `step "${s}" is not declared in the steps of process "${processName}"`);
     return s;
   }
 }
@@ -202,6 +206,7 @@ const KIND_FIELDS: Record<PromiseKind, readonly string[]> = {
   order: ['first', 'then'],
   ends: ['within'],
 };
+const ANY_PROMISE_FIELDS = [...PROMISE_COMMON, ...new Set(Object.values(KIND_FIELDS).flat())];
 
 /**
  * Validates a parsed manifest. Lists every problem it finds, not only the first, each with its
@@ -317,10 +322,12 @@ function checkProcess(p: unknown, path: string, c: Checker, promiseIds: Set<stri
     declared.add(step);
     steps.push(step);
   });
+  // When the steps list itself is missing or empty, do not also report every reference to a step.
+  const known = rawSteps && rawSteps.length > 0 ? declared : null;
 
   const ends: string[] = [];
   (c.array(obj.ends, join(path, 'ends'), false) ?? []).forEach((s, i) => {
-    const step = c.step(s, join(join(path, 'ends'), i), declared, label);
+    const step = c.step(s, join(join(path, 'ends'), i), known, label);
     if (step !== undefined && !ends.includes(step)) ends.push(step);
   });
 
@@ -329,7 +336,7 @@ function checkProcess(p: unknown, path: string, c: Checker, promiseIds: Set<stri
   if (r) {
     for (const k of Object.keys(r)) {
       const kp = join(join(path, 'retries'), k);
-      const step = c.step(k, kp, declared, label);
+      const step = c.step(k, kp, known, label);
       const n = r[k];
       if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > MAX_RETRIES) c.add(kp, `must be a whole number from 0 to ${MAX_RETRIES}, not ${typeof n === 'number' ? n : typeName(n)}`);
       else if (step !== undefined) retries[step] = n;
@@ -338,7 +345,7 @@ function checkProcess(p: unknown, path: string, c: Checker, promiseIds: Set<stri
 
   const promises: FlightPromise[] = [];
   (c.array(obj.promises, join(path, 'promises'), false) ?? []).forEach((q, i) => {
-    const promise = checkPromise(q, join(join(path, 'promises'), i), c, declared, label, ends.length > 0, promiseIds);
+    const promise = checkPromise(q, join(join(path, 'promises'), i), c, known, label, ends.length > 0, promiseIds);
     if (promise) promises.push(promise);
   });
 
@@ -346,7 +353,7 @@ function checkProcess(p: unknown, path: string, c: Checker, promiseIds: Set<stri
   return { name, key, steps, ends, retries, promises };
 }
 
-function checkPromise(q: unknown, path: string, c: Checker, declared: Set<string>, proc: string, hasEnds: boolean, ids: Set<string>): FlightPromise | undefined {
+function checkPromise(q: unknown, path: string, c: Checker, declared: Set<string> | null,proc: string, hasEnds: boolean, ids: Set<string>): FlightPromise | undefined {
   const obj = c.object(q, path, true);
   if (!obj) return undefined;
   const id = c.name(obj.id, join(path, 'id'), 'id');
@@ -360,15 +367,17 @@ function checkPromise(q: unknown, path: string, c: Checker, declared: Set<string
   const kind = obj.kind;
   if (kind === undefined) {
     c.add(join(path, 'kind'), `is required: one of ${PROMISE_KINDS.join(', ')}`);
-    c.known(obj, path, [...PROMISE_COMMON, ...new Set(Object.values(KIND_FIELDS).flat())], 'a promise');
+    c.known(obj, path, ANY_PROMISE_FIELDS, 'a promise');
     return undefined;
   }
   if (typeof kind !== 'string' || !(PROMISE_KINDS as readonly string[]).includes(kind)) {
     c.add(join(path, 'kind'), `${typeof kind === 'string' ? `"${kind.slice(0, 40)}"` : typeName(kind)} is not a promise kind: use one of ${PROMISE_KINDS.join(', ')}`);
+    // Still name fields that belong to no kind of promise at all.
+    c.known(obj, path, ANY_PROMISE_FIELDS, 'a promise');
     return undefined;
   }
   const k = kind as PromiseKind;
-  c.known(obj, path, [...PROMISE_COMMON, ...KIND_FIELDS[k]], `a "${k}" promise`);
+  c.known(obj, path, [...PROMISE_COMMON, ...KIND_FIELDS[k]], `${/^[aeiou]/.test(k) ? 'an' : 'a'} "${k}" promise`);
   const step = (field: string) => c.step(obj[field], join(path, field), declared, proc);
 
   let fields: Record<string, unknown> | undefined;
