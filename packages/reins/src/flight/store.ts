@@ -71,6 +71,18 @@ export interface Retention {
 
 export const RETENTION_DEFAULTS: Required<Retention> = { maxAgeMs: 7 * 86_400_000, maxSteps: 1_000_000 };
 
+/**
+ * The longest lease a checker lock can have. A longer `ttlMs` is cut to it, and a lock whose time is later than
+ * now plus this (planted, or written by a checker whose clock runs ahead) is treated as stale and taken over.
+ */
+export const MAX_LOCK_MS = 86_400_000;
+
+/** The time a lock taken now for `ttlMs` lasts until: at least 1 ms, at most MAX_LOCK_MS. */
+export const lockUntil = (now: number, ttlMs: number) => now + Math.min(MAX_LOCK_MS, Math.max(1, Number.isFinite(ttlMs) ? ttlMs : 1));
+
+/** Whether a lock with this `until` still holds at `now`: not past its time, and not impossibly far ahead. */
+export const lockHeld = (until: unknown, now: number) => typeof until === 'number' && until > now && until <= now + MAX_LOCK_MS;
+
 export interface FlightStore {
   /** `memory`, `file` or `postgres`. */
   readonly kind: string;
@@ -246,8 +258,8 @@ export function memoryStore(r: Retention = {}): FlightStore {
       return [...findings.values()].map((f) => structuredClone(f));
     },
     async lock(owner, ttlMs, now = Date.now()) {
-      if (held && held.owner !== owner && held.until > now) return false;
-      held = { owner, until: now + ttlMs };
+      if (held && held.owner !== owner && lockHeld(held.until, now)) return false;
+      held = { owner, until: lockUntil(now, ttlMs) };
       return true;
     },
     async unlock(owner) {

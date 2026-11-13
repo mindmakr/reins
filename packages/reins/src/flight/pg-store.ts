@@ -8,6 +8,8 @@ import {
   type FindingRecord,
   type FlightStore,
   type InstanceMinute,
+  lockUntil,
+  MAX_LOCK_MS,
   type ProbeResult,
   recordPruned,
   type Retention,
@@ -144,14 +146,15 @@ export function pgStore(o: PgStoreOptions): FlightStore {
       return rows.map((r) => ({ key: r.key, state: r.state, updatedAt: num(r.updated_at), data: json(r.data) }));
     },
     // One statement, so two checkers cannot both win: the row is made when there is none, and taken over only
-    // by its owner (a renewal) or when its time has passed. A row comes back only when `owner` holds the lock.
+    // by its owner (a renewal), when its time has passed, or when its time is impossibly far ahead (later than
+    // now plus MAX_LOCK_MS). A row comes back only when `owner` holds the lock.
     async lock(owner, ttlMs, now = Date.now()) {
       const rows = await q(
         `insert into reins_flight_lock (name, owner, until) values ('checker', $1, $2)
          on conflict (name) do update set owner = excluded.owner, until = excluded.until
-         where reins_flight_lock.owner = excluded.owner or reins_flight_lock.until < $3
+         where reins_flight_lock.owner = excluded.owner or reins_flight_lock.until <= $3 or reins_flight_lock.until > $4
          returning owner`,
-        [owner, now + ttlMs, now],
+        [owner, lockUntil(now, ttlMs), now, now + MAX_LOCK_MS],
       );
       return rows.length === 1;
     },

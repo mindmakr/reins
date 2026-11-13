@@ -9,7 +9,7 @@
 //   findings.json                          written only by the lock holder
 //   lock.json                              the checker lock
 // Imports: Node built-ins and reins' shared modules only (the flight safety test walks this file).
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { appendFile, link, open, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -20,6 +20,8 @@ import {
   type FlightStore,
   type InstanceMinute,
   laterProbe,
+  lockHeld,
+  lockUntil,
   type ProbeResult,
   recordPruned,
   type Retention,
@@ -58,11 +60,11 @@ async function writeAtomic(file: string, text: string): Promise<void> {
       await rename(tmp, file);
       return;
     } catch (e: any) {
-      if (i >= 5 || !['EPERM', 'EACCES', 'EBUSY'].includes(e?.code)) {
+      if (i >= 8 || !['EPERM', 'EACCES', 'EBUSY'].includes(e?.code)) {
         await unlink(tmp).catch(() => {});
         throw e;
       }
-      await new Promise((r) => setTimeout(r, 20 * (i + 1)));
+      await new Promise((r) => setTimeout(r, 5 * (i + 1)));
     }
   }
 }
@@ -85,6 +87,13 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
   /** This store object's open segment per instance. */
   const segments = new Map<string, { file: string; lines: number; hour: number }>();
   let made = false;
+  let swept = 0;
+  /** Removes old claim files, at most once a minute. */
+  const sweep = async () => {
+    if (Date.now() - swept < 60_000) return;
+    swept = Date.now();
+    await sweepClaims(dir);
+  };
   let serial: Promise<unknown> = Promise.resolve();
   /** Runs read-modify-write work of this store object one at a time. */
   const queued = <T>(fn: () => Promise<T>): Promise<T> => {
@@ -219,12 +228,8 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
     async findings() {
       return Object.values((await readJson<Record<string, FindingRecord>>(join(dir, 'findings.json'))) || {});
     },
-    lock: (owner, ttlMs, now = Date.now()) => queued(() => takeLock(dir, lockFile, owner, ttlMs, now, ensure)),
-    unlock: (owner) =>
-      queued(async () => {
-        const cur = await readJson<{ owner: string }>(lockFile);
-        if (cur?.owner === owner) await unlink(lockFile).catch(() => {});
-      }),
+    lock: (owner, ttlMs, now = Date.now()) => queued(() => takeLock(dir, lockFile, owner, ttlMs, now, ensure, sweep)),
+    unlock: (owner) => queued(() => dropLock(dir, lockFile, owner)),
     prune: (r2 = {}, now = Date.now(), ends = {}) =>
       queued(async () => {
         const k = retention({ ...keep, ...r2 });
@@ -291,62 +296,108 @@ export function fileStore(o: FileStoreOptions = {}): FlightStore {
 /** Segment files sort by their start time, the number before the first `-`. */
 const byStart = (a: string, b: string) => Number(a.split('-')[0]) - Number(b.split('-')[0]) || (a < b ? -1 : a > b ? 1 : 0);
 
-/**
- * The file lock. A free lock is made with an exclusive create, so of two checkers only one succeeds. The
- * holder renews it by rewriting it. A lock past its time is taken over in three steps: move the stale file
- * aside, check that what was moved is the stale lock that was read (not a fresh one another checker just
- * made; if it is fresh, put it back and give up), then make a new lock with an exclusive create.
- */
-async function takeLock(dir: string, file: string, owner: string, ttlMs: number, now: number, ensure: () => void): Promise<boolean> {
-  ensure();
-  const mine = JSON.stringify({ owner, until: now + ttlMs });
-  const create = async () => {
+/** Claim files older than this are removed. A checker never waits this long between reading the lock and claiming it. */
+const CLAIM_KEEP_MS = 3_600_000;
+
+/** Reads the lock file: its text, null when there is none, or undefined when it cannot be read now. */
+async function readLock(file: string): Promise<string | null | undefined> {
+  for (let i = 0; ; i++) {
     try {
-      const h = await open(file, 'wx');
-      try {
-        await h.writeFile(mine);
-      } finally {
-        await h.close();
-      }
+      return await readFile(file, 'utf8');
+    } catch (e: any) {
+      if (e?.code === 'ENOENT') return null;
+      // Windows refuses a read for a moment while the file is being replaced.
+      if (i >= 5 || !['EPERM', 'EACCES', 'EBUSY'].includes(e?.code)) return undefined;
+      await new Promise((r) => setTimeout(r, 5 * (i + 1)));
+    }
+  }
+}
+
+/**
+ * Claims the right to change the lock file away from the content `text`. The claim is a file named by a hash
+ * of that content, made with an exclusive create, so of the checkers that read the same content only one gets
+ * it. Every lock written holds a random nonce, so a content never comes back and a claim is never reused.
+ */
+async function claim(dir: string, text: string): Promise<string | null> {
+  const file = join(dir, `lock.${createHash('sha256').update(text).digest('hex').slice(0, 32)}.claim`);
+  try {
+    await (await open(file, 'wx', 0o600)).close();
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The file lock (B4: at most one holder at a time). `lock.json` holds `{ owner, until, nonce }`.
+ * - Free (no file): a complete candidate file is hard-linked into place, which fails when the file exists, so
+ *   of two checkers only one makes it, and no reader ever sees half a lock.
+ * - Held by another and not past its time: refused.
+ * - Anything else (renewing one's own lock, or taking over a lock past its time, impossibly far ahead, or cut
+ *   short) is a compare-and-swap: claim the content read (only one checker can), read again to confirm it is
+ *   still that content, write the new lock by an atomic rename, and read it back. An expired lock is never
+ *   renewed in place: its owner takes it over like anyone else.
+ */
+async function takeLock(dir: string, file: string, owner: string, ttlMs: number, now: number, ensure: () => void, sweep: () => Promise<void>): Promise<boolean> {
+  ensure();
+  const mine = JSON.stringify({ owner, until: lockUntil(now, ttlMs), nonce: randomBytes(8).toString('hex') });
+  const put = async () => {
+    const tmp = `${file}.${randomBytes(6).toString('hex')}.tmp`;
+    await writeFile(tmp, mine, { mode: 0o600 });
+    try {
+      await link(tmp, file);
       return true;
     } catch (e: any) {
       if (e?.code === 'EEXIST') return false;
       throw e;
+    } finally {
+      await unlink(tmp).catch(() => {});
     }
   };
-  if (await create()) return true;
-  let text: string;
-  try {
-    text = await readFile(file, 'utf8');
-  } catch (e: any) {
-    if (e?.code === 'ENOENT') return create();
-    throw e;
-  }
+  const text = await readLock(file);
+  if (text === undefined) return false;
+  if (text === null) return put();
   let cur: { owner?: unknown; until?: unknown } = {};
   try {
-    cur = JSON.parse(text);
+    cur = JSON.parse(text) || {};
   } catch {
     // A lock file cut short: treat it as stale.
   }
-  if (cur.owner === owner) {
-    await writeAtomic(file, mine);
-    return true;
-  }
-  if (typeof cur.until === 'number' && cur.until > now) return false;
-  const aside = join(dir, `lock.${randomBytes(4).toString('hex')}.stale`);
+  if (cur.owner !== owner && lockHeld(cur.until, now)) return false;
+  const claimed = await claim(dir, text);
+  if (!claimed) return false;
+  if ((await readLock(file)) !== text) return false; // changed since it was read: another checker moved first
   try {
-    await rename(file, aside);
-  } catch (e: any) {
-    if (e?.code === 'ENOENT') return create();
+    await writeAtomic(file, mine);
+  } catch {
+    // Nothing was changed: give the claim back so the lock can still be taken over.
+    await unlink(claimed).catch(() => {});
     return false;
   }
-  const moved = await readFile(aside, 'utf8').catch(() => '');
-  if (moved !== text) {
-    // Another checker took it over between the read and the move: give its lock back.
-    await link(aside, file).catch(() => {});
-    await unlink(aside).catch(() => {});
-    return false;
+  if ((await readLock(file)) !== mine) return false;
+  await sweep();
+  return true;
+}
+
+/** Gives the lock up if `owner` holds it, by the same compare-and-swap, so it never removes another's lock. */
+async function dropLock(dir: string, file: string, owner: string): Promise<void> {
+  const text = await readLock(file);
+  if (!text) return;
+  let cur: { owner?: unknown } = {};
+  try {
+    cur = JSON.parse(text) || {};
+  } catch {
+    return;
   }
-  await unlink(aside).catch(() => {});
-  return create();
+  if (cur.owner !== owner || !(await claim(dir, text))) return;
+  if ((await readLock(file)) === text) await unlink(file).catch(() => {});
+}
+
+async function sweepClaims(dir: string): Promise<void> {
+  const old = Date.now() - CLAIM_KEEP_MS;
+  for (const f of await list(dir).catch(() => [] as string[])) {
+    if (!f.endsWith('.claim') && !(f.startsWith('lock.json.') && f.endsWith('.tmp'))) continue;
+    const st = await stat(join(dir, f)).catch(() => null);
+    if (st && st.isFile() && st.mtimeMs < old) await unlink(join(dir, f)).catch(() => {});
+  }
 }

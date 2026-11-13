@@ -86,6 +86,33 @@ describe('file store', () => {
     expect((await b.runSteps('payout', 0)).map((s) => s.key)).toEqual(['b1']);
   });
 
+  it('never has two holders: 1000 rounds of three checkers racing for an expired lock, its owner among them', async () => {
+    let multi = 0;
+    let won = 0;
+    // Eight folders race side by side, 125 rounds each: 1000 rounds in all.
+    const lane = async () => {
+      const dir = join(tmp(), 'flight');
+      const handles = ['A', 'B', 'C'].map((owner) => ({ owner, store: fileStore({ dir }) }));
+      let t = 0;
+      for (let i = 0; i < 125; i++) {
+        // Each round starts after the last holder's lock (100 ms) has passed its time: the holder renews it
+        // while the other two take it over, at the same moment.
+        t += 1000;
+        const got = await Promise.all(handles.map((h) => h.store.lock(h.owner, 100, t)));
+        const n = got.filter(Boolean).length;
+        if (n > 1) multi++;
+        if (n === 1) won++;
+      }
+      // Unlock by a checker that no longer holds the lock leaves the holder's lock alone.
+      const holder = JSON.parse(readFileSync(join(dir, 'lock.json'), 'utf8')).owner;
+      for (const h of handles) if (h.owner !== holder) await h.store.unlock(h.owner);
+      expect(JSON.parse(readFileSync(join(dir, 'lock.json'), 'utf8')).owner).toBe(holder);
+    };
+    await Promise.all(Array.from({ length: 8 }, lane));
+    expect(multi).toBe(0);
+    expect(won).toBeGreaterThan(900);
+  }, 60_000);
+
   it('takes over a lock file cut short', async () => {
     const dir = join(tmp(), 'flight');
     const store = fileStore({ dir });

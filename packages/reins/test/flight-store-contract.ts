@@ -1,7 +1,7 @@
 // One contract every flight store meets (design B2, B3, B4): memory, file and Postgres run the same cases.
 import { expect, it } from 'vitest';
 import { createStepWriter } from '../src/flight/steps.js';
-import type { FindingRecord, FlightStore, InstanceMinute, StepRecord } from '../src/flight/store.js';
+import { type FindingRecord, type FlightStore, type InstanceMinute, MAX_LOCK_MS, type StepRecord } from '../src/flight/store.js';
 
 const DAY = 86_400_000;
 
@@ -111,6 +111,22 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     expect(await store.lock('a', 1000, t + 1800)).toBe(false);
     await other.unlock('b');
     expect(await store.lock('a', 1000, t + 1900)).toBe(true);
+  });
+
+  it('takes over a lock at its time exactly, and a lock impossibly far ahead (planted, or a clock that runs ahead)', async () => {
+    const { store, second } = await make();
+    const other = second();
+    const t = Date.now();
+    expect(await store.lock('a', 1000, t)).toBe(true);
+    expect(await other.lock('b', 1000, t + 999)).toBe(false);
+    expect(await other.lock('b', 1000, t + 1000)).toBe(true); // until <= now, in every store
+    // A checker whose clock runs ten years ahead takes it, then holds it impossibly far ahead of the others.
+    expect(await store.lock('ahead', 60_000, t + 10 * 365 * DAY)).toBe(true);
+    expect(await other.lock('b', 60_000, t + 2000)).toBe(true);
+    // A lease longer than MAX_LOCK_MS is cut to it.
+    expect(await store.lock('long', 100 * 365 * DAY, t + 70_000)).toBe(true);
+    expect(await other.lock('b', 1000, t + 70_000 + MAX_LOCK_MS - 1)).toBe(false);
+    expect(await other.lock('b', 1000, t + 70_000 + MAX_LOCK_MS)).toBe(true);
   });
 
   it('of many checkers racing for a free lock, exactly one wins', async () => {
