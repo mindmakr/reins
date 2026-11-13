@@ -137,6 +137,12 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     expect((await store.findings())[0].data).toEqual({ at: '1970-01-01T00:00:00.000Z', nested: [{ when: '1970-01-01T00:00:01.000Z' }] });
   });
 
+  it('keeps finding data an object when the data itself has toJSON (u4 round 3, L7)', async () => {
+    const { store } = await make();
+    await store.putFindings([{ key: 'basic:x', state: 'open', updatedAt: 1000, data: new Date(0) as unknown as Record<string, unknown> }]);
+    expect((await store.findings())[0].data).toEqual({});
+  });
+
   it('gives the lock to one checker at a time, and takes over a lock its checker left', async () => {
     const { store, second } = await make();
     const other = second();

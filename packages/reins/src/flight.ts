@@ -7,12 +7,13 @@ import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { check, type CheckResult, endsOf, notCheckedResult } from './flight/checker.js';
-import { evaluate, type FindingsMemory, type FlightFinding, fromRecords, memoryFrom, memoryRecord, toRecord } from './flight/findings.js';
-import { createNotifier, type FlightSink, type Notification, type Notifier, type NotifyOptions, type NotifyState, type SummaryFigures } from './flight/sinks.js';
+import { type Change, evaluate, type FindingsMemory, type FlightFinding, fromRecords, memoryFrom, memoryRecord, toRecord } from './flight/findings.js';
+import { createNotifier, type Delivery, type FlightSink, type Notification, type Notifier, type NotifyOptions, type NotifyState, type SummaryFigures } from './flight/sinks.js';
 import { DEFAULT_WINDOW_MS, MANIFEST_FILE, type ManifestResult, readManifest, validateManifest } from './flight/manifest.js';
 import { createProbes, PROBE_TIMEOUT_MS } from './flight/probes.js';
 import { createStepWriter, type StepWriter } from './flight/steps.js';
 import { type FindingRecord, type FlightStore, type InstanceMinute, isStore, memoryStore, type Retention, RETENTION_DEFAULTS } from './flight/store.js';
+import { basicsOf } from './flight/limits.js';
 import {
   createStrictRecorder,
   type DevInstruments,
@@ -99,6 +100,7 @@ function loadManifest(m: unknown): ManifestResult | null {
 
 const SERVICE = /^[\x20-\x7e]{1,64}$/;
 
+/** The last stamp given in this process: module-wide, so two flights in one process never give the same stamp. */
 let lastStamp = 0;
 /** `t`, or one more than the last stamp given in this process: what the store and the outage entries order by. */
 function stamp(t: number): number {
@@ -112,8 +114,15 @@ interface OutageEntry {
   finding: FlightFinding;
 }
 
-/** The outage findings an instance that does not hold the lock keeps: only the store's own, which it saw itself. */
+/** The outage findings a server that does not hold the lock tells and keeps: only the store's own, which it saw itself. */
 const STORE_KEYS = new Set(['blind:store-unreachable', 'blind:lock-unavailable']);
+
+const CHANGE_TYPES = new Set(['opened', 'changed', 'resolved']);
+/** Whether a delivery tells a change that `told` already shows: the same finding in the same state and level. */
+const toldIn = (told: FlightFinding[], d: Delivery) => {
+  const f = d.n.finding;
+  return !!f && told.some((t) => t.key === f.key && t.state === f.state && t.level === f.level);
+};
 
 /** The stored findings, with the ones that changed during an outage laid over them where they are newer. */
 function mergePrior(stored: FindingRecord[], outage: Map<string, OutageEntry>): FlightFinding[] {
@@ -164,29 +173,45 @@ export function createFlight(env: Record<string, string | undefined> = process.e
      */
     outage: Map<string, OutageEntry>;
     /**
-     * Whether this server held the lock at its last try. Only then does it tell sinks of a store outage: one
-     * server tells it, not each. False until its first try succeeds, so servers that have never reached the store
-     * keep the outage in their own findings and report, and the first to hold the lock tells it once it resolves.
+     * Whether this server held the lock at its last try (false until a try succeeds). A holder tells sinks of a
+     * store outage at once; any other server only once the outage has lasted the lock's lease (`conclude`).
      */
     holder: boolean;
+    /** When this server first found the store down in the current outage; null while it reaches the store. */
+    downSince: number | null;
   } | null = null;
   let checkEvery = 60_000;
   let checkTimeout = CHECK_TIMEOUT_MS;
+  /** The lock's lease: a lock its checker stopped renewing is taken over after three periods (at least three minutes). */
+  const lease = () => 3 * Math.max(checkEvery, 60_000);
+
+  /**
+   * Whether this server still holds the lock, renewing it. Asked before a pass that is no longer live (it ran
+   * past its time limit, maybe past the lease) writes or tells: another server may hold the lock by then, and
+   * what it wrote and told is its own. False after stop(); a lock renewed while stop() ran is given back.
+   */
+  async function stillHolds(r: NonNullable<typeof run>): Promise<boolean> {
+    if (run !== r) return false;
+    const ok = await r.store.lock(r.owner, lease()).catch(() => false);
+    if (run === r) return ok;
+    if (ok) void r.store.unlock(r.owner).catch(() => {});
+    return false;
+  }
 
   /**
    * The findings step of a pass: findings from the check and the minutes, merged with the ones kept, written to
    * the store with the findings layer's memory, and only then sent to the sinks, so a change is told once even
    * with several instances on one store (only the lock holder runs a pass, and the next holder reads what was
    * written). The write is the commit point: once the store holds a change as told, it is told, even when the
-   * pass ran past its time limit meanwhile. When the store cannot be written, this server's own copy stands in,
-   * the changes are kept in `outage` until a pass can write them, and only the last lock holder tells sinks.
-   * Never throws.
+   * pass ran past its time limit meanwhile (then only while this server still holds the lock, and only what the
+   * time-out's own step did not already tell), but never after stop(). When the store cannot be written, this
+   * server's own copy stands in, and the changes are kept in `outage` until a pass can write them. Never throws.
    */
   async function conclude(r: NonNullable<typeof run>, result: CheckResult, minutes: InstanceMinute[] | null, useStore: boolean, isLive: () => boolean): Promise<void> {
     try {
       const now = result.at;
-      // The time the store records this pass's write under, and an outage entry's: strictly increasing, so a
-      // record and an entry of the same millisecond are never a tie.
+      // The time the store records this pass's write under, and an outage entry's: strictly increasing in this
+      // process, so a record and an entry of the same millisecond are never a tie.
       const at = stamp(now);
       const down = !useStore || result.blind.some((f) => f.kind === 'store-unreachable' || f.kind === 'lock-unavailable');
       let prior = r.findings;
@@ -205,35 +230,63 @@ export function createFlight(env: Record<string, string | undefined> = process.e
       const mem: FindingsMemory = { ...ev.memory, notify: plan.state as Record<string, unknown> };
       const changed = new Set(ev.changes.map((c) => c.finding.key));
       if (records) {
+        // A pass past its time limit writes only while this server still holds the lock: a newer holder's
+        // records are not overwritten with older ones.
+        if (!isLive() && !(await stillHolds(r))) return;
         // The open findings, the changed ones, and the ones that changed during an outage (one that resolved then,
         // and was told so, must not stay open in the store to be resolved and told again).
         const outageKeys = [...r.outage.keys()];
         const write = new Set([...changed, ...outageKeys]);
         await r.store.putFindings([...ev.findings.filter((f) => f.state === 'open' || write.has(f.key)).map((f) => toRecord(f, at)), memoryRecord(mem, at)]);
-        r.notifier.dispatch(plan.deliveries);
         // Written; an entry a time-out added while this write was on its way is newer, and stays.
         for (const k of outageKeys) if ((r.outage.get(k)?.at ?? Infinity) <= at) r.outage.delete(k);
-        if (!isLive()) return;
-        r.findings = ev.findings;
-        r.memory = mem;
+        if (isLive()) {
+          r.findings = ev.findings;
+          r.memory = mem;
+          r.notifier.dispatch(plan.deliveries);
+          return;
+        }
+        // The pass ran past its time limit while writing, or flight stopped. After stop() nothing is sent. Else
+        // the time-out's own findings step has already told, from the findings before this pass and from the same
+        // memory, its changes and any digest or summary due: this write tells only the changes that step did not,
+        // and only while this server still holds the lock (another holder tells its own).
+        if (!(await stillHolds(r))) return;
+        r.notifier.dispatch(plan.deliveries.filter((d) => CHANGE_TYPES.has(d.n.type) && !toldIn(r.findings, d)));
         return;
       }
       if (!isLive()) return;
       r.findings = ev.findings;
-      // Kept until a pass can write them: what changed now, and the latest of what changed before. A server that
-      // does not hold the lock keeps only the store's own findings and tells nothing (the holder tells it).
-      for (const f of ev.findings) if ((changed.has(f.key) || r.outage.has(f.key)) && (r.holder || STORE_KEYS.has(f.key))) r.outage.set(f.key, { at, finding: f });
-      if (!r.holder) return;
-      r.memory = mem;
-      r.notifier.dispatch(plan.deliveries);
+      if (down && r.downSince === null) r.downSince = now;
+      if (r.holder) {
+        // Kept until a pass can write them: what changed now, and the latest of what changed before.
+        for (const f of ev.findings) if (changed.has(f.key) || r.outage.has(f.key)) r.outage.set(f.key, { at, finding: f });
+        r.memory = mem;
+        r.notifier.dispatch(plan.deliveries);
+        return;
+      }
+      // A server that did not hold the lock at its last try tells sinks of the store outage only once it has
+      // lasted the lock's lease: by then a holder, if there is one, has told it (a holder tells at once), and a
+      // server whose store has been down since boot, with no holder at all, still tells it. During an outage the
+      // servers cannot coordinate, so two of them may each tell the same opening once: a duplicate accepted, as
+      // the price of an outage every sink hears of. A server that told an opening also tells that finding's
+      // changes and end while it still cannot reach the store. It keeps only what it told, for the next lock
+      // holder (itself, or another after `handOver`) to resolve and tell: an outage no sink heard of ends unheard.
+      // These few notifications are planned outside the hourly count, which lives in the store it cannot reach.
+      const tell: Change[] = ev.changes.filter((c) => STORE_KEYS.has(c.finding.key) && r.outage.has(c.finding.key));
+      if (now - (r.downSince ?? now) >= lease())
+        for (const f of ev.findings) if (STORE_KEYS.has(f.key) && f.state === 'open' && !r.outage.has(f.key)) tell.push({ event: 'opened', finding: f });
+      const told = new Set([...r.outage.keys(), ...tell.map((c) => c.finding.key)]);
+      for (const f of ev.findings) if (STORE_KEYS.has(f.key) && told.has(f.key)) r.outage.set(f.key, { at, finding: f });
+      if (tell.length) r.notifier.dispatch(r.notifier.plan(tell, undefined, now, r.service).deliveries);
     } catch {
       // A store that refuses the write: nothing is sent, and the next pass finds the same changes again.
     }
   }
 
   /**
-   * A server that no longer holds the lock writes the findings it kept from an outage, where the store has
-   * nothing newer, so the server that holds the lock now resolves them and tells it, once.
+   * A server that no longer holds the lock writes the findings it kept from an outage (only what a sink was
+   * told), where the store has nothing newer, so the server that holds the lock now resolves them and tells it,
+   * once. Throws when the store does; the entries are then kept for the next pass.
    */
   async function handOver(r: NonNullable<typeof run>): Promise<void> {
     if (!r.outage.size) return;
@@ -256,8 +309,6 @@ export function createFlight(env: Record<string, string | undefined> = process.e
       await conclude(r, r.lastCheck, null, false, () => run === r);
       return r.lastCheck;
     }
-    // A lock its checker stopped renewing is taken over after three periods (at least three minutes).
-    const ttl = 3 * Math.max(checkEvery, 60_000);
     // This pass is live until it ends or runs past its time limit; work that finishes later is ignored.
     const token = {};
     r.token = token;
@@ -266,17 +317,21 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     let over = false;
     const current = () => live() && !over;
     const work = (async (): Promise<CheckResult | null> => {
+      let held: boolean;
       try {
-        r.holder = await r.store.lock(r.owner, ttl);
-        if (!r.holder) {
-          await handOver(r);
-          return null;
-        }
+        held = await r.store.lock(r.owner, lease());
       } catch (e) {
         // Without the lock this checker neither checks nor prunes (another may hold it), and says why.
         const res = notCheckedResult(r.manifest, Date.now(), { kind: 'lock-unavailable', error: errorCode(e) }, 'lock-unavailable');
         await conclude(r, res, null, false, current);
         return res;
+      }
+      r.holder = held;
+      r.downSince = null;
+      if (!held) {
+        // The lock answered, so this is not a lock failure: a hand-over the store refuses is tried again next pass.
+        await handOver(r).catch(() => {});
+        return null;
       }
       let minutes: InstanceMinute[] | null = null;
       const result = await check(r.store, r.manifest, { minutes: (m) => (minutes = m) });
@@ -344,7 +399,9 @@ export function createFlight(env: Record<string, string | undefined> = process.e
         // The memory store is told the end steps now, so its cap on add counts the open runs it removes before the first prune.
         const store = opts.store || memoryStore({ ...(opts.retention && typeof opts.retention === 'object' ? opts.retention : {}), ends: endsOf(manifest) });
         const instance = opts.instance || randomBytes(6).toString('hex');
-        r = createStrictRecorder(opts);
+        // The slow-route limit and its error level in force: those that are not bucket bounds are counted exactly.
+        const bs = basicsOf(manifest?.ok ? manifest.manifest.basics : undefined);
+        r = createStrictRecorder(opts, [bs.slowRouteMs, bs.errorFactor * bs.slowRouteMs]);
         r.start();
         const rr = r;
         const writer = createStepWriter({
@@ -383,6 +440,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
           memory: {},
           outage: new Map(),
           holder: false,
+          downSince: null,
         };
         probes.start({ store, instance, declared: m?.probes || [], timeoutMs: nonNeg(opts.probeTimeoutMs, PROBE_TIMEOUT_MS) || PROBE_TIMEOUT_MS, onError: () => writer.storeError() });
         checkEvery = nonNeg(opts.checkEveryMs, 60_000);
@@ -403,7 +461,10 @@ export function createFlight(env: Record<string, string | undefined> = process.e
         return false;
       }
     },
-    /** Stops recording, writing and checking. Queued steps are written in the background; `flush()` first to wait. */
+    /**
+     * Stops recording, writing, checking and telling: no notification starts after this, also not for what a pass
+     * still on its way writes to the store. Queued steps are written in the background; `flush()` first to wait.
+     */
     stop(): void {
       try {
         rec?.stop();

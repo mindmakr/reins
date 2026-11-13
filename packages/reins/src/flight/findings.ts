@@ -110,9 +110,11 @@ export interface EvaluateResult {
 
 // ---- formatting --------------------------------------------------------------------------------------
 
-/** A duration in plain words: `850 ms`, `12 s`, `5 min`, `3.5 h`, `2 days`. */
+/** A duration in plain words: `850 ms`, `1.2 s`, `12 s`, `5 min`, `3.5 h`, `2 days`. */
 export function duration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)} ms`;
+  // One decimal below 10 s, so a limit such as 1200 ms is not written as "1 s".
+  if (ms < 10_000) return `${Math.round(ms / 100) / 10} s`;
   if (ms < MIN) return `${Math.round(ms / 1000)} s`;
   if (ms < HOUR) return `${Math.round(ms / MIN)} min`;
   if (ms < 48 * HOUR) return `${Math.round((ms / HOUR) * 10) / 10} h`;
@@ -138,6 +140,8 @@ interface Merged {
 const emptyMerged = (): Merged => ({ count: 0, errors: 0, p95Ms: 0, maxMs: 0, refused: {} });
 const bucketsOf = new WeakMap<Merged, number[]>();
 const fallbackP95 = new WeakMap<Merged, number>();
+/** The added figures that have buckets, one per instance minute: their exact counts over a limit (`overCounts`). */
+const partsOf = new WeakMap<Merged, Figures[]>();
 
 /** Adds one minute's figures (design: figures from the instances are added before a limit applies). */
 function addFigures(m: Merged, f: Figures) {
@@ -146,10 +150,15 @@ function addFigures(m: Merged, f: Figures) {
   m.errors += Number(f.errors) || 0;
   m.maxMs = Math.max(m.maxMs, Number(f.maxMs) || 0);
   if (f.refused && typeof f.refused === 'object') for (const [k, v] of Object.entries(f.refused)) m.refused[k] = (m.refused[k] || 0) + (Number(v) || 0);
+  // Figures with another number of buckets (from a release with other bounds) are not added bucket by bucket:
+  // only their p95Ms counts toward the 95th percentile, and none of them counts as surely over a limit.
   if (Array.isArray(f.buckets) && f.buckets.length === LATENCY_BOUNDS.length) {
     const b = bucketsOf.get(m) || LATENCY_BOUNDS.map(() => 0);
     f.buckets.forEach((v, i) => (b[i] += Number(v) || 0));
     bucketsOf.set(m, b);
+    const parts = partsOf.get(m) || [];
+    parts.push(f);
+    partsOf.set(m, parts);
   } else fallbackP95.set(m, Math.max(fallbackP95.get(m) || 0, Number(f.p95Ms) || 0));
 }
 
@@ -162,15 +171,38 @@ function p95(m: Merged): number {
   return total ? Math.max(out, bucketP95(b, total, m.maxMs)) : out;
 }
 
+const sum = (l: readonly number[]) => l.reduce((a, x) => a + (Number(x) || 0), 0);
+
+/** A minute's exact count over `ms`, kept by the recorder for flight's own limits (`Figures.over`), or null. */
+function exactOver(f: Figures, ms: number): number | null {
+  const v = f.over && typeof f.over === 'object' ? f.over[String(ms)] : undefined;
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.min(v, sum(f.buckets || [])) : null;
+}
+
 /**
- * Whether the 95th percentile of the added figures is surely over `ms`: more than 5% of them sit in buckets whose
- * lower bound is `ms` or more. Only figures kept in buckets count, so a bucket bound never overstates a time.
+ * Of the added figures kept in buckets (`total`), how many surely took longer than each of `limits`, in one pass:
+ * a minute's exact count where the recorder kept one, else its buckets whose lower bound is the limit or more
+ * (exact when the limit is a bound; between two bounds a floor, so `exact` is false). The 95th percentile is
+ * surely over a limit (`is`) when more than 5% of them are. A bucket bound never overstates a time.
  */
-function surelyOver(m: Merged, ms: number): { total: number; over: number; is: boolean } {
+function overCounts(m: Merged, limits: number[]): { total: number; over: Array<{ n: number; exact: boolean; is: boolean }> } {
   const b = bucketsOf.get(m);
-  const total = b ? b.reduce((a, x) => a + x, 0) : 0;
-  const over = b ? bucketsOver(b, ms) : 0;
-  return { total, over, is: total > 0 && total - over < Math.ceil(total * 0.95) };
+  const total = b ? sum(b) : 0;
+  const parts = partsOf.get(m) || [];
+  const over = limits.map((ms) => {
+    let n = 0;
+    let exact = true;
+    for (const p of parts) {
+      const x = LATENCY_BOUNDS.includes(ms) ? null : exactOver(p, ms);
+      if (x !== null) n += x;
+      else {
+        n += bucketsOver(p.buckets!, ms);
+        if (!LATENCY_BOUNDS.includes(ms)) exact = false;
+      }
+    }
+    return { n, exact, is: total > 0 && total - n < Math.ceil(total * 0.95) };
+  });
+  return { total, over };
 }
 
 const live = (m: InstanceMinute) => m.instance !== PRUNE_INSTANCE;
@@ -330,20 +362,24 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
   }
 
   // Slow routes: the 95th percentile of each route over the window is surely over the limit (more than 5% of its
-  // requests surely took longer). The latency buckets have bounds at the default limit and its error level, so
-  // there the count is exact; between two bounds it is a floor, and the text says "at least".
+  // requests surely took longer). The latency buckets have bounds at the default limit and its error level, and the
+  // recorder counts a manifest's own limit and error level exactly, so the count is exact; only from a minute
+  // without that exact count (an older release) is it a floor, and the text says "at least".
   const slow = new Set<string>();
   for (const [route, f] of recent.routes) {
-    const s = surelyOver(f, b.slowRouteMs);
-    if (s.total < b.minCalls || !s.is) continue;
+    const {
+      total,
+      over: [s, e],
+    } = overCounts(f, [b.slowRouteMs, b.errorFactor * b.slowRouteMs]);
+    if (total < b.minCalls || !s.is) continue;
     slow.add(route);
     out.push({
       key: `basic:slow-route:${route}`,
       kind: 'basic',
-      level: surelyOver(f, b.errorFactor * b.slowRouteMs).is ? 'error' : 'warn',
-      n: s.total,
+      level: e.is ? 'error' : 'warn',
+      n: total,
       source: sourceLine('slow-route'),
-      text: `${route} is slow: ${LATENCY_BOUNDS.includes(b.slowRouteMs) ? '' : 'at least '}${s.over} of its ${s.total} requests in the last ${window} (${pct(s.over / s.total)}) took longer than ${duration(b.slowRouteMs)}, so its 95th percentile is over that limit.`,
+      text: `${route} is slow: ${s.exact ? '' : 'at least '}${s.n} of its ${total} requests in the last ${window} (${pct(s.n / total)}) took longer than ${duration(b.slowRouteMs)}, so its 95th percentile is over that limit.`,
     });
   }
 
@@ -445,7 +481,8 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
     for (const [name, f] of now_) {
       const old = then.get(name);
       if (!old || name.endsWith('(other)') || f.count < b.minCalls || old.count < b.minRequests || old.p95Ms <= 0) continue;
-      if (kind === 'route' && slow.has(name)) continue; // already a slow-route basic
+      // A slow-route basic already, or over the limit without surely being slow: neither is drift.
+      if (kind === 'route' && (slow.has(name) || f.p95Ms > b.slowRouteMs)) continue;
       if (f.p95Ms < b.baselineMinMs || f.p95Ms < b.baselineFactor * old.p95Ms) continue;
       out.push({
         key: `drifting:${kind}:${name}`,

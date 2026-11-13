@@ -404,3 +404,42 @@ describe("round 2: the critics' findings on the rules", () => {
     expect(text).not.toContain('some-private-dir');
   });
 });
+
+describe("round 3: the critics' findings on the rules", () => {
+  const only = (minutes: InstanceMinute[], m: ManifestResult | null = null) =>
+    evaluate({ check: { at: NOW, manifest: m ? 'ok' : 'none', promises: [], probes: [], blind: [] }, minutes, manifest: m, prior: [], memory: {}, now: NOW });
+  /** Figures of `count` requests at `ms`, with the exact counts over `limits` that the recorder keeps for flight's own limits. */
+  const exact = (count: number, ms: number, limits: number[]): Figures => ({ ...fig(count, 0, ms), over: Object.fromEntries(limits.map((l) => [String(l), ms > l ? count : 0])) });
+  const basicsAndDrift = (r: { findings: FlightFinding[] }) => keys(r).filter((k) => /^(basic|drifting):/.test(k));
+
+  it.each([
+    [1200, 1500, '1.2 s'],
+    [300, 450, '300 ms'],
+    [900, 990, '900 ms'],
+  ])('M2: a slowRouteMs of %i ms between two bucket bounds is judged on the exact count over it (every request at %i ms)', (limit, ms, said) => {
+    const r = only([im('a', back(1), { requests: [['GET', '/x', exact(100, ms, [limit, 2 * limit])]] })], manifest({ basics: { slowRouteMs: limit } }));
+    expect(byKey(r, 'basic:slow-route:GET /x')).toMatchObject({ level: 'warn', state: 'open' });
+    expect(byKey(r, 'basic:slow-route:GET /x')!.text).toBe(`GET /x is slow: 100 of its 100 requests in the last 5 min (100%) took longer than ${said}, so its 95th percentile is over that limit.`);
+  });
+
+  it('M2: the error level between two bucket bounds is judged on the exact count over it too', () => {
+    const r = only([im('a', back(1), { requests: [['GET', '/x', exact(100, 650, [300, 600])]] })], manifest({ basics: { slowRouteMs: 300 } }));
+    expect(byKey(r, 'basic:slow-route:GET /x')!.level).toBe('error');
+  });
+
+  it('M2: a minute without the exact counts (an older release) still counts its whole buckets, and the text says "at least"', () => {
+    const r = only(
+      [im('a', back(2), { requests: [['GET', '/x', exact(50, 1500, [1200, 2400])]] }), im('b', back(1), { requests: [['GET', '/x', fig(50, 0, 1500)]] })],
+      manifest({ basics: { slowRouteMs: 1200 } }),
+    );
+    expect(byKey(r, 'basic:slow-route:GET /x')!.text).toMatch(/^GET \/x is slow: at least 50 of its 100 requests/);
+  });
+
+  it('L5: a route over the limit but not surely slow gets no drifting finding either', () => {
+    const minutes: InstanceMinute[] = [];
+    for (let n = 120; n >= 10; n--) minutes.push(im('a', back(n), { requests: [['GET', '/x', fig(10, 0, 90)]] }));
+    for (let n = 4; n >= 1; n--) minutes.push(im('a', back(n), { requests: [['GET', '/x', fig(10, 0, 480)]] }));
+    expect(basicsAndDrift(only(minutes))).toEqual(['drifting:route:GET /x']);
+    expect(basicsAndDrift(only(minutes, manifest({ basics: { slowRouteMs: 400 } })))).toEqual([]);
+  });
+});

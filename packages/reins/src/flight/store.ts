@@ -113,8 +113,9 @@ function storableJson(v: unknown, depth = 0): unknown {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   if (typeof v === 'boolean' || v === null) return v;
   if (depth > 32 || typeof v !== 'object') return undefined;
-  // As JSON.stringify does: a value with toJSON (a Date) is kept as what toJSON gives.
-  if (typeof (v as { toJSON?: unknown }).toJSON === 'function') {
+  // As JSON.stringify does: a value with toJSON (a Date) is kept as what toJSON gives. Only below the top level:
+  // the top level is a finding's `data`, which stays an object (a Date there keeps its own fields: none).
+  if (depth > 0 && typeof (v as { toJSON?: unknown }).toJSON === 'function') {
     try {
       return storableJson((v as { toJSON: () => unknown }).toJSON(), depth + 1);
     } catch {

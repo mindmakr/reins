@@ -9,7 +9,7 @@ import { appendFile, mkdir, rename, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { errorCode, untracked } from '../recorder.js';
 import { type Change, type FlightFinding, type Observation, plural } from './findings.js';
-import { sinkLimit } from './limits.js';
+import { SINK_LIMITS, sinkLimit } from './limits.js';
 import { sourceLine } from './sources.js';
 
 /** A finding as a sink gets it: no process keys unless the sink opted in. */
@@ -203,9 +203,14 @@ export function cutBytes(s: string, bytes: number): string {
 /** The longest delay a timer takes: a longer one fires at once. */
 const MAX_TIMER_MS = 2_147_483_647;
 
-/** A sink's own time limit, if it is a finite number above zero, kept within what a timer can wait; else the default. */
+/**
+ * A sink's own time limit, if it is a finite number above zero, raised to the floor of SINK_LIMITS.sinkTimeoutMs
+ * (a limit of 1 ms would fail every delivery) and kept within what a timer can wait; else the default. Its ceiling
+ * (600,000 ms) is not applied: it bounds the default for function and file sinks, while a webhook sink's own limit
+ * covers all its retries and back-offs, which may rightly take longer.
+ */
 function sinkTimeout(v: unknown): number {
-  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(Math.max(v, 1), MAX_TIMER_MS) : sinkLimit('sinkTimeoutMs', undefined);
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(Math.max(v, SINK_LIMITS.sinkTimeoutMs.min), MAX_TIMER_MS) : sinkLimit('sinkTimeoutMs', undefined);
 }
 
 const sleep = (ms: number) =>
@@ -458,7 +463,7 @@ export function createNotifier(sinksIn: unknown, o: NotifyOptions = {}) {
           level: 'warn',
           n: h.failures,
           source: sourceLine('sinks', true),
-          text: `Sink ${s.name} has failed its last ${h.failures === 1 ? 'delivery' : plural(h.failures, 'delivery', 'deliveries')} (${h.reason}), so findings may not reach it.`,
+          text: `Sink ${s.name} has failed its last ${plural(h.failures, 'delivery', 'deliveries')} (${h.reason}), so findings may not reach it.`,
         });
       }
       return out;

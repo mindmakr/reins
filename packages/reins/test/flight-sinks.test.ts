@@ -460,6 +460,13 @@ describe("round 2: the critics' findings on sinks and the notifier", () => {
     expect(n.stats()).toMatchObject({ sent: 2, failed: 0 });
   });
 
+  it('N1: a sink time limit under the 100 ms floor is raised to it', async () => {
+    const n = createNotifier([{ name: 'quick', timeoutMs: 1, send: () => new Promise((r) => setTimeout(r, 30)) }], { daily: false });
+    n.dispatch(n.plan([{ event: 'opened', finding: finding() }], undefined, Date.now(), 'api').deliveries);
+    await n.idle();
+    expect(n.stats()).toMatchObject({ sent: 1, failed: 0 });
+  });
+
   it('N1, S3 and S4: tags are copied, file names "." and ".." are refused, only a folder named .reins gets a .gitignore, one failure is singular', async () => {
     const f = finding({ tags: ['security'] });
     expect(sinkView(f).tags).toEqual(['security']);
@@ -471,20 +478,20 @@ describe("round 2: the critics' findings on sinks and the notifier", () => {
     const n = createNotifier([{ name: 'bad', send: () => Promise.reject(new SinkError('status-500')) }], { daily: false, failures: 1 });
     n.dispatch(n.plan([{ event: 'opened', finding: finding() }], undefined, Date.now(), 'api').deliveries);
     await n.idle();
-    expect(n.health()[0].text).toBe('Sink bad has failed its last delivery (status-500), so findings may not reach it.');
+    expect(n.health()[0].text).toBe('Sink bad has failed its last 1 delivery (status-500), so findings may not reach it.');
   });
 });
 
 describe("round 2: the critics' findings on store outages", () => {
   /** A store that can go down (every call rejects), whose lock `takeover` takes as if the holder's lease ran out, and whose findings write can be slow. */
   function flaky(base: FlightStore = memoryStore()) {
-    const ctl = { down: false, takeover: '', slowWrite: 0 };
+    const ctl = { down: false, takeover: '', slowWrite: 0, fail: '' };
     const store = new Proxy(base, {
       get(t, k) {
         const v = (t as any)[k];
         if (typeof v !== 'function') return v;
         return async (...a: unknown[]) => {
-          if (ctl.down) throw Object.assign(new Error('down'), { code: 'ECONNREFUSED' });
+          if (ctl.down || ctl.fail === k) throw Object.assign(new Error('down'), { code: 'ECONNREFUSED' });
           if (k === 'lock' && ctl.takeover && String(a[0]).startsWith(ctl.takeover)) a = [a[0], a[1], Date.now() + 10 * MIN];
           if (k === 'putFindings' && ctl.slowWrite) await new Promise((r) => setTimeout(r, ctl.slowWrite));
           return v.apply(t, a);
@@ -518,25 +525,129 @@ describe("round 2: the critics' findings on store outages", () => {
     expect(t.got).toEqual(['one: opened blind:lock-unavailable', 'two: resolved blind:lock-unavailable']);
   });
 
-  it('M2: with the store down from boot, instances that never held the lock tell nothing twice; the outage is told once', async () => {
+  /** A clock the test moves on: flight, the store's lock and the findings all read Date.now. */
+  function clock() {
+    const c = { now: Date.UTC(2026, 10, 14, 12, 0, 30) };
+    vi.spyOn(Date, 'now').mockImplementation(() => c.now);
+    onTestFinished(() => void vi.restoreAllMocks());
+    return c;
+  }
+  /** One round: each server runs a pass and delivers, then the clock moves on a minute (one period). */
+  async function round(c: { now: number }, ...fs: Flight[]) {
+    for (const f of fs) await checkAndDeliver(f);
+    c.now += MIN;
+  }
+
+  it('H1: one server whose store is down from boot tells the outage once it has lasted the lock lease, and its end', async () => {
+    const c = clock();
+    const { store, ctl } = flaky();
+    ctl.down = true;
+    const t = told();
+    const { f } = started([t.as('srv')], { store });
+    for (let i = 0; i < 3; i++) await round(c, f);
+    // Two minutes in: shorter than the lease (three periods of at least a minute), so a holder could still tell it.
+    expect(t.got).toEqual([]);
+    expect(f.findings().find((x) => x.key === 'blind:lock-unavailable')?.state).toBe('open');
+    for (let i = 0; i < 3; i++) await round(c, f);
+    expect(t.got).toEqual(['srv: opened blind:lock-unavailable']);
+    ctl.down = false;
+    for (let i = 0; i < 3; i++) await round(c, f);
+    expect(t.got).toEqual(['srv: opened blind:lock-unavailable', 'srv: resolved blind:lock-unavailable']);
+  });
+
+  it('H1: two servers whose store is down from boot each tell the outage at most once, and its end is told once', async () => {
+    const c = clock();
     const { store, ctl } = flaky();
     ctl.down = true;
     const t = told();
     const one = started([t.as('one')], { store, instance: 'one' }).f;
     const two = started([t.as('two')], { store, instance: 'two' }).f;
-    for (let i = 0; i < 3; i++) {
-      await checkAndDeliver(one);
-      await checkAndDeliver(two);
-    }
-    // Each still shows it in its own findings and report.
-    expect(one.findings().find((x) => x.key === 'blind:lock-unavailable')?.state).toBe('open');
-    expect(t.got).toEqual([]);
+    for (let i = 0; i < 6; i++) await round(c, one, two);
     ctl.down = false;
-    for (let i = 0; i < 3; i++) {
-      await checkAndDeliver(one);
-      await checkAndDeliver(two);
-    }
-    expect(t.got).toEqual(['one: resolved blind:lock-unavailable']);
+    for (let i = 0; i < 4; i++) await round(c, one, two);
+    expect(t.got).toEqual(['one: opened blind:lock-unavailable', 'two: opened blind:lock-unavailable', 'one: resolved blind:lock-unavailable']);
+    expect((await store.findings()).find((x) => x.key === 'blind:lock-unavailable')?.state).toBe('resolved');
+  });
+
+  it('H1: a store that comes back before the lease has run tells nothing, and no unpaired "resolved"', async () => {
+    const c = clock();
+    const { store, ctl } = flaky();
+    ctl.down = true;
+    const t = told();
+    const one = started([t.as('one')], { store, instance: 'one' }).f;
+    const two = started([t.as('two')], { store, instance: 'two' }).f;
+    for (let i = 0; i < 2; i++) await round(c, one, two);
+    ctl.down = false;
+    for (let i = 0; i < 4; i++) await round(c, one, two);
+    expect(t.got).toEqual([]);
+  });
+
+  it('L2 and L3: a server that told an outage hands it over to the holder, and a failed hand-over is not a lock failure', async () => {
+    const c = clock();
+    const base = memoryStore();
+    const a = flaky(base);
+    const b = flaky(base);
+    const t = told();
+    const one = started([t.as('one')], { store: a.store, instance: 'one' }).f;
+    const two = started([t.as('two')], { store: b.store, instance: 'two' }).f;
+    await checkAndDeliver(one);
+    b.ctl.down = true;
+    for (let i = 0; i < 4; i++) await round(c, one, two);
+    expect(t.got).toEqual(['two: opened blind:lock-unavailable']);
+    b.ctl.down = false;
+    b.ctl.fail = 'findings';
+    expect(await two.checkNow()).toBeNull();
+    b.ctl.fail = '';
+    for (let i = 0; i < 2; i++) await round(c, two, one);
+    expect(t.got).toEqual(['two: opened blind:lock-unavailable', 'one: resolved blind:lock-unavailable']);
+  });
+
+  it('M1: after a time-out, the late findings write tells only what the time-out step had not told', async () => {
+    const { store, ctl } = flaky();
+    const t = told();
+    const bad = { name: 'bad', send: () => Promise.reject(new SinkError('status-500')) };
+    const { f } = started([bad, t.as('srv')], { store, checkTimeoutMs: 200, notify: { failures: 1 }, manifest: { schema: 1, service: 'x', processes: 'not a list' } });
+    await checkAndDeliver(f);
+    expect(t.got).toEqual(['srv: opened blind:manifest-invalid']);
+    ctl.slowWrite = 400;
+    await f.checkNow();
+    await new Promise((r) => setTimeout(r, 700));
+    await f.sinksIdle();
+    ctl.slowWrite = 0;
+    await checkAndDeliver(f);
+    expect(t.got.filter((x) => x.includes('blind:sink:bad'))).toEqual(['srv: opened blind:sink:bad']);
+  });
+
+  it('L1: a late findings write tells nothing when another server holds the lock by then', async () => {
+    const base = memoryStore();
+    const a = flaky(base);
+    const b = flaky(base);
+    b.ctl.takeover = 'B-';
+    const t = told();
+    const A = started([t.as('A')], { store: a.store, instance: 'A', checkTimeoutMs: 200 }).f;
+    const B = started([t.as('B')], { store: b.store, instance: 'B' }).f;
+    await checkAndDeliver(A);
+    await errors(base, 40, 10);
+    a.ctl.slowWrite = 500;
+    expect((await A.checkNow())?.blind.map((x) => x.kind)).toEqual(['store-unreachable']);
+    await checkAndDeliver(B);
+    await new Promise((r) => setTimeout(r, 700));
+    await A.sinksIdle();
+    expect(t.got.filter((x) => x.includes('basic:error-share'))).toEqual(['B: opened basic:error-share']);
+  });
+
+  it('L4: a findings write that lands after stop() tells no sink', async () => {
+    const { store, ctl } = flaky();
+    const t = told();
+    const { f } = started([t.as('srv')], { store });
+    await errors(store, 40, 10);
+    ctl.slowWrite = 300;
+    const p = f.checkNow();
+    await new Promise((r) => setTimeout(r, 100));
+    f.stop();
+    await p;
+    await new Promise((r) => setTimeout(r, 400));
+    expect(t.got).toEqual([]);
   });
 
   it('M3: a pass whose findings write outlives the time limit still tells what it wrote, once', async () => {
