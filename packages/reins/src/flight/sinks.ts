@@ -5,11 +5,10 @@
 // Sinks get counts, never process keys, unless the app opts a sink in (C6).
 // Imports: Node built-ins and reins' shared modules only (the flight safety test walks this file).
 import { createHmac, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { appendFile, rename, stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { appendFile, mkdir, rename, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { errorCode, untracked } from '../recorder.js';
-import type { Change, FlightFinding, Observation } from './findings.js';
+import { type Change, type FlightFinding, type Observation, plural } from './findings.js';
 import { sinkLimit } from './limits.js';
 import { sourceLine } from './sources.js';
 
@@ -71,10 +70,10 @@ export const HELD_KEPT = 20;
 /** Open findings listed in a daily summary at most. */
 const SUMMARY_KEPT = 50;
 
-/** The finding as `sink` may see it. */
+/** The finding as `sink` may see it: a copy, so a sink that changes it changes nothing of flight's. */
 export function sinkView(f: FlightFinding, keys = false): SinkFinding {
-  const { keys: k, ...rest } = f;
-  return keys && k?.length ? { ...rest, keys: [...k] } : rest;
+  const { keys: k, tags, ...rest } = f;
+  return { ...rest, ...(tags ? { tags: [...tags] } : {}), ...(keys && k?.length ? { keys: [...k] } : {}) };
 }
 
 // ---- the three sinks --------------------------------------------------------------------------------------
@@ -103,19 +102,23 @@ export interface FileSinkOptions {
   maxBytes?: number;
 }
 
+/** A file name of the file sink: letters, digits, `.`, `_` and `-`, and not `.` or `..`. */
+const FILE_NAME = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/;
+
 /** One JSON line per notification, by default in `.reins/flight/notifications.jsonl`; owner-only file modes. */
 export function fileSink(o: FileSinkOptions = {}): FlightSink {
   const dir = typeof o.dir === 'string' && o.dir ? o.dir : join(process.cwd(), '.reins', 'flight');
-  const file = join(dir, typeof o.file === 'string' && /^[A-Za-z0-9._-]{1,100}$/.test(o.file) ? o.file : 'notifications.jsonl');
+  const file = join(dir, typeof o.file === 'string' && FILE_NAME.test(o.file) ? o.file : 'notifications.jsonl');
   const max = sinkLimit('fileMaxBytes', o.maxBytes);
   return {
     name: o.name || 'file',
     ...(o.keys ? { keys: true } : {}),
+    // Every file call is asynchronous: a send runs in the background, and must not hold the event loop.
     async send(n) {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      // As the bridge and the file store do: the .reins folder holds its own .gitignore.
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      // As the bridge and the file store do: a folder named .reins holds its own .gitignore ('wx': never replaced).
       const top = dirname(dir);
-      if (top.endsWith('.reins') && !existsSync(join(top, '.gitignore'))) writeFileSync(join(top, '.gitignore'), '*\n', { mode: 0o600 });
+      if (basename(top) === '.reins') await writeFile(join(top, '.gitignore'), '*\n', { mode: 0o600, flag: 'wx' }).catch(() => {});
       try {
         if ((await stat(file)).size >= max) await rename(file, `${file}.1`);
       } catch {}
@@ -180,7 +183,29 @@ export function fitBody(n: Notification, max: number): string {
   const short = (s: string) => (s.length > 500 ? `${s.slice(0, 500)}...` : s);
   cut = { ...cut, text: short(cut.text), ...(cut.finding ? { finding: { ...cut.finding, text: short(cut.finding.text), keys: undefined, why: undefined } } : {}) };
   if (Buffer.byteLength((body = JSON.stringify(cut))) <= max) return body;
-  return JSON.stringify({ type: n.type, service: n.service.slice(0, 100), at: n.at, text: n.text.slice(0, Math.max(0, max - 300)), truncated: true });
+  // The bare line: the text cut by bytes (as JSON writes it, escapes included) until the body fits.
+  const bare = (text: string) => JSON.stringify({ type: n.type, service: cutBytes(String(n.service), 100), at: n.at, text, truncated: true });
+  let text = cutBytes(String(n.text), Math.max(0, max - Buffer.byteLength(bare(''))));
+  while (Buffer.byteLength((body = bare(text))) > max && text) text = cutBytes(text, Math.max(0, Buffer.byteLength(text) - (Buffer.byteLength(body) - max)));
+  return body;
+}
+
+/** `s` cut to at most `bytes` bytes of UTF-8, never inside a character. */
+export function cutBytes(s: string, bytes: number): string {
+  if (Buffer.byteLength(s) <= bytes) return s;
+  const b = Buffer.from(s, 'utf8');
+  let end = Math.max(0, Math.floor(bytes));
+  // Back to the start of a character: continuation bytes are 10xxxxxx.
+  while (end > 0 && (b[end] & 0xc0) === 0x80) end--;
+  return b.subarray(0, end).toString('utf8');
+}
+
+/** The longest delay a timer takes: a longer one fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** A sink's own time limit, if it is a finite number above zero, kept within what a timer can wait; else the default. */
+function sinkTimeout(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(Math.max(v, 1), MAX_TIMER_MS) : sinkLimit('sinkTimeoutMs', undefined);
 }
 
 const sleep = (ms: number) =>
@@ -321,8 +346,10 @@ export function normaliseSinks(list: unknown): FlightSink[] {
   for (const [i, s] of (Array.isArray(list) ? list : list ? [list] : []).entries()) {
     const sink: FlightSink | null = typeof s === 'function' ? functionSink(s as (n: Notification) => unknown) : s && typeof s === 'object' && typeof (s as FlightSink).send === 'function' ? (s as FlightSink) : null;
     if (!sink) continue;
-    let name = typeof sink.name === 'string' && NAME.test(sink.name) ? sink.name : `sink-${i + 1}`;
-    for (let k = 2; names.has(name); k++) name = `${sink.name}-${k}`.slice(0, 40);
+    const base = typeof sink.name === 'string' && NAME.test(sink.name) ? sink.name : `sink-${i + 1}`;
+    let name = base;
+    // The base is cut before the suffix, so a name of 40 characters still gets a new one.
+    for (let k = 2; names.has(name); k++) name = `${base.slice(0, 40 - String(k).length - 1)}-${k}`;
     names.add(name);
     out.push(name === sink.name ? sink : { ...sink, name, send: sink.send.bind(sink) });
   }
@@ -361,8 +388,11 @@ export function createNotifier(sinksIn: unknown, o: NotifyOptions = {}) {
   const queueLimit = sinkLimit('sinkQueue', undefined);
   const health = new Map<string, Health>();
   const chains = new Map<string, Promise<void>>();
+  /** Notifications queued or being sent, per sink. */
   const pending = new Map<string, number>();
-  const counts = { sent: 0, failed: 0 };
+  /** Sinks whose last call ran past its time limit and has not settled: no new call starts until it does. */
+  const stuck = new Set<string>();
+  const counts = { sent: 0, failed: 0, skipped: 0 };
 
   function failed(sink: FlightSink, reason: string) {
     counts.failed++;
@@ -380,13 +410,24 @@ export function createNotifier(sinksIn: unknown, o: NotifyOptions = {}) {
       return;
     }
     pending.set(sink.name, waiting + 1);
-    const limit = typeof sink.timeoutMs === 'number' && sink.timeoutMs > 0 ? sink.timeoutMs : sinkLimit('sinkTimeoutMs', undefined);
+    const limit = sinkTimeout(sink.timeoutMs);
     const run = async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
+        // A call that ran past its time limit may still be running: calling the sink again would pile calls up
+        // (as with the store, u3). This notification is skipped and counted as a failed delivery instead.
+        if (stuck.has(sink.name)) {
+          counts.skipped++;
+          throw new SinkError('busy');
+        }
         const sent = Promise.resolve().then(() => sink.send(n));
         const late = new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new SinkError('timeout')), limit);
+          timer = setTimeout(() => {
+            stuck.add(sink.name);
+            const settled = () => stuck.delete(sink.name);
+            sent.then(settled, settled);
+            reject(new SinkError('timeout'));
+          }, limit);
           (timer as any).unref?.();
         });
         await Promise.race([sent, late]);
@@ -417,7 +458,7 @@ export function createNotifier(sinksIn: unknown, o: NotifyOptions = {}) {
           level: 'warn',
           n: h.failures,
           source: sourceLine('sinks', true),
-          text: `Sink ${s.name} has failed its last ${h.failures} deliveries (${h.reason}), so findings may not reach it.`,
+          text: `Sink ${s.name} has failed its last ${h.failures === 1 ? 'delivery' : plural(h.failures, 'delivery', 'deliveries')} (${h.reason}), so findings may not reach it.`,
         });
       }
       return out;
@@ -494,7 +535,8 @@ export function createNotifier(sinksIn: unknown, o: NotifyOptions = {}) {
     idle: async (): Promise<void> => {
       for (let i = 0; i < 5; i++) await Promise.all([...chains.values()]);
     },
-    stats: () => ({ ...counts, pending: [...pending.values()].reduce((a, x) => a + x, 0) }),
+    /** Deliveries sent and failed (skipped ones among them), and notifications queued or still running, a call that ran past its time limit included. */
+    stats: () => ({ ...counts, pending: [...pending.values()].reduce((a, x) => a + x, 0) + stuck.size }),
   };
 }
 

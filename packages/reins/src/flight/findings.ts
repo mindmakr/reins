@@ -5,7 +5,7 @@
 // get them only when the app opts in (C6, sinks.ts).
 // Imports: reins' shared modules only (the flight safety test walks this file).
 import type { Finding } from '../report.js';
-import { LATENCY_BOUNDS, type Figures } from '../recorder.js';
+import { bucketP95, bucketsOver, LATENCY_BOUNDS, type Figures } from '../recorder.js';
 import type { BlindFact, CheckResult, PromiseCheck } from './checker.js';
 import { type Basics, basicsOf } from './limits.js';
 import { DEFAULT_WINDOW_MS, type FlightManifest, type ManifestResult } from './manifest.js';
@@ -119,7 +119,8 @@ export function duration(ms: number): string {
   return `${Math.round(ms / (24 * HOUR))} days`;
 }
 const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
-const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/** `1 step`, `2 steps`: a count and its noun. */
+export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const utc = (t: number) => new Date(t).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
 /** A name from a record, made safe for a line of text and a key: no control characters, at most 120 characters. */
 const nm = (s: unknown) => storableText(String(s)).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120);
@@ -155,18 +156,21 @@ function addFigures(m: Merged, f: Figures) {
 /** The 95th percentile of the added figures: the bound of the bucket that holds it, capped at the maximum. */
 function p95(m: Merged): number {
   const b = bucketsOf.get(m);
-  let out = fallbackP95.get(m) || 0;
-  if (b) {
-    const total = b.reduce((a, x) => a + x, 0);
-    for (let i = 0, seen = 0; i < b.length; i++) {
-      seen += b[i];
-      if (total && seen >= Math.ceil(total * 0.95)) {
-        out = Math.max(out, Math.min(LATENCY_BOUNDS[i], m.maxMs));
-        break;
-      }
-    }
-  }
-  return out;
+  const out = fallbackP95.get(m) || 0;
+  if (!b) return out;
+  const total = b.reduce((a, x) => a + x, 0);
+  return total ? Math.max(out, bucketP95(b, total, m.maxMs)) : out;
+}
+
+/**
+ * Whether the 95th percentile of the added figures is surely over `ms`: more than 5% of them sit in buckets whose
+ * lower bound is `ms` or more. Only figures kept in buckets count, so a bucket bound never overstates a time.
+ */
+function surelyOver(m: Merged, ms: number): { total: number; over: number; is: boolean } {
+  const b = bucketsOf.get(m);
+  const total = b ? b.reduce((a, x) => a + x, 0) : 0;
+  const over = b ? bucketsOver(b, ms) : 0;
+  return { total, over, is: total > 0 && total - over < Math.ceil(total * 0.95) };
 }
 
 const live = (m: InstanceMinute) => m.instance !== PRUNE_INSTANCE;
@@ -195,7 +199,7 @@ function figuresIn(minutes: InstanceMinute[], from: number, to: number) {
 
 // ---- the rules -------------------------------------------------------------------------------------------
 
-function blindObservation(f: BlindFact, b: Basics): Observation {
+function blindObservation(f: BlindFact, b: Basics): Observation | undefined {
   switch (f.kind) {
     case 'manifest-invalid': {
       const first = f.problems[0];
@@ -318,23 +322,28 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
     out.push({
       key: 'basic:error-share',
       kind: 'basic',
-      level: b.errorShare > 0 && share >= Math.min(1, 2 * b.errorShare) ? 'error' : 'warn',
+      level: b.errorShare > 0 && share >= Math.min(1, b.errorFactor * b.errorShare) ? 'error' : 'warn',
       n: all.errors,
       source: sourceLine('error-share', true),
       text: `${pct(share)} of requests failed in the last ${window} (${all.errors} of ${all.count}), over the limit of ${pct(b.errorShare)}.`,
     });
   }
 
-  // Slow routes: the 95th percentile of each route over the window.
+  // Slow routes: the 95th percentile of each route over the window is surely over the limit (more than 5% of its
+  // requests surely took longer). The latency buckets have bounds at the default limit and its error level, so
+  // there the count is exact; between two bounds it is a floor, and the text says "at least".
+  const slow = new Set<string>();
   for (const [route, f] of recent.routes) {
-    if (f.count < b.minCalls || f.p95Ms <= b.slowRouteMs) continue;
+    const s = surelyOver(f, b.slowRouteMs);
+    if (s.total < b.minCalls || !s.is) continue;
+    slow.add(route);
     out.push({
       key: `basic:slow-route:${route}`,
       kind: 'basic',
-      level: f.p95Ms >= 2 * b.slowRouteMs ? 'error' : 'warn',
-      n: f.count,
+      level: surelyOver(f, b.errorFactor * b.slowRouteMs).is ? 'error' : 'warn',
+      n: s.total,
       source: sourceLine('slow-route'),
-      text: `${route} is slow: 95% of its ${f.count} requests in the last ${window} took up to ${duration(f.p95Ms)}, over the limit of ${duration(b.slowRouteMs)}.`,
+      text: `${route} is slow: ${LATENCY_BOUNDS.includes(b.slowRouteMs) ? '' : 'at least '}${s.over} of its ${s.total} requests in the last ${window} (${pct(s.over / s.total)}) took longer than ${duration(b.slowRouteMs)}, so its 95th percentile is over that limit.`,
     });
   }
 
@@ -345,7 +354,7 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
     out.push({
       key: `basic:upstream:${host}`,
       kind: 'basic',
-      level: share >= Math.min(1, 2 * b.upstreamErrorShare) ? 'error' : 'warn',
+      level: share >= Math.min(1, b.errorFactor * b.upstreamErrorShare) ? 'error' : 'warn',
       n: f.errors,
       source: sourceLine('upstream', true),
       text: `Upstream ${host} is failing: ${f.errors} of ${f.count} calls in the last ${window} failed (${pct(share)}), over the limit of ${pct(b.upstreamErrorShare)}.`,
@@ -354,7 +363,12 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
 
   // A blocked event loop: per instance, minutes whose 99th percentile delay was over the limit.
   const perInstance = new Map<string, InstanceMinute[]>();
-  for (const m of minutes) if (live(m) && m.basics?.runtime) perInstance.set(m.instance, [...(perInstance.get(m.instance) || []), m]);
+  for (const m of minutes) {
+    if (!live(m) || !m.basics?.runtime) continue;
+    const list = perInstance.get(m.instance);
+    if (list) list.push(m);
+    else perInstance.set(m.instance, [m]);
+  }
   let blocked = 0;
   let worst = 0;
   let worstMinutes = 0;
@@ -363,7 +377,8 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
     if (over.length < b.loopMinutes) continue;
     blocked++;
     worstMinutes = Math.max(worstMinutes, over.length);
-    worst = Math.max(worst, ...over.map((m) => Number(m.basics!.runtime!.eventLoop.p99Ms) || 0));
+    // Loops, not a spread: a spread of a store-sized list throws.
+    for (const m of over) worst = Math.max(worst, Number(m.basics!.runtime!.eventLoop.p99Ms) || 0);
   }
   if (blocked)
     out.push({
@@ -381,13 +396,13 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
     const inWindow = list.filter((m) => m.minute >= now - b.heapWindowMs).sort((x, y) => x.minute - y.minute);
     const heap = inWindow.map((m) => Number(m.basics!.runtime!.heapUsedMb) || 0);
     // Enough minutes, spread over most of the window, so a warm-up is not read as a leak.
-    if (heap.length < 9 || inWindow[inWindow.length - 1].minute - inWindow[0].minute < 0.8 * b.heapWindowMs - MIN) continue;
+    if (heap.length < b.heapMinutes || inWindow[inWindow.length - 1].minute - inWindow[0].minute < b.heapSpread * b.heapWindowMs - MIN) continue;
     const third = Math.floor(heap.length / 3);
     const first = heap.slice(0, third);
     const last = heap.slice(-third);
     const a = first.reduce((s, x) => s + x, 0) / first.length;
     const z = last.reduce((s, x) => s + x, 0) / last.length;
-    if (a > 0 && z / a - 1 >= b.heapGrowth && Math.min(...last) > Math.max(...first)) {
+    if (a > 0 && z / a - 1 >= b.heapGrowth && last.reduce((x, y) => Math.min(x, y), Infinity) > first.reduce((x, y) => Math.max(x, y), -Infinity)) {
       growing++;
       if (!line) line = ` (instance ${nm(instance)}: from about ${Math.round(a)} MB to ${Math.round(z)} MB)`;
     }
@@ -405,8 +420,9 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
   const refused = all.refused;
   const r = Object.values(refused).reduce((s, x) => s + x, 0);
   if (r >= b.refusedMin) {
-    const before = figuresIn(minutes, from - HOUR, from);
-    const covered = new Set(minutes.filter((m) => live(m) && m.basics && m.minute >= from - HOUR && m.minute < from).map((m) => m.minute)).size;
+    const look = b.refusedLookbackMs;
+    const before = figuresIn(minutes, from - look, from);
+    const covered = new Set(minutes.filter((m) => live(m) && m.basics && m.minute >= from - look && m.minute < from).map((m) => m.minute)).size;
     const past = Object.values(before.all.refused).reduce((s, x) => s + x, 0);
     const usual = covered ? (past / covered) * (b.recentMs / MIN) : 0;
     if (r >= b.refusedFactor * usual) {
@@ -418,7 +434,7 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
         tags: ['security'],
         n: r,
         source: sourceLine('refused', true),
-        text: `Refused responses spiked: ${r} with status 401, 403 or 429 in the last ${window} (${parts}), against about ${Math.round(usual)} in the same time over the hour before. Refused sign-ins or a client being rate limited?`,
+        text: `Refused responses spiked: ${r} with status 401, 403 or 429 in the last ${window} (${parts}), against about ${Math.round(usual)} in the same time over the ${look === HOUR ? 'hour' : duration(look)} before. Refused sign-ins or a client being rate limited?`,
       });
     }
   }
@@ -429,7 +445,7 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
     for (const [name, f] of now_) {
       const old = then.get(name);
       if (!old || name.endsWith('(other)') || f.count < b.minCalls || old.count < b.minRequests || old.p95Ms <= 0) continue;
-      if (kind === 'route' && f.p95Ms > b.slowRouteMs) continue; // already a slow-route basic
+      if (kind === 'route' && slow.has(name)) continue; // already a slow-route basic
       if (f.p95Ms < b.baselineMinMs || f.p95Ms < b.baselineFactor * old.p95Ms) continue;
       out.push({
         key: `drifting:${kind}:${name}`,
@@ -479,7 +495,8 @@ function manifestRules(minutes: InstanceMinute[], m: FlightManifest, check: Chec
   }
 
   // How long flight has been recording: the oldest minute any instance wrote.
-  const oldest = Math.min(...minutes.filter(live).map((x) => x.minute));
+  let oldest = Infinity;
+  for (const x of minutes) if (live(x) && x.minute < oldest) oldest = x.minute;
   for (const p of m.processes) {
     const mine = [...counts].filter(([k]) => k.startsWith(`${p.name} `));
     const runs = check.promises.filter((c) => c.process === p.name).reduce((s, c) => s + c.runs, 0);
@@ -563,6 +580,13 @@ function codeRules(minutes: InstanceMinute[], now: number, b: Basics, memory: Fi
 
 const levelRank = (l: string) => (l === 'error' ? 0 : 1);
 
+/** Blind keys every pass judges: the store, the lock and the manifest. */
+const STORE_BLIND = ['blind:store-unreachable', 'blind:lock-unavailable', 'blind:manifest-invalid'];
+/** Blind keys the checker knows only from a valid manifest (or knows to be gone, with none). */
+const MANIFEST_BLIND = ['blind:steps-dropped:', 'blind:overdue-pruned:', 'blind:runs-partial:', 'blind:markers-dropped:', 'blind:no-instance', 'blind:probe-stale:', 'blind:probe-not-registered:', 'blind:probe-not-declared:'];
+/** The keys of the rules that read the manifest and the minutes (manifestRules). */
+const MANIFEST_RULES = ['unusual:process:', 'unusual:step:', 'unusual:silent:', 'unusual:host:', 'blind:no-steps:'];
+
 /** Findings in report order: open first, then by kind order, level, and key. */
 export function sortFindings(list: FlightFinding[]): FlightFinding[] {
   return [...list].sort(
@@ -588,35 +612,46 @@ export function evaluate(input: EvaluateInput): EvaluateResult {
   const m = input.manifest?.ok ? input.manifest.manifest : undefined;
   const b = basicsOf(m?.basics);
   const blindOk = !check.blind.some((f) => f.kind === 'store-unreachable' || f.kind === 'lock-unavailable');
+  // Each rule runs on its own and judges its keys only when it ran to its end: a rule that fails keeps its
+  // findings as they were and never stops the others.
+  const rule = (prefixes: string[], fn: () => void) => {
+    try {
+      fn();
+      judgedPrefixes.push(...prefixes);
+    } catch {}
+  };
 
-  try {
-    for (const f of check.blind) obs.push(blindObservation(f, b));
-    // The blind facts of a full pass are complete; in a pass that could not read the store, only the facts
-    // about the store, the lock and the manifest are known.
-    judgedPrefixes.push(...(blindOk ? ['blind:'] : ['blind:store-unreachable', 'blind:lock-unavailable', 'blind:manifest-invalid']));
-    if (m) {
-      promiseRules(check, m, b, obs, judged);
+  // The blind facts the checker reports: those about the store, the lock and the manifest in every pass; the
+  // store's write failures when it could be read; and the ones about processes and probes only when there is a
+  // manifest to know them from (with none, there are no processes, so any left from before resolve).
+  rule([...STORE_BLIND, ...(blindOk ? ['blind:store-write-failed'] : []), ...(blindOk && check.manifest !== 'invalid' ? MANIFEST_BLIND : [])], () => {
+    for (const f of check.blind) {
+      const o = blindObservation(f, b);
+      if (o) obs.push(o);
+    }
+  });
+  if (m)
+    rule([], () => {
+      const mine = new Set<string>();
+      promiseRules(check, m, b, obs, mine);
       // A promise or probe no longer in the manifest: its finding resolves.
       if (blindOk) {
         const keys = new Set([...check.promises.map((c) => `promise:${nm(c.process)}:${nm(c.id)}`), ...check.probes.map((p) => `probe:${nm(p.id)}`)]);
-        for (const f of input.prior) if ((f.key.startsWith('promise:') || f.key.startsWith('probe:') || f.key.startsWith('drifting:promise:')) && !keys.has(f.key.replace(/^drifting:/, ''))) judged.add(f.key);
+        for (const f of input.prior) if ((f.key.startsWith('promise:') || f.key.startsWith('probe:') || f.key.startsWith('drifting:promise:')) && !keys.has(f.key.replace(/^drifting:/, ''))) mine.add(f.key);
       }
-    } else if (check.manifest === 'none' && blindOk) judgedPrefixes.push('promise:', 'probe:', 'drifting:promise:');
-    if (input.minutes) {
-      const minutes = input.minutes;
-      basicRules(minutes, now, b, obs);
-      codeRules(minutes, now, b, memory, obs);
-      judgedPrefixes.push('basic:', 'drifting:route:', 'drifting:upstream:', 'unusual:code:', 'security:');
-      if (m) {
-        manifestRules(minutes, m, check, now, b, obs);
-        judgedPrefixes.push('unusual:', 'blind:no-steps:');
-      } else if (check.manifest === 'none') judgedPrefixes.push('unusual:', 'blind:no-steps:');
-    }
-    for (const x of input.extra || []) obs.push(x);
-    judgedPrefixes.push('blind:sink:');
-  } catch {
-    // A rule that fails never stops the others' findings from being kept as they were.
+      for (const k of mine) judged.add(k);
+    });
+  else if (check.manifest === 'none' && blindOk) judgedPrefixes.push('promise:', 'probe:', 'drifting:promise:');
+  if (input.minutes) {
+    const minutes = input.minutes;
+    rule(['basic:', 'drifting:route:', 'drifting:upstream:'], () => basicRules(minutes, now, b, obs));
+    rule(['unusual:code:', 'security:'], () => codeRules(minutes, now, b, memory, obs));
+    if (m) rule(MANIFEST_RULES, () => manifestRules(minutes, m, check, now, b, obs));
+    else if (check.manifest === 'none') judgedPrefixes.push(...MANIFEST_RULES);
   }
+  rule(['blind:sink:'], () => {
+    for (const x of input.extra || []) obs.push(x);
+  });
 
   const isJudged = (key: string) => judged.has(key) || judgedPrefixes.some((p) => key.startsWith(p));
   const prior = new Map(input.prior.map((f) => [f.key, f]));

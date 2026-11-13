@@ -99,13 +99,27 @@ function loadManifest(m: unknown): ManifestResult | null {
 
 const SERVICE = /^[\x20-\x7e]{1,64}$/;
 
-/** Findings kept while the store could not be written, laid over the stored ones until a pass writes again. */
-function mergePrior(stored: FindingRecord[], outage: { at: number; findings: FlightFinding[] } | null): FlightFinding[] {
+let lastStamp = 0;
+/** `t`, or one more than the last stamp given in this process: what the store and the outage entries order by. */
+function stamp(t: number): number {
+  lastStamp = Math.max(t, lastStamp + 1);
+  return lastStamp;
+}
+
+/** A finding that changed while the store could not be written, as this server last saw it, and when. */
+interface OutageEntry {
+  at: number;
+  finding: FlightFinding;
+}
+
+/** The outage findings an instance that does not hold the lock keeps: only the store's own, which it saw itself. */
+const STORE_KEYS = new Set(['blind:store-unreachable', 'blind:lock-unavailable']);
+
+/** The stored findings, with the ones that changed during an outage laid over them where they are newer. */
+function mergePrior(stored: FindingRecord[], outage: Map<string, OutageEntry>): FlightFinding[] {
   const out = new Map(fromRecords(stored).map((f) => [f.key, f]));
-  if (outage) {
-    const at = new Map(stored.map((r) => [r.key, r.updatedAt]));
-    for (const f of outage.findings) if (!at.has(f.key) || (at.get(f.key) as number) < outage.at) out.set(f.key, f);
-  }
+  const at = new Map(stored.map((r) => [r.key, r.updatedAt]));
+  for (const [key, e] of outage) if (!at.has(key) || (at.get(key) as number) < e.at) out.set(key, e.finding);
   return [...out.values()];
 }
 
@@ -143,9 +157,17 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     /** The findings as this server last knew them, and the findings layer's memory. */
     findings: FlightFinding[];
     memory: FindingsMemory;
-    /** Findings of passes that could not write the store, laid over the stored ones until a pass writes again. */
-    outage: { at: number; findings: FlightFinding[] } | null;
-    /** Whether this server held the lock at its last try, or has not tried yet: only then does it report a store outage itself. */
+    /**
+     * Findings that changed while the store could not be written, by key: laid over the stored ones, and written
+     * by the next pass that can write, or, when another server holds the lock by then, by this one before it
+     * stands down, so whichever server next holds the lock resolves them, once.
+     */
+    outage: Map<string, OutageEntry>;
+    /**
+     * Whether this server held the lock at its last try. Only then does it tell sinks of a store outage: one
+     * server tells it, not each. False until its first try succeeds, so servers that have never reached the store
+     * keep the outage in their own findings and report, and the first to hold the lock tells it once it resolves.
+     */
     holder: boolean;
   } | null = null;
   let checkEvery = 60_000;
@@ -155,41 +177,71 @@ export function createFlight(env: Record<string, string | undefined> = process.e
    * The findings step of a pass: findings from the check and the minutes, merged with the ones kept, written to
    * the store with the findings layer's memory, and only then sent to the sinks, so a change is told once even
    * with several instances on one store (only the lock holder runs a pass, and the next holder reads what was
-   * written). When the store cannot be used, this server's own copy stands in, and only the last lock holder
-   * (or a server that never tried) reports the outage. Never throws.
+   * written). The write is the commit point: once the store holds a change as told, it is told, even when the
+   * pass ran past its time limit meanwhile. When the store cannot be written, this server's own copy stands in,
+   * the changes are kept in `outage` until a pass can write them, and only the last lock holder tells sinks.
+   * Never throws.
    */
   async function conclude(r: NonNullable<typeof run>, result: CheckResult, minutes: InstanceMinute[] | null, useStore: boolean, isLive: () => boolean): Promise<void> {
     try {
       const now = result.at;
+      // The time the store records this pass's write under, and an outage entry's: strictly increasing, so a
+      // record and an entry of the same millisecond are never a tie.
+      const at = stamp(now);
       const down = !useStore || result.blind.some((f) => f.kind === 'store-unreachable' || f.kind === 'lock-unavailable');
-      let prior = r.outage ? mergePrior([], r.outage) : r.findings;
+      let prior = r.findings;
       let memory = r.memory;
-      let persist = false;
+      let records: FindingRecord[] | null = null;
       if (!down) {
         try {
-          const records = await r.store.findings();
+          records = await r.store.findings();
           prior = mergePrior(records, r.outage);
           memory = memoryFrom(records);
-          persist = true;
         } catch {}
       }
-      if (!persist && !r.holder) return;
       const ev = evaluate({ check: result, minutes, manifest: r.manifest, prior, memory, now, extra: r.notifier.health() });
       const facts = notCheckedFacts();
       const plan = r.notifier.plan(ev.changes, ev.memory.notify as NotifyState | undefined, now, r.service, () => ({ findings: ev.findings, checked: summaryOf(ev.findings, result, facts) }));
       const mem: FindingsMemory = { ...ev.memory, notify: plan.state as Record<string, unknown> };
-      if (persist) {
-        const changed = new Set(ev.changes.map((c) => c.finding.key));
-        await r.store.putFindings([...ev.findings.filter((f) => f.state === 'open' || changed.has(f.key)).map((f) => toRecord(f, now)), memoryRecord(mem, now)]);
+      const changed = new Set(ev.changes.map((c) => c.finding.key));
+      if (records) {
+        // The open findings, the changed ones, and the ones that changed during an outage (one that resolved then,
+        // and was told so, must not stay open in the store to be resolved and told again).
+        const outageKeys = [...r.outage.keys()];
+        const write = new Set([...changed, ...outageKeys]);
+        await r.store.putFindings([...ev.findings.filter((f) => f.state === 'open' || write.has(f.key)).map((f) => toRecord(f, at)), memoryRecord(mem, at)]);
+        r.notifier.dispatch(plan.deliveries);
+        // Written; an entry a time-out added while this write was on its way is newer, and stays.
+        for (const k of outageKeys) if ((r.outage.get(k)?.at ?? Infinity) <= at) r.outage.delete(k);
+        if (!isLive()) return;
+        r.findings = ev.findings;
+        r.memory = mem;
+        return;
       }
       if (!isLive()) return;
       r.findings = ev.findings;
+      // Kept until a pass can write them: what changed now, and the latest of what changed before. A server that
+      // does not hold the lock keeps only the store's own findings and tells nothing (the holder tells it).
+      for (const f of ev.findings) if ((changed.has(f.key) || r.outage.has(f.key)) && (r.holder || STORE_KEYS.has(f.key))) r.outage.set(f.key, { at, finding: f });
+      if (!r.holder) return;
       r.memory = mem;
-      r.outage = persist ? null : { at: now, findings: ev.findings };
       r.notifier.dispatch(plan.deliveries);
     } catch {
       // A store that refuses the write: nothing is sent, and the next pass finds the same changes again.
     }
+  }
+
+  /**
+   * A server that no longer holds the lock writes the findings it kept from an outage, where the store has
+   * nothing newer, so the server that holds the lock now resolves them and tells it, once.
+   */
+  async function handOver(r: NonNullable<typeof run>): Promise<void> {
+    if (!r.outage.size) return;
+    const at = new Map((await r.store.findings()).map((x) => [x.key, x.updatedAt]));
+    const entries = [...r.outage.values()];
+    const list = entries.filter((e) => !((at.get(e.finding.key) ?? -Infinity) >= e.at)).map((e) => toRecord(e.finding, e.at));
+    if (list.length) await r.store.putFindings(list);
+    for (const e of entries) if (r.outage.get(e.finding.key) === e) r.outage.delete(e.finding.key);
   }
 
   /** One checker pass, when this server holds the store lock; null when another checker holds it. */
@@ -216,7 +268,10 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     const work = (async (): Promise<CheckResult | null> => {
       try {
         r.holder = await r.store.lock(r.owner, ttl);
-        if (!r.holder) return null;
+        if (!r.holder) {
+          await handOver(r);
+          return null;
+        }
       } catch (e) {
         // Without the lock this checker neither checks nor prunes (another may hold it), and says why.
         const res = notCheckedResult(r.manifest, Date.now(), { kind: 'lock-unavailable', error: errorCode(e) }, 'lock-unavailable');
@@ -326,8 +381,8 @@ export function createFlight(env: Record<string, string | undefined> = process.e
           service,
           findings: [],
           memory: {},
-          outage: null,
-          holder: true,
+          outage: new Map(),
+          holder: false,
         };
         probes.start({ store, instance, declared: m?.probes || [], timeoutMs: nonNeg(opts.probeTimeoutMs, PROBE_TIMEOUT_MS) || PROBE_TIMEOUT_MS, onError: () => writer.storeError() });
         checkEvery = nonNeg(opts.checkEveryMs, 60_000);

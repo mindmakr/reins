@@ -7,11 +7,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createFlight, type Flight } from '../src/flight.js';
 import type { Change, FlightFinding } from '../src/flight/findings.js';
 import { validateManifest } from '../src/flight/manifest.js';
-import { createNotifier, fileSink, fitBody, functionSink, type Notification, SinkError, webhookSink, webhookUrl } from '../src/flight/sinks.js';
+import { createNotifier, fileSink, fitBody, functionSink, normaliseSinks, type Notification, SinkError, sinkView, webhookSink, webhookUrl } from '../src/flight/sinks.js';
 import { type FlightStore, memoryStore } from '../src/flight/store.js';
 import { markDevModule } from '../src/recorder.js';
 import { fig, im, MIN } from './flight-fixtures.js';
@@ -421,5 +421,161 @@ describe('B12: security findings and a failing sink', () => {
     await checkAndDeliver(f);
     const tagged = c.got.filter((n) => n.finding?.tags?.includes('security')).map((n) => n.finding!.key).sort();
     expect(tagged).toEqual(['basic:refused', 'security:dev-module']);
+  });
+});
+
+describe("round 2: the critics' findings on sinks and the notifier", () => {
+  it('H1: makes names unique within 40 characters, even for two sinks named with 40 characters', () => {
+    const name = 'a'.repeat(40);
+    const out = normaliseSinks([{ name, send() {} }, { name, send() {} }, { name: 'bad name!', send() {} }, { name: 'sink-3', send() {} }]);
+    expect(out.map((s) => s.name)).toEqual([name, `${'a'.repeat(38)}-2`, 'sink-3', 'sink-3-2']);
+    for (const s of out) expect(s.name).toMatch(/^[A-Za-z0-9._-]{1,40}$/);
+  });
+
+  it('S1: a hung sink has one call in flight at most; later notifications are skipped and counted, and pending says so', async () => {
+    let calls = 0;
+    const n = createNotifier([functionSink(() => (calls++, new Promise(() => {})), { timeoutMs: 50 })], { daily: false, perHour: 1000 });
+    const ch = (i: number): Change => ({ event: 'opened', finding: finding({ key: `basic:slow-route:GET /r${i}` }) });
+    for (let round = 0; round < 3; round++) n.dispatch(n.plan([0, 1, 2, 3, 4].map((i) => ch(round * 10 + i)), undefined, Date.now(), 'api').deliveries);
+    await n.idle();
+    expect(calls).toBe(1);
+    expect(n.stats()).toEqual({ sent: 0, failed: 15, skipped: 14, pending: 1 });
+    expect(n.health()[0].text).toBe('Sink function has failed its last 15 deliveries (busy), so findings may not reach it.');
+  });
+
+  it('L1: the last cut of a body counts bytes, not characters', () => {
+    const big = note({ text: '€'.repeat(30000), finding: finding({ text: '€'.repeat(30000) }) });
+    for (const max of [1000, 2000, 20000]) expect(Buffer.byteLength(fitBody(big, max)), String(max)).toBeLessThanOrEqual(max);
+    const emoji = note({ type: 'digest', text: '\u{1F600}'.repeat(20000), finding: undefined });
+    const body = fitBody(emoji, 20000);
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(20000);
+    expect(JSON.parse(body).text).not.toMatch(/[\ud800-\udbff]$/);
+  });
+
+  it('L2: a sink time limit out of range is clamped, never fired at once', async () => {
+    const slow = () => new Promise((r) => setTimeout(r, 30));
+    const n = createNotifier([{ name: 'big', timeoutMs: 2 ** 31, send: slow }, { name: 'inf', timeoutMs: Infinity, send: slow }], { daily: false });
+    n.dispatch(n.plan([{ event: 'opened', finding: finding() }], undefined, Date.now(), 'api').deliveries);
+    await n.idle();
+    expect(n.stats()).toMatchObject({ sent: 2, failed: 0 });
+  });
+
+  it('N1, S3 and S4: tags are copied, file names "." and ".." are refused, only a folder named .reins gets a .gitignore, one failure is singular', async () => {
+    const f = finding({ tags: ['security'] });
+    expect(sinkView(f).tags).toEqual(['security']);
+    expect(sinkView(f).tags).not.toBe(f.tags);
+    const dir = tmp();
+    for (const file of ['.', '..']) await fileSink({ dir: join(dir, 'not.reins', 'flight'), file }).send(note());
+    expect(readFileSync(join(dir, 'not.reins', 'flight', 'notifications.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2);
+    expect(existsSync(join(dir, 'not.reins', '.gitignore'))).toBe(false);
+    const n = createNotifier([{ name: 'bad', send: () => Promise.reject(new SinkError('status-500')) }], { daily: false, failures: 1 });
+    n.dispatch(n.plan([{ event: 'opened', finding: finding() }], undefined, Date.now(), 'api').deliveries);
+    await n.idle();
+    expect(n.health()[0].text).toBe('Sink bad has failed its last delivery (status-500), so findings may not reach it.');
+  });
+});
+
+describe("round 2: the critics' findings on store outages", () => {
+  /** A store that can go down (every call rejects), whose lock `takeover` takes as if the holder's lease ran out, and whose findings write can be slow. */
+  function flaky(base: FlightStore = memoryStore()) {
+    const ctl = { down: false, takeover: '', slowWrite: 0 };
+    const store = new Proxy(base, {
+      get(t, k) {
+        const v = (t as any)[k];
+        if (typeof v !== 'function') return v;
+        return async (...a: unknown[]) => {
+          if (ctl.down) throw Object.assign(new Error('down'), { code: 'ECONNREFUSED' });
+          if (k === 'lock' && ctl.takeover && String(a[0]).startsWith(ctl.takeover)) a = [a[0], a[1], Date.now() + 10 * MIN];
+          if (k === 'putFindings' && ctl.slowWrite) await new Promise((r) => setTimeout(r, ctl.slowWrite));
+          return v.apply(t, a);
+        };
+      },
+    }) as FlightStore;
+    return { store, ctl };
+  }
+  const told = () => {
+    const got: string[] = [];
+    return { got, as: (inst: string) => (n: Notification) => void got.push(`${inst}: ${n.type} ${n.finding?.key}`) };
+  };
+
+  it('M2: an outage told by one instance is resolved once by the instance that next holds the lock', async () => {
+    const { store, ctl } = flaky();
+    const t = told();
+    const one = started([t.as('one')], { store, instance: 'one' }).f;
+    const two = started([t.as('two')], { store, instance: 'two' }).f;
+    await checkAndDeliver(one);
+    await checkAndDeliver(two);
+    ctl.down = true;
+    await checkAndDeliver(one);
+    await checkAndDeliver(two);
+    await checkAndDeliver(one);
+    ctl.down = false;
+    ctl.takeover = 'two-';
+    for (let i = 0; i < 3; i++) {
+      await checkAndDeliver(two);
+      await checkAndDeliver(one);
+    }
+    expect(t.got).toEqual(['one: opened blind:lock-unavailable', 'two: resolved blind:lock-unavailable']);
+  });
+
+  it('M2: with the store down from boot, instances that never held the lock tell nothing twice; the outage is told once', async () => {
+    const { store, ctl } = flaky();
+    ctl.down = true;
+    const t = told();
+    const one = started([t.as('one')], { store, instance: 'one' }).f;
+    const two = started([t.as('two')], { store, instance: 'two' }).f;
+    for (let i = 0; i < 3; i++) {
+      await checkAndDeliver(one);
+      await checkAndDeliver(two);
+    }
+    // Each still shows it in its own findings and report.
+    expect(one.findings().find((x) => x.key === 'blind:lock-unavailable')?.state).toBe('open');
+    expect(t.got).toEqual([]);
+    ctl.down = false;
+    for (let i = 0; i < 3; i++) {
+      await checkAndDeliver(one);
+      await checkAndDeliver(two);
+    }
+    expect(t.got).toEqual(['one: resolved blind:lock-unavailable']);
+  });
+
+  it('M3: a pass whose findings write outlives the time limit still tells what it wrote, once', async () => {
+    const { store, ctl } = flaky();
+    const t = told();
+    const { f } = started([t.as('srv')], { store, checkTimeoutMs: 200 });
+    await errors(store, 40, 10);
+    ctl.slowWrite = 400;
+    await f.checkNow();
+    await new Promise((r) => setTimeout(r, 600));
+    ctl.slowWrite = 0;
+    for (let i = 0; i < 3; i++) await checkAndDeliver(f);
+    expect(t.got.filter((x) => x.includes('basic:error-share'))).toEqual(['srv: opened basic:error-share']);
+    expect(t.got.filter((x) => x.includes('blind:store-unreachable'))).toEqual(['srv: opened blind:store-unreachable', 'srv: resolved blind:store-unreachable']);
+    expect(f.findings().find((x) => x.key === 'basic:error-share')?.state).toBe('open');
+  });
+
+  it.each([
+    ['', false],
+    [', even with every pass in the same millisecond', true],
+  ])('M5: a finding that resolved during an outage is not resolved and told again after it%s', async (_, frozen) => {
+    if (frozen) vi.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 10, 14, 12, 0, 30));
+    onTestFinished(() => void vi.restoreAllMocks());
+    const { store, ctl } = flaky();
+    const good = told();
+    let failing = true;
+    const bad = { name: 'bad', send: () => (failing ? Promise.reject(new SinkError('status-500')) : undefined) };
+    const { f } = started([bad, good.as('srv')], { store, notify: { failures: 1 } });
+    await errors(store, 40, 10);
+    await checkAndDeliver(f);
+    await checkAndDeliver(f);
+    expect(good.got).toContain('srv: opened blind:sink:bad');
+    failing = false;
+    ctl.down = true;
+    await checkAndDeliver(f);
+    await checkAndDeliver(f);
+    ctl.down = false;
+    for (let i = 0; i < 3; i++) await checkAndDeliver(f);
+    expect(good.got.filter((x) => x.includes('blind:sink:bad'))).toEqual(['srv: opened blind:sink:bad', 'srv: resolved blind:sink:bad']);
+    expect((await store.findings()).find((x) => x.key === 'blind:sink:bad')?.state).toBe('resolved');
   });
 });

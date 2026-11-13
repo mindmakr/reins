@@ -131,6 +131,12 @@ export function storeContract(make: () => Promise<{ store: FlightStore; second: 
     ]);
   });
 
+  it('keeps a value with toJSON in finding data as JSON keeps it: a Date as its ISO text (u4 round 2, L5)', async () => {
+    const { store } = await make();
+    await store.putFindings([{ key: 'basic:x', state: 'open', updatedAt: 1000, data: { at: new Date(0), nested: [{ when: new Date(1000) }] } }]);
+    expect((await store.findings())[0].data).toEqual({ at: '1970-01-01T00:00:00.000Z', nested: [{ when: '1970-01-01T00:00:01.000Z' }] });
+  });
+
   it('gives the lock to one checker at a time, and takes over a lock its checker left', async () => {
     const { store, second } = await make();
     const other = second();

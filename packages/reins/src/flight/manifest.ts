@@ -3,6 +3,7 @@
 // data, with its path in the document, so an invalid manifest can never crash a server (C8).
 // This module imports only Node built-ins and the limits table.
 import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { BASICS, type BasicName } from './limits.js';
 
 /** The manifest schema this release understands. A higher number is refused with "update reins". */
@@ -442,7 +443,8 @@ export function readManifest(file: string): ManifestResult {
     text = readFileSync(file, 'utf8');
   } catch (e: any) {
     const why = e && e.code === 'ENOENT' ? 'no such file' : e && e.code ? e.code : 'could not be read';
-    return { ok: false, problems: [{ path: ROOT, message: `${file}: ${why}` }] };
+    // The base name only: the folder is the server's own, and the problem text reaches sinks.
+    return { ok: false, problems: [{ path: ROOT, message: `${basename(String(file))}: ${why}` }] };
   }
   return parseManifest(text);
 }

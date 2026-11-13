@@ -531,9 +531,26 @@ export const UNMATCHED = '(unmatched)';
 export const MOUNT = '(mount)';
 const OTHER = '(other)';
 const MAX_KEYS = 300;
-const BOUNDS = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, Infinity];
-/** Upper bounds of the latency buckets of `Figures.buckets`, in ms; the last bucket has none. */
+// 800 and 1600 are flight's default slow-route limit and its error level (limits.ts): a route is judged on whole buckets.
+const BOUNDS = [10, 25, 50, 100, 250, 500, 800, 1000, 1600, 2500, 5000, 10000, 30000, Infinity];
+/** Upper bounds of the latency buckets of `Figures.buckets`, in ms; the last bucket has none. A bucket holds the times over the bound before it. */
 export const LATENCY_BOUNDS: readonly number[] = BOUNDS;
+
+/** The 95th percentile of figures kept in latency buckets: the upper bound of the bucket that holds it, capped at the maximum. */
+export function bucketP95(buckets: readonly number[], count: number, max: number): number {
+  for (let i = 0, seen = 0; i < BOUNDS.length; i++) {
+    seen += Number(buckets[i]) || 0;
+    if (count && seen >= Math.ceil(count * 0.95)) return Math.min(BOUNDS[i], max);
+  }
+  return max;
+}
+
+/** How many of the figures surely took longer than `ms`: those in buckets whose lower bound is `ms` or more. Exact when `ms` is a bound. */
+export function bucketsOver(buckets: readonly number[], ms: number): number {
+  let n = 0;
+  for (let i = 1; i < BOUNDS.length; i++) if (BOUNDS[i - 1] >= ms) n += Number(buckets[i]) || 0;
+  return n;
+}
 /** Statuses counted one by one as refused: sign-in required, forbidden, too many requests. */
 export const REFUSED_STATUSES: readonly number[] = [401, 403, 429];
 /** Distinct error codes counted per minute; more are counted under `(other)`. */
@@ -644,14 +661,7 @@ interface Minute {
 const statusClass = (s: number) => (s >= 100 && s < 600 ? `${Math.floor(s / 100)}xx` : '0');
 
 function figures(a: Agg): Figures {
-  let p95 = a.max;
-  for (let i = 0, seen = 0; i < BOUNDS.length; i++) {
-    seen += a.buckets[i];
-    if (seen >= Math.ceil(a.count * 0.95)) {
-      p95 = Math.min(BOUNDS[i], a.max);
-      break;
-    }
-  }
+  const p95 = bucketP95(a.buckets, a.count, a.max);
   return {
     count: a.count,
     errors: a.errors,

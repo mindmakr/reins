@@ -113,6 +113,14 @@ function storableJson(v: unknown, depth = 0): unknown {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   if (typeof v === 'boolean' || v === null) return v;
   if (depth > 32 || typeof v !== 'object') return undefined;
+  // As JSON.stringify does: a value with toJSON (a Date) is kept as what toJSON gives.
+  if (typeof (v as { toJSON?: unknown }).toJSON === 'function') {
+    try {
+      return storableJson((v as { toJSON: () => unknown }).toJSON(), depth + 1);
+    } catch {
+      return undefined;
+    }
+  }
   if (Array.isArray(v)) return v.map((x) => storableJson(x, depth + 1) ?? null);
   const out: Record<string, unknown> = {};
   for (const [k, x] of Object.entries(v as Record<string, unknown>)) {

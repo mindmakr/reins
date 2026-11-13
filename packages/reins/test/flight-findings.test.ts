@@ -1,12 +1,15 @@
 // Design section 5, unit u4 behaviours B1 to B7 and B12: findings of the five kinds, from a checker pass and the
 // instance minutes, opening and resolving as section 5 states, with limits in one place and their sources.
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { check, type CheckResult } from '../src/flight/checker.js';
 import { evaluate, type EvaluateResult, type FindingsMemory, type FlightFinding, KIND_ORDER } from '../src/flight/findings.js';
 import { BASICS, DEFAULT_BASICS, LIMITS, SINK_LIMITS } from '../src/flight/limits.js';
-import { BASIC_NAMES, type ManifestResult, validateManifest } from '../src/flight/manifest.js';
+import { BASIC_NAMES, type ManifestResult, readManifest, validateManifest } from '../src/flight/manifest.js';
 import { CHECKS, SOURCES } from '../src/flight/sources.js';
 import { type FlightStore, type InstanceMinute, memoryStore } from '../src/flight/store.js';
+import { type Figures, LATENCY_BOUNDS } from '../src/recorder.js';
 import { fig, im, MIN } from './flight-fixtures.js';
 import { step } from './flight-store-contract.js';
 
@@ -116,7 +119,7 @@ describe('B2: the six basics, with the framework hook and no manifest', () => {
       );
     const r = await pass(await storeWith(minutes), null, NOW);
     expect(keys(r)).toEqual(['basic:error-share', 'basic:event-loop', 'basic:memory', 'basic:refused', 'basic:slow-route:GET /api/slow', 'basic:upstream:bank.example.com']);
-    expect(byKey(r, 'basic:slow-route:GET /api/slow')!.text).toBe('GET /api/slow is slow: 95% of its 50 requests in the last 5 min took up to 2 s, over the limit of 800 ms.');
+    expect(byKey(r, 'basic:slow-route:GET /api/slow')!.text).toBe('GET /api/slow is slow: 50 of its 50 requests in the last 5 min (100%) took longer than 800 ms, so its 95th percentile is over that limit.');
     expect(byKey(r, 'basic:upstream:bank.example.com')!.text).toMatch(/^Upstream bank.example.com is failing: 10 of 20 calls in the last 5 min failed \(50%\)/);
     expect(byKey(r, 'basic:event-loop')!.text).toMatch(/blocked on 1 instance: its 99th percentile delay was over 200 ms in 5 minutes/);
     expect(byKey(r, 'basic:memory')!.text).toMatch(/^Memory keeps growing on 1 instance/);
@@ -338,5 +341,66 @@ describe('B12: security findings', () => {
     const store = await storeWith([im('a', back(1), {}, { devModule: true })]);
     const r = await pass(store, null, NOW);
     expect(byKey(r, 'security:dev-module')).toMatchObject({ kind: 'unusual', level: 'error', tags: ['security'], state: 'open' });
+  });
+});
+
+describe("round 2: the critics' findings on the rules", () => {
+  /** Figures of a route: `fast` requests at `fastMs` and `slow` at `slowMs`, in their latency buckets. */
+  const mixed = (fast: number, fastMs: number, slow: number, slowMs: number): Figures => {
+    const f = fig(fast, 0, fastMs);
+    f.buckets![LATENCY_BOUNDS.findIndex((x) => slowMs <= x)] += slow;
+    return { ...f, count: fast + slow, maxMs: slowMs, p95Ms: slowMs };
+  };
+  const only = (minutes: InstanceMinute[], m: ManifestResult | null = null, prior: FlightFinding[] = [], extra: Parameters<typeof evaluate>[0]['extra'] = []) =>
+    evaluate({ check: { at: NOW, manifest: !m ? 'none' : m.ok ? 'ok' : 'invalid', promises: [], probes: [], blind: m && !m.ok ? [{ kind: 'manifest-invalid', problems: m.problems }] : [] }, minutes, manifest: m, prior, memory: {}, now: NOW, extra });
+  const openFinding = (key: string, over: Partial<FlightFinding> = {}): FlightFinding => ({ key, kind: 'blind', level: 'warn', text: key, count: 1, firstAt: NOW - H, lastAt: NOW - H, state: 'open', ...over });
+
+  it('M1: a slow route is judged on the requests surely over the limit, never on a bucket bound', () => {
+    // 95 requests at 600 ms and 5 at 2 s: the 95th percentile is 600 ms, under the 800 ms limit.
+    expect(keys(only([im('a', back(1), { requests: [['GET', '/x', mixed(95, 600, 5, 2000)]] })]))).toEqual([]);
+    // 10 of 100 over the limit: slow, and the text says what was measured.
+    const r = only([im('a', back(1), { requests: [['GET', '/x', mixed(90, 600, 10, 900)]] })]);
+    expect(byKey(r, 'basic:slow-route:GET /x')).toMatchObject({ level: 'warn', count: 100 });
+    expect(byKey(r, 'basic:slow-route:GET /x')!.text).toBe('GET /x is slow: 10 of its 100 requests in the last 5 min (10%) took longer than 800 ms, so its 95th percentile is over that limit.');
+    // An error only when more than 5% surely took twice the limit.
+    expect(byKey(only([im('a', back(1), { requests: [['GET', '/x', mixed(90, 600, 10, 2000)]] })]), 'basic:slow-route:GET /x')!.level).toBe('error');
+    // A limit between two bucket bounds is judged on the requests surely over it, and the text says "at least".
+    const custom = only([im('a', back(1), { requests: [['GET', '/x', mixed(80, 600, 20, 900)]] })], manifest({ basics: { slowRouteMs: 700 } }));
+    expect(byKey(custom, 'basic:slow-route:GET /x')!.text).toMatch(/^GET \/x is slow: at least 20 of its 100 requests in the last 5 min \(20%\) took longer than 700 ms/);
+  });
+
+  it('M4: a store-sized list of minutes stops no rule: open findings stay open and sink health still counts', () => {
+    const one = { instance: 'a', minute: back(120), stepsDropped: {}, stepsInvalid: 0, storeErrors: 0, probes: [] } as unknown as InstanceMinute;
+    const minutes = new Array<InstanceMinute>(200_000).fill(one);
+    const sink = { key: 'blind:sink:hook', kind: 'blind' as const, level: 'warn' as const, n: 3, text: 'Sink hook has failed its last 3 deliveries (timeout), so findings may not reach it.' };
+    const r = only(minutes, manifest(), [openFinding('blind:no-steps:payout', { process: 'payout' })], [sink]);
+    expect(byKey(r, 'blind:no-steps:payout')!.state).toBe('open');
+    expect(byKey(r, 'blind:sink:hook')!.state).toBe('open');
+  });
+
+  it('L3: with an invalid manifest, blind findings about processes are not judged, so they stay as they were', () => {
+    const bad = validateManifest({ schema: 1, service: 'x', processes: 'no' });
+    const prior = [openFinding('blind:no-steps:payout'), openFinding('blind:steps-dropped:payout'), openFinding('blind:store-write-failed')];
+    const r = only([im('a', back(1))], bad, prior);
+    expect(byKey(r, 'blind:no-steps:payout')!.state).toBe('open');
+    expect(byKey(r, 'blind:steps-dropped:payout')!.state).toBe('open');
+    // The store's own write failures are judged without a manifest.
+    expect(byKey(r, 'blind:store-write-failed')!.state).toBe('resolved');
+  });
+
+  it('L6: the level multiplier, the memory test minutes and spread, and the refused look-back are limits', async () => {
+    for (const k of ['errorFactor', 'heapMinutes', 'heapSpread', 'refusedLookbackMs']) expect(BASICS, k).toHaveProperty(k);
+    // 10% failed is twice the 5% limit: an error by default, a warning when the error level is three times the limit.
+    const minutes = [im('a', back(1), { requests: [['GET', '/x', fig(40, 4)]] })];
+    expect(byKey(only(minutes), 'basic:error-share')!.level).toBe('error');
+    expect(byKey(only(minutes, manifest({ basics: { errorFactor: 3 } })), 'basic:error-share')!.level).toBe('warn');
+  });
+
+  it('S2: an unreadable manifest file is named by its base name only', () => {
+    const r = readManifest(join(tmpdir(), 'some-private-dir', 'reins.flight.json'));
+    expect(r.ok).toBe(false);
+    const text = JSON.stringify(r);
+    expect(text).toContain('reins.flight.json: no such file');
+    expect(text).not.toContain('some-private-dir');
   });
 });
