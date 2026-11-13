@@ -39,6 +39,11 @@ interface CheckBase {
   partial: number;
   /** Steps of this process dropped inside the window (0 when none). */
   stepsDropped: number;
+  /**
+   * `within` and `ends`: runs whose expected (or end) step came inside the window, and the 95th percentile of
+   * how long they took, nearest rank, in ms (null with none). What the drifting finding compares to the limit.
+   */
+  took?: { runs: number; p95Ms: number | null };
 }
 
 export type PromiseCheck = CheckBase &
@@ -101,6 +106,8 @@ export interface CheckResult {
 export interface CheckOptions {
   /** The time of the pass. Default now. */
   now?: number;
+  /** Handed the instance minutes the pass read, so the findings layer reads them once with the checker. */
+  minutes?: (m: InstanceMinute[]) => void;
 }
 
 const minuteOf = (t: number) => t - (t % 60_000);
@@ -158,6 +165,9 @@ export async function check(store: FlightStore, manifest: ManifestResult | null,
   const widest = Math.max(DEFAULT_WINDOW_MS, ...(m?.processes || []).flatMap(windowsOf));
   try {
     const minutes = await store.minutes(minuteOf(now - widest));
+    try {
+      o.minutes?.(minutes);
+    } catch {}
     const failed = minutes.filter((x) => x.minute >= minuteOf(now - DEFAULT_WINDOW_MS)).reduce((n, x) => n + (Number(x.storeErrors) || 0), 0);
     if (failed) out.blind.push({ kind: 'store-write-failed', count: failed, since: now - DEFAULT_WINDOW_MS });
     if (!m) return out;
@@ -258,6 +268,7 @@ function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string
   const base: CheckBase = { process: p.name, id: promise.id, kind: promise.kind, windowMs: promise.windowMs, since, runs: checked.length, partial, stepsDropped: droppedIn(minutes, p.name, since) };
   const breaches: Breach[] = [];
   const late: LateRun[] = [];
+  const took: number[] = [];
 
   // Design section 7: with steps dropped, a count-based promise cannot be said to hold for the window.
   if ((promise.kind === 'once' || promise.kind === 'order') && base.stepsDropped > 0) return { ...base, state: 'not-checked', reason: 'steps-dropped' };
@@ -271,6 +282,7 @@ function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string
         const start = steps[a].at;
         const done = steps.slice(a + 1).find((s) => promise.expect.includes(s.step));
         if (done) {
+          if (done.at >= since) took.push(done.at - start);
           if (done.at - start > promise.withinMs && done.at >= since) late.push({ key, lateMs: done.at - start - promise.withinMs, at: done.at });
         } else if (now - start > promise.withinMs) breaches.push({ key, at: start + promise.withinMs });
         break;
@@ -279,6 +291,7 @@ function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string
         const start = steps[0].at;
         const end = steps.find((s) => p.ends.includes(s.step));
         if (end) {
+          if (end.at >= since) took.push(end.at - start);
           if (end.at - start > promise.withinMs && end.at >= since) late.push({ key, lateMs: end.at - start - promise.withinMs, at: end.at });
         } else if (now - start > promise.withinMs) breaches.push({ key, at: start + promise.withinMs });
         break;
@@ -300,6 +313,10 @@ function checkPromise(p: FlightProcess, promise: FlightPromise, runs: Map<string
         break;
       }
     }
+  }
+  if (promise.kind === 'within' || promise.kind === 'ends') {
+    took.sort((a, b) => a - b);
+    base.took = { runs: took.length, p95Ms: took.length ? took[Math.ceil(took.length * 0.95) - 1] : null };
   }
   return verdict(base, breaches, late);
 }

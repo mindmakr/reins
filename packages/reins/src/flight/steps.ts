@@ -15,6 +15,8 @@ export const STEP_DEFAULTS = { bufferSize: 10_000, flushMs: 1000, minuteMs: 15_0
 /** Distinct process names counted per minute; beyond this, drops are counted under OTHER_PROCESS. */
 const MAX_PROCESSES = 200;
 export const OTHER_PROCESS = '(other)';
+/** Distinct `process step` names counted per minute; beyond this, steps are counted under OTHER_PROCESS. */
+const MAX_STEP_NAMES = 500;
 /** Minutes of drop counts kept in memory after they were written. */
 const KEEP_MINUTES = 5;
 /** Minutes of counts held at most while they cannot be written; the oldest go first. */
@@ -33,10 +35,14 @@ export interface StepWriterOptions {
   basics?: () => MinuteSummary[];
   /** Probe ids registered on this instance. */
   probes?: () => string[];
+  /** Whether development reins is loaded in this production process (design C12): written as `devModule`. */
+  devModule?: () => boolean;
 }
 
 interface Facts {
   dropped: Record<string, number>;
+  /** Steps queued, by `process step`. */
+  steps: Record<string, number>;
   invalid: number;
   storeErrors: number;
 }
@@ -62,7 +68,7 @@ export function createStepWriter(o: StepWriterOptions) {
     if (!f) {
       // While the store refuses minute writes, counts wait here; keep at most MAX_FACT_MINUTES of them.
       if (facts.size >= MAX_FACT_MINUTES) facts.delete(Math.min(...facts.keys()));
-      facts.set(m, (f = { dropped: {}, invalid: 0, storeErrors: 0 }));
+      facts.set(m, (f = { dropped: {}, steps: {}, invalid: 0, storeErrors: 0 }));
     }
     return f;
   };
@@ -117,6 +123,10 @@ export function createStepWriter(o: StepWriterOptions) {
     try {
       basics = o.basics ? o.basics() : [];
     } catch {}
+    let devModule = false;
+    try {
+      devModule = !!o.devModule?.();
+    } catch {}
     let probes: string[] = [];
     try {
       probes = o.probes ? [...o.probes()].sort() : [];
@@ -128,6 +138,8 @@ export function createStepWriter(o: StepWriterOptions) {
         minute,
         basics: basics.find((b) => b.minute === minute) || null,
         stepsDropped: { ...(f?.dropped || {}) },
+        ...(f && Object.keys(f.steps).length ? { steps: { ...f.steps } } : {}),
+        ...(devModule ? { devModule: true } : {}),
         stepsInvalid: f?.invalid || 0,
         storeErrors: f?.storeErrors || 0,
         probes,
@@ -173,6 +185,10 @@ export function createStepWriter(o: StepWriterOptions) {
           return false;
         }
         queue.push({ process, key: k, step, at: now, instance: o.instance });
+        const f = factsOf(now);
+        const name = `${process} ${step}`;
+        const n = name in f.steps || Object.keys(f.steps).length < MAX_STEP_NAMES ? name : OTHER_PROCESS;
+        f.steps[n] = (f.steps[n] || 0) + 1;
         totals.accepted++;
         return true;
       } catch {

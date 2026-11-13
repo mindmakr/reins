@@ -6,6 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { check } from '../src/flight/checker.js';
 import { validateManifest } from '../src/flight/manifest.js';
 import { PG_TABLES, pgStore, type QueryFn } from '../src/flight/pg-store.js';
+import { createFlight } from '../src/flight.js';
+import { fig, im } from './flight-fixtures.js';
 import { step, storeContract } from './flight-store-contract.js';
 
 const url = process.env.REINS_FLIGHT_PG_URL;
@@ -79,5 +81,25 @@ describe.skipIf(!url)('postgres store against a real Postgres (B11)', () => {
     const store = pgStore({ query });
     await store.addSteps([step('a\u0000b', 'requested', 1)]);
     expect(statements).toEqual([]);
+  });
+
+  it('a flight with the Postgres store keeps its findings and their memory, and tells a sink once (u4)', async () => {
+    await reset();
+    const store = pgStore({ query });
+    const got: string[] = [];
+    const f = createFlight({});
+    f.start({ store, sinks: [(n: { type: string; finding?: { key: string } }) => void got.push(`${n.type} ${n.finding?.key}`)], checkEveryMs: 0, flushMs: 10_000, instance: 'srv', notify: { daily: false } });
+    try {
+      await store.putMinute(im('a', Date.now(), { requests: [['GET', '/x', fig(40, 4)]], codes: { ECONNRESET: 2 } }));
+      await f.checkNow();
+      await f.checkNow();
+      await f.sinksIdle();
+      expect(got.sort()).toEqual(['opened basic:error-share', 'opened unusual:code:ECONNRESET']);
+      const rows = await store.findings();
+      expect(rows.map((r) => r.key).sort()).toEqual(['(flight-state)', 'basic:error-share', 'unusual:code:ECONNRESET']);
+      expect(rows.find((r) => r.key === 'basic:error-share')!.data).toMatchObject({ kind: 'basic', count: 4 });
+    } finally {
+      f.stop();
+    }
   });
 });

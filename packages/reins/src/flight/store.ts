@@ -58,6 +58,10 @@ export interface InstanceMinute {
   stepsDropped: Record<string, number>;
   /** `flight.step` calls with bad arguments in this minute. They are not steps, so no process is named. */
   stepsInvalid: number;
+  /** Steps recorded in this minute, by `process step` (counts only, never keys). Absent when there were none. */
+  steps?: Record<string, number>;
+  /** Present when development reins is loaded in this instance and NODE_ENV is production (design C12). */
+  devModule?: true;
   /**
    * Runs of each process that retention removed whole while they had reached no end step: they may still have
    * been overdue. Written by `prune`, under the instance PRUNE_INSTANCE, so a checker in any process sees it.
