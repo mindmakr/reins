@@ -38,13 +38,16 @@ export const DEFAULT_STORE = '.reins/flight';
 /** The file store's subfolders (file-store.ts): the only folders it reads below its own. */
 const STORE_FOLDERS = ['steps', 'minutes', 'lock'];
 
+/** Windows device names (`CON`, `NUL`, `COM1`, `LPT1`...), also with an extension (`nul.json`): never a file to read. */
+const DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)$/i;
+
 const refused = (what: string, why: string) => new Error(`reins_flight refused the ${what} path: ${why}. Give a path inside the project folder.`);
 
 /**
  * Resolves `p` (relative to the project, or absolute inside it) to its real path, following links, and refuses it
  * unless that real path is inside the project's real folder. Refused before resolving: a NUL byte, a UNC or device
  * path (`\\server\share`, `\\?\`, `//host`), any `..` segment, a drive-relative path or a stream name (`C:x`,
- * `a.json:s`). Refused after: anything whose real path (links and junctions resolved) is outside the project,
+ * `a.json:s`), a Windows device name in any segment (`NUL`, `com1.json`). Refused after: anything whose real path (links and junctions resolved) is outside the project,
  * including another drive. A path that does not exist is a plain "not found".
  */
 export function projectPath(root: string, p: unknown, what: string): string {
@@ -54,6 +57,7 @@ export function projectPath(root: string, p: unknown, what: string): string {
   if (/^[\\/]{2}/.test(p)) throw refused(what, 'UNC and device paths are not read');
   if (p.split(/[\\/]/).includes('..')) throw refused(what, "it goes up with '..'");
   if (p.replace(/^[A-Za-z]:(?=[\\/])/, '').includes(':')) throw refused(what, 'drive-relative paths and stream names are not read');
+  if (p.split(/[\\/]/).some((s) => DEVICE.test(s.split('.')[0].trimEnd()))) throw refused(what, 'device names (CON, NUL, COM1, LPT1...) are not read');
   let base: string;
   try {
     base = realpathSync.native(root);
@@ -77,14 +81,23 @@ function outside(base: string, target: string): boolean {
   return rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
 }
 
+/**
+ * A file with more than one hard link may be the same file as one outside the project, which no path check can
+ * tell, so it is not read.
+ */
+const hardLinked = (what: string) => refused(what, 'it is a file with more than one hard link, which may be a file outside the project');
+
 /** Reads a regular file of at most `max` bytes through one descriptor, so what is checked is what is read. */
 function readCapped(file: string, max: number, what: string): string {
   // Checked before opening too: opening a FIFO or a device could block or read without end.
-  if (!statSync(file).isFile()) throw new Error(`reins_flight: the ${what} is not a file`);
+  const pre = statSync(file);
+  if (!pre.isFile()) throw new Error(`reins_flight: the ${what} is not a file`);
+  if (pre.nlink > 1) throw hardLinked(what);
   const fd = openSync(file, 'r');
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) throw new Error(`reins_flight: the ${what} is not a file`);
+    if (st.nlink > 1) throw hardLinked(what);
     if (st.size > max) throw new Error(`reins_flight: the ${what} is larger than ${max} bytes, so it is not read`);
     const buf = Buffer.alloc(max + 1);
     let n = 0;
@@ -112,6 +125,7 @@ function checkStore(dir: string, maxBytes: number, maxFiles: number): void {
         continue;
       }
       if (!st.isFile()) continue;
+      if (st.nlink > 1) throw hardLinked('store');
       files++;
       bytes += st.size;
       if (files > maxFiles || bytes > maxBytes)
@@ -130,10 +144,18 @@ function readProjectManifest(root: string, p: unknown, max: number): ManifestRes
     if (p === undefined && /not found$/.test(e.message)) return null;
     throw e;
   }
-  return parseManifest(readCapped(file, max, 'manifest'));
+  const result = parseManifest(readCapped(file, max, 'manifest'));
+  // JSON.parse's error quotes the text it read (a .env named as the manifest would show its secret), so the tool
+  // says only that it is not JSON.
+  if (!result.ok) for (const p of result.problems) if (p.message.startsWith('is not valid JSON')) p.message = 'is not valid JSON';
+  return result;
 }
 
-/** The report without process keys: they are server-side data (design C6), returned only when asked for. */
+/**
+ * The report without process keys: they are server-side data (design C6), returned only when asked for.
+ * Rule: keys only on request. Every report field that can hold a `keys` list must be stripped here; today those
+ * are `findings` and `resolved`. A new field that carries keys must be added to this function.
+ */
 function withoutKeys(r: FlightReport): FlightReport {
   const strip = (l: unknown) => (Array.isArray(l) ? l.map((f) => (f && typeof f === 'object' ? (({ keys: _k, ...rest }) => rest)(f) : f)) : l);
   return { ...r, findings: strip(r.findings) as FlightReport['findings'], resolved: strip(r.resolved) as FlightReport['resolved'] };

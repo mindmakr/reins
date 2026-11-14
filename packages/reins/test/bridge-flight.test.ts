@@ -1,7 +1,7 @@
 // Design sections 6 and 11, unit u7: the bridge's read-only `reins_flight` tool. It reads a saved report file or
 // the file store under the project, loads no app code, reaches no Postgres store, writes nothing, refuses every
 // path outside the project, caps what it reads, and leaves process keys out unless the call asks for them.
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +42,17 @@ const manifest = {
   ],
 };
 
+/** Whether the lock folder holds exactly one generation, 2.json, written in full as given up: {owner, until: 0}. */
+function lockReleased(lockDir: string): boolean {
+  try {
+    if (readdirSync(lockDir).join() !== '2.json') return false;
+    const lock = JSON.parse(readFileSync(join(lockDir, '2.json'), 'utf8'));
+    return typeof lock.owner === 'string' && lock.owner !== '' && lock.until === 0;
+  } catch {
+    return false;
+  }
+}
+
 /** A project with a manifest and a file store under .reins/flight holding one overdue payout, checked once. */
 async function project() {
   const dir = tempDir();
@@ -55,9 +66,11 @@ async function project() {
   await f.checkNow();
   const report = (await f.report())!;
   f.stop();
-  // stop() flushes and gives the lock up in the background: wait for it, so later writes are not the tool's.
-  for (let i = 0; i < 200 && !existsSync(join(dir, '.reins', 'flight', 'lock', '2.json')); i++) await new Promise((r) => setTimeout(r, 10));
-  expect(existsSync(join(dir, '.reins', 'flight', 'lock', '2.json'))).toBe(true);
+  // stop() flushes and gives the lock up in the background: dropLock writes 2.json, then unlinks 1.json. Wait for
+  // both (the folder holds only 2.json, written in full as a free lock), so later changes are not the tool's.
+  const lockDir = join(dir, '.reins', 'flight', 'lock');
+  for (let i = 0; i < 500 && !lockReleased(lockDir); i++) await new Promise((r) => setTimeout(r, 10));
+  expect(lockReleased(lockDir)).toBe(true);
   expect(report.findings.some((x) => x.keys?.includes('payout-7f3a'))).toBe(true);
   return { dir, report };
 }
@@ -199,6 +212,11 @@ describe('B1 and B6: paths outside the project are refused', () => {
       ['device', { file: '\\\\?\\C:\\Windows\\win.ini' }],
       ['drive-relative', { file: 'C:r.json' }],
       ['stream', { file: 'reins.flight.json:hidden' }],
+      ...['CON', 'NUL', 'COM1', 'LPT1', 'con.json', 'nul.json', 'Com1.txt', 'lpt1.json', 'AUX', 'prn.json', 'CONIN$', 'reports/nul.json', 'nul .json', 'NUL.'].map(
+        (name): [string, Record<string, unknown>] => [`device ${name}`, { file: name }],
+      ),
+      ['device store', { store: 'NUL' }],
+      ['device manifest', { manifest: 'com1.json' }],
       ['empty', { file: '' }],
       ['not a string', { file: 42 }],
       ['too long', { file: 'a/'.repeat(600) + 'r.json' }],
@@ -242,6 +260,47 @@ describe('B1 and B6: paths outside the project are refused', () => {
     const other = tempDir('reins-bridge-flight-other-');
     symlinkSync(outside, join(other, '.reins'), 'junction');
     await expect(flightTool(other, {})).rejects.toThrow(/refused the store path: it is outside the project/);
+  });
+});
+
+describe('B1 and B6: a hard link to a file elsewhere is refused', () => {
+  it('refuses a report file, a manifest or a store file with more than one hard link', async (ctx) => {
+    const { dir, report } = await project();
+    const outside = tempDir('reins-bridge-flight-outside-');
+    writeFileSync(join(outside, 'r.json'), JSON.stringify(report));
+    writeFileSync(join(outside, 'm.json'), JSON.stringify(manifest));
+    try {
+      linkSync(join(outside, 'r.json'), join(dir, 'hard.json'));
+    } catch {
+      // Only where the file system cannot make hard links (the temp folder is on one volume, so this is rare).
+      ctx.skip();
+    }
+    await expect(flightTool(dir, { file: 'hard.json' })).rejects.toThrow(/refused the report file path: it is a file with more than one hard link/);
+    linkSync(join(outside, 'm.json'), join(dir, 'hard-manifest.json'));
+    await expect(flightTool(dir, { manifest: 'hard-manifest.json' })).rejects.toThrow(/refused the manifest path: it is a file with more than one hard link/);
+    // A store file hard-linked from elsewhere: the store would read it.
+    linkSync(join(outside, 'r.json'), join(dir, '.reins', 'flight', 'minutes', 'hard.json'));
+    await expect(flightTool(dir, {})).rejects.toThrow(/refused the store path: it is a file with more than one hard link/);
+    // The same files with one link each are read.
+    writeFileSync(join(dir, 'plain.json'), JSON.stringify(report));
+    await expect(flightTool(dir, { file: 'plain.json' })).resolves.toMatchObject({ source: 'file' });
+  });
+});
+
+describe('B1: a manifest that is not JSON', () => {
+  it('says only "not valid JSON", never the text it read', async () => {
+    const { dir } = await project();
+    writeFileSync(join(dir, '.env'), 'SECRET=hunter2\n');
+    writeFileSync(join(dir, 'long.env'), 'hunter2 '.repeat(50));
+    for (const m of ['.env', 'long.env']) {
+      const r = await flightTool(dir, { manifest: m, keys: true });
+      expect(r.report.manifest).toBe('invalid');
+      const all = JSON.stringify(r);
+      expect(all, m).not.toContain('hunter2');
+      expect(all, m).not.toContain('SECRET');
+      expect(r.markdown, m).not.toContain('hunter2');
+      expect(all, m).toContain('is not valid JSON');
+    }
   });
 });
 

@@ -23,7 +23,7 @@ Find the work that outlives one request, or that another system finishes: queued
 
 ### 2. Install the framework hook and show the basics report first
 
-Install `@mindmakr/reins` (it holds the flight entry) and add the framework hook from `@mindmakr/reins/flight`: `flight.middleware()` for Express or Connect, `flight.fastify(app)` for Fastify, or `flight.wrapHandler(handler)`. Call `flight.start()` once at server start-up; with no manifest it records and checks the basics only. Run the server locally and show the person the basics report (`flight.report()`, or `npx reins flight report` on a saved report): failed and slow requests, upstream calls and runtime figures. The person sees what flight sees before anything is declared.
+Install `@mindmakr/reins` as a regular dependency, not a dev dependency: `npm i @mindmakr/reins` (not `npm i -D`). Flight runs in production, and a production install (`npm ci --omit=dev`) leaves dev dependencies out, so the server could not start. This differs from the dev-only setup in `setup.md`. Then add the framework hook from `@mindmakr/reins/flight`: `flight.middleware()` for Express or Connect, `flight.fastify(app)` for Fastify, or `flight.wrapHandler(handler)`. Call `flight.start()` once at server start-up; with no manifest it records and checks the basics only. Run the server locally and show the person the basics report (`flight.report()`, or `npx reins flight report` on a saved report): failed and slow requests, upstream calls and runtime figures. The person sees what flight sees before anything is declared.
 
 ### 3. Propose processes, steps and promises, and ask for approval
 
