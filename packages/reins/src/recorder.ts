@@ -389,7 +389,7 @@ function subscribe() {
  * fetch is seen through undici's channels on every supported Node. Calls through node:http and node:https are
  * seen through `http.client.*` diagnostics channels: calls that got a response from Node 18.6, failures
  * (`http.client.request.error`) from Node 20.17, 22.6 and 23.0. Measured on each release line: Node 18 and 21
- * never publish failures.
+ * never publish failures (Node 19 is treated the same; it was not probed).
  */
 export function notCheckedFacts(version: string = process.versions.node): string[] {
   const [a, b = 0] = version.split('.').map(Number);

@@ -217,6 +217,7 @@ describe('strict recording (flight)', () => {
     const rec = f.recorder()!;
     expect(rec.requests().map((r) => r.route)).toEqual(['/reset/:token', UNMATCHED]);
     // A failed node:http call is recorded only where Node publishes its failure; elsewhere the report says so.
+    // httpFailures comes from notCheckedFacts, which the version-table test pins.
     const httpFailures = !notCheckedFacts().some((l) => l.startsWith('Failed upstream calls through node:http'));
     expect(rec.requests()[0].upstream).toHaveLength(httpFailures ? 4 : 3);
     expect(f.notChecked()).toEqual(notCheckedFacts());

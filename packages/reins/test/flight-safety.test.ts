@@ -216,35 +216,49 @@ describe('@mindmakr/reins/flight safety (design section 7)', () => {
    * Imports a module in a fresh process and says whether it added a global or left a resource (timer, handle,
    * socket, file request) open. Node 18 and 20 close each module file the loader read after import() resolves
    * (a `CloseReq` that any module, even an empty one, leaves for one turn), so both sides are measured once the
-   * loader's own I/O has settled.
+   * loader's own I/O has settled. A one-shot `Immediate` would run during that settle, so it is checked right
+   * after the import resolves, before the settle. Listeners added to `process` are counted too.
    */
   function freshImport(file: string, report: string): Record<string, unknown> {
     const script = [
       `const settle = () => new Promise((r) => setImmediate(r));`,
+      `const listeners = () => process.eventNames().reduce((n, e) => n + process.listenerCount(e), 0);`,
       `await settle();`,
       `const before = Reflect.ownKeys(globalThis).length;`,
       `const res = process.getActiveResourcesInfo().join();`,
+      `const lis = listeners();`,
       `const m = await import(${JSON.stringify(new URL(`file:///${file.replace(/\\/g, '/')}`).href)});`,
       `const after = Reflect.ownKeys(globalThis).length;`,
+      `const immediate = process.getActiveResourcesInfo().includes('Immediate');`,
       `await settle();`,
       `const left = process.getActiveResourcesInfo().join();`,
-      `console.log(JSON.stringify({ globals: after - before, resources: left === res, ${report} }));`,
+      `const out = JSON.stringify({ globals: after - before, resources: left === res, immediate, listeners: listeners() - lis, ${report} });`,
+      `process.stdout.write(out, () => process.exit(0));`,
     ].join('\n');
     return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, NODE_ENV: 'production' } }));
   }
 
-  it('has a fresh-process measure that sees a timer or a global left by an import', () => {
+  it('has a fresh-process measure that sees a timer, handle, immediate, listener or global left by an import', () => {
     const dir = mkdtempSync(join(tmpdir(), 'reins-flight-safety-'));
     try {
       const timer = join(dir, 'timer.mjs');
       writeFileSync(timer, 'setTimeout(() => {}, 100);\nexport const x = 1;\n');
-      expect(freshImport(timer, 'x: m.x')).toEqual({ globals: 0, resources: false, x: 1 });
+      expect(freshImport(timer, 'x: m.x')).toEqual({ globals: 0, resources: false, immediate: false, listeners: 0, x: 1 });
       const global = join(dir, 'global.mjs');
       writeFileSync(global, 'globalThis.__reinsSafetyProbe = 1;\nexport const x = 1;\n');
-      expect(freshImport(global, 'x: m.x')).toEqual({ globals: 1, resources: true, x: 1 });
+      expect(freshImport(global, 'x: m.x')).toEqual({ globals: 1, resources: true, immediate: false, listeners: 0, x: 1 });
       const empty = join(dir, 'empty.mjs');
       writeFileSync(empty, 'export const x = 1;\n');
-      expect(freshImport(empty, 'x: m.x')).toEqual({ globals: 0, resources: true, x: 1 });
+      expect(freshImport(empty, 'x: m.x')).toEqual({ globals: 0, resources: true, immediate: false, listeners: 0, x: 1 });
+      const handle = join(dir, 'handle.mjs');
+      writeFileSync(handle, "import net from 'node:net';\nnet.createServer().listen(0);\nexport const x = 1;\n");
+      expect(freshImport(handle, 'x: m.x')).toEqual({ globals: 0, resources: false, immediate: false, listeners: 0, x: 1 });
+      const immediate = join(dir, 'immediate.mjs');
+      writeFileSync(immediate, 'setImmediate(() => {});\nexport const x = 1;\n');
+      expect(freshImport(immediate, 'x: m.x')).toMatchObject({ immediate: true, x: 1 });
+      const listener = join(dir, 'listener.mjs');
+      writeFileSync(listener, "process.on('reins-safety-probe', () => {});\nexport const x = 1;\n");
+      expect(freshImport(listener, 'x: m.x')).toEqual({ globals: 0, resources: true, immediate: false, listeners: 1, x: 1 });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -254,6 +268,8 @@ describe('@mindmakr/reins/flight safety (design section 7)', () => {
     expect(freshImport(built, 'dev: m.flight.devInstruments(), started: m.flight.isStarted()')).toEqual({
       globals: 0,
       resources: true,
+      immediate: false,
+      listeners: 0,
       dev: { production: true, devModuleLoaded: false, devRecording: false },
       started: false,
     });
