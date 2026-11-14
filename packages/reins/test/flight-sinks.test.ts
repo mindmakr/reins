@@ -2,7 +2,7 @@
 // the hourly limit and digest, the daily summary, one notification with two instances, keys and secrets kept
 // out of sinks and the store, and a sink that keeps failing.
 import { createHmac } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -377,6 +377,30 @@ describe('B11: what sinks and the store never get', () => {
       report: f.findings(),
     });
     expect(dump).not.toMatch(/SECRET/);
+  });
+
+  it('a manifest file that is not JSON is said in fixed words: none of its text reaches a sink, the store or the finding', async () => {
+    const dir = tmp();
+    const file = join(dir, 'reins.flight.json');
+    writeFileSync(file, 'SECRET=hunter2\n');
+    const rx = await receiver();
+    const got = collect();
+    const { f, store } = started([got.sink, functionSink(got.sink, { name: 'keyed', keys: true }), fileSink({ dir }), webhookSink({ url: rx.url, secret: SECRET })], { manifest: file });
+    await checkAndDeliver(f);
+    const told = got.got.find((n) => n.finding?.key === 'blind:manifest-invalid')!;
+    expect(told.finding!.text).toBe('The manifest is invalid, so no promise or probe is checked (the basics still are): 1 problem, the first at (root): is not valid JSON. Run `npx reins flight check`.');
+    expect(rx.hits.length).toBeGreaterThan(0);
+    const dump = JSON.stringify({
+      sinks: got.got,
+      webhook: rx.hits,
+      file: readFileSync(join(dir, 'notifications.jsonl'), 'utf8'),
+      findings: await store.findings(),
+      report: f.findings(),
+      manifest: f.manifest(),
+    });
+    expect(dump).not.toMatch(/hunter2|SECRET=/);
+    // `strict: true` throws with the same fixed words.
+    expect(() => createFlight({}).start({ store: memoryStore(), manifest: file, strict: true, checkEveryMs: 0 })).toThrow(/^reins flight: the manifest is invalid: \(root\) is not valid JSON$/);
   });
 });
 

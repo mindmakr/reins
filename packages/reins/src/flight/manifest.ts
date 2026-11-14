@@ -426,13 +426,26 @@ function checkPromise(q: unknown, path: string, c: Checker, declared: Set<string
   } as FlightPromise;
 }
 
+/** The problem message for manifest text that is not JSON. */
+export const NOT_JSON = 'is not valid JSON';
+
+/**
+ * The result with a not-JSON problem said in fixed words. JSON.parse's message quotes part of the text it read (a
+ * `.env` named as the manifest would show its secret), so only `reins flight check`, on the developer's own terminal,
+ * shows it; the server, the report and the bridge, whose text reaches sinks and agents, say only `is not valid JSON`.
+ */
+export function withoutParseDetail(result: ManifestResult): ManifestResult {
+  if (!result.ok) for (const p of result.problems) if (p.message.startsWith(NOT_JSON)) p.message = NOT_JSON;
+  return result;
+}
+
 /** Parses manifest text and validates it. Malformed JSON is a problem, not an exception. */
 export function parseManifest(text: string): ManifestResult {
   let data: unknown;
   try {
     data = JSON.parse(String(text).replace(/^﻿/, ''));
   } catch (e) {
-    return { ok: false, problems: [{ path: ROOT, message: `is not valid JSON: ${e instanceof Error ? e.message : String(e)}` }] };
+    return { ok: false, problems: [{ path: ROOT, message: `${NOT_JSON}: ${e instanceof Error ? e.message : String(e)}` }] };
   }
   return validateManifest(data);
 }
@@ -457,9 +470,9 @@ export function readManifest(file: string): ManifestResult {
 export function loadManifest(m: unknown, cwd: string = process.cwd()): ManifestResult | null {
   if (m === undefined || m === null) {
     const file = pathJoin(cwd, MANIFEST_FILE);
-    return existsSync(file) ? readManifest(file) : null;
+    return existsSync(file) ? withoutParseDetail(readManifest(file)) : null;
   }
-  return typeof m === 'string' ? readManifest(resolve(cwd, m)) : validateManifest(m);
+  return typeof m === 'string' ? withoutParseDetail(readManifest(resolve(cwd, m))) : validateManifest(m);
 }
 
 const SERVICE = /^[\x20-\x7e]{1,64}$/;

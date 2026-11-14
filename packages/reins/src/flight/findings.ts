@@ -5,10 +5,10 @@
 // get them only when the app opts in (C6, sinks.ts).
 // Imports: reins' shared modules only (the flight safety test walks this file).
 import type { Finding } from '../report.js';
-import { bucketP95, bucketsOver, LATENCY_BOUNDS, type Figures } from '../recorder.js';
+import { bucketP95, bucketsOver, ERROR_NAMES, LATENCY_BOUNDS, type Figures } from '../recorder.js';
 import type { BlindFact, CheckResult, PromiseCheck } from './checker.js';
 import { type Basics, basicsOf } from './limits.js';
-import { DEFAULT_WINDOW_MS, type FlightManifest, type ManifestResult } from './manifest.js';
+import { DEFAULT_WINDOW_MS, type FlightManifest, type ManifestResult, NOT_JSON } from './manifest.js';
 import { type CheckId, sourceLine } from './sources.js';
 import { type FindingRecord, type InstanceMinute, PRUNE_INSTANCE, storableText } from './store.js';
 
@@ -252,12 +252,14 @@ export function blindObservation(f: BlindFact, b: Basics): Observation | undefin
   switch (f.kind) {
     case 'manifest-invalid': {
       const first = f.problems[0];
+      // Fixed words for a file that is not JSON, whatever path read it: the parse message can quote the file.
+      const said = first && String(first.message).startsWith(NOT_JSON) ? NOT_JSON : first?.message;
       return {
         key: 'blind:manifest-invalid',
         kind: 'blind',
         level: 'error',
         n: f.problems.length,
-        text: `The manifest is invalid, so no promise or probe is checked (the basics still are): ${plural(f.problems.length, 'problem')}${first ? `, the first at ${nm(first.path)}: ${nm(first.message)}` : ''}. Run \`npx reins flight check\`.`,
+        text: `The manifest is invalid, so no promise or probe is checked (the basics still are): ${plural(f.problems.length, 'problem')}${first ? `, the first at ${nm(first.path)}: ${nm(said)}` : ''}. Run \`npx reins flight check\`.`,
       };
     }
     case 'store-unreachable':
@@ -624,7 +626,7 @@ function codeRules(minutes: InstanceMinute[], now: number, b: Basics, memory: Fi
     let n = 0;
     for (const m of minutes) if (live(m) && m.minute >= first - MIN && m.basics?.codes && typeof m.basics.codes === 'object') n += Number((m.basics.codes as Record<string, number>)[code]) || 0;
     if (!n) continue;
-    out.push({ key: `unusual:code:${code}`, kind: 'unusual', level: 'warn', n, source: sourceLine('new-code'), text: `Error code ${code} was seen for the first time ${duration(Math.max(0, now - first))} ago (${plural(n, 'time')} since).` });
+    out.push({ key: `unusual:code:${code}`, kind: 'unusual', level: 'warn', n, source: sourceLine('new-code'), text: `${ERROR_NAMES.has(code) ? 'Error type' : 'Error code'} ${code} was seen for the first time ${duration(Math.max(0, now - first))} ago (${plural(n, 'time')} since).` });
   }
   // Bounded: the codes known longest go first.
   const kept = Object.entries(codes).sort((x, y) => y[1] - x[1]).slice(0, MAX_CODES);
