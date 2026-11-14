@@ -52,8 +52,9 @@ Or in two steps:
 Then in any new or existing Vite, Next.js, React or Expo project:
 
 - `/reins:setup` — inspects your project, installs `@mindmakr/reins`, wires `@mindmakr/reins/vite`, `@mindmakr/reins/next` or `@mindmakr/reins/metro` (and `@mindmakr/reins/node` if you have a Node backend), adds dev-only `reins.connect()`, hooks up state adapters and high-value actions, wraps key screens in `<ReinsPanel>`, adds `reins verify` to your build script, and configures `.mcp.json`.
-- `/reins:drive` — drives your paired app and server through the 11 MCP tools (`reins_list_actions`, `reins_run_action`, `reins_state`, `reins_network`, `reins_errors`, `reins_panel_box`, `reins_snap`, `reins_perf`, `reins_dom`, `reins_server`, `reins_report`).
+- `/reins:drive` — drives your paired app and server through the bridge's MCP tools (`reins_list_actions`, `reins_run_action`, `reins_state`, `reins_network`, `reins_errors`, `reins_panel_box`, `reins_snap`, `reins_perf`, `reins_dom`, `reins_server`, `reins_report`).
 - `/reins:verify` — runs your production build and verifies zero `reins` dev code shipped.
+- `/reins:flight` — adds report-only production checks to a Node server with `@mindmakr/reins/flight`, after you approve its manifest of processes and promises, and reads its flight report.
 
 In OpenAI Codex CLI, Cursor or Antigravity: copy `skills/reins/` into `.agents/skills/` (or `~/.gemini/config/skills/`) and ask the agent to follow the `reins` skill.
 
@@ -73,7 +74,7 @@ Everything ships in the single `@mindmakr/reins` package:
 | `@mindmakr/reins/vite` | Vite plugin: serves `/__reins/token` in dev, swaps `@mindmakr/reins` and `@mindmakr/reins/record` for 0-marker stubs in production builds. |
 | `@mindmakr/reins/next` & `@mindmakr/reins/next/token-route` | `withReins(nextConfig)` (Webpack + Turbopack) and the `GET` token route handler. |
 | `@mindmakr/reins/metro` (or `@mindmakr/reins/expo/metro`) | `withReins(metroConfig)` for Expo and React Native. |
-| `npx reins bridge` | The localhost (`127.0.0.1:7357`) WebSocket pairing hub and stdio MCP server (11 tools). |
+| `npx reins bridge` | The localhost (`127.0.0.1:7357`) WebSocket pairing hub and stdio MCP server (12 tools, including the read-only `reins_flight`). |
 | `npx reins report [--compare a.json b.json]` | Renders a saved session as Markdown or prints a before/after regression table of metrics, per-URL latency, panel renders, and resolved/new findings. |
 | `npx reins verify <dir>` (`reins-verify-bundle`) | Fails if `__REINS_DEV_ONLY__` is found anywhere in a production build output folder. |
 
