@@ -85,6 +85,7 @@ export type SourceId = keyof typeof SOURCES;
 
 /** Each built-in check: the finding key it gives (its prefix), what it watches, and the document it follows. */
 export const CHECKS = {
+  health: { source: 'sre-monitoring', what: "The server's health address, polled by the watcher (`reins flight watch`) only." },
   'error-share': { source: 'sre-monitoring', what: 'The share of failed requests (5xx, no response or an error code) across all instances.' },
   'slow-route': { source: 'web-dev-ttfb', what: 'The 95th percentile time of each route across all instances.' },
   upstream: { source: 'sre-monitoring', what: 'The share of failed calls to each upstream host across all instances.' },

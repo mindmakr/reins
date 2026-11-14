@@ -52,8 +52,10 @@ export interface Observation {
   tags?: string[];
   /** The figure behind it; without one, `count` counts the passes that saw it. */
   n?: number;
-  /** When it happened, if not now. */
+  /** When it happened, if not now; the latest time when it happened more than once. */
   at?: number;
+  /** When it first happened, when that is earlier than `at` (a promise broken by several runs). */
+  firstAt?: number;
   source?: string;
   process?: string;
   why?: string;
@@ -98,7 +100,15 @@ export interface EvaluateInput {
   now?: number;
   /** Observations from outside the checker, such as sinks that keep failing (key prefix `blind:sink:`). */
   extra?: Observation[];
+  /**
+   * The server's health address, when the watcher polled it this pass: null when it answered, else its finding
+   * (key HEALTH_KEY). Left out, the health finding is not judged and stays as it was: only a watcher sees it.
+   */
+  health?: Observation | null;
 }
+
+/** The key of the watcher's finding that the server stopped answering its health address (design section 5). */
+export const HEALTH_KEY = 'basic:health';
 
 export interface EvaluateResult {
   /** Every finding known, open and resolved, in report order. */
@@ -250,6 +260,13 @@ export function blindObservation(f: BlindFact, b: Basics): Observation | undefin
         level: 'error',
         text: f.error === 'timeout' ? 'The store did not answer within the time limit, so nothing was checked.' : `The store could not be read (${nm(f.error)}), so nothing was checked.`,
       };
+    case 'findings-unsaved':
+      return {
+        key: 'blind:findings-unsaved',
+        kind: 'blind',
+        level: 'error',
+        text: `The store answered but refused to save the findings (${nm(f.error)}), so what flight found was neither saved nor told.`,
+      };
     case 'lock-unavailable':
       return { key: 'blind:lock-unavailable', kind: 'blind', level: 'warn', text: `The checker lock could not be taken (${nm(f.error)}), so this checker did not check; is the lock table there?` };
     case 'steps-dropped':
@@ -312,7 +329,7 @@ function promiseRules(check: CheckResult, m: FlightManifest, b: Basics, out: Obs
     judged.add(drift);
     const promise = m.processes.find((x) => x.name === c.process)?.promises.find((x) => x.id === c.id);
     if (c.state === 'broken') {
-      out.push({ key, kind: 'broken', level: 'error', n: c.count, at: c.lastBreachAt, process: c.process, keys: c.keys.slice(0, MAX_KEYS), text: promiseText(c, m), ...(promise?.why ? { why: promise.why } : {}) });
+      out.push({ key, kind: 'broken', level: 'error', n: c.count, firstAt: c.firstBreachAt, at: c.lastBreachAt, process: c.process, keys: c.keys.slice(0, MAX_KEYS), text: promiseText(c, m), ...(promise?.why ? { why: promise.why } : {}) });
       continue;
     }
     // Held: drifting when the slowest 5% of the runs that finished take most of the time allowed (B5).
@@ -621,11 +638,14 @@ function codeRules(minutes: InstanceMinute[], now: number, b: Basics, memory: Fi
 
 const levelRank = (l: string) => (l === 'error' ? 0 : 1);
 
+/** When an observation first happened: its `firstAt`, else its `at`, else now. Never later than its `at`. */
+const began = (o: Observation, now: number) => (typeof o.firstAt === 'number' ? o.firstAt : typeof o.at === 'number' ? o.at : now);
+
 /**
  * The findings about one server's own way to the store. They live in that server only (B13): never written to the
  * store, never judged by another server.
  */
-export const STORE_KEYS: ReadonlySet<string> = new Set(['blind:store-unreachable', 'blind:lock-unavailable']);
+export const STORE_KEYS: ReadonlySet<string> = new Set(['blind:store-unreachable', 'blind:lock-unavailable', 'blind:findings-unsaved']);
 
 /** Blind keys every pass judges: the store, the lock and the manifest. */
 const STORE_BLIND = ['blind:store-unreachable', 'blind:lock-unavailable', 'blind:manifest-invalid'];
@@ -699,8 +719,15 @@ export function evaluate(input: EvaluateInput): EvaluateResult {
   rule(['blind:sink:'], () => {
     for (const x of input.extra || []) obs.push(x);
   });
+  const health = input.health;
+  if (health !== undefined)
+    rule([], () => {
+      if (health) obs.push({ ...health, key: HEALTH_KEY, kind: 'basic' });
+      judged.add(HEALTH_KEY);
+    });
 
-  const isJudged = (key: string) => judged.has(key) || judgedPrefixes.some((p) => key.startsWith(p));
+  // The health finding is judged only by a pass that polled the address (a watcher's), never by the basics' prefix.
+  const isJudged = (key: string) => judged.has(key) || (key !== HEALTH_KEY && judgedPrefixes.some((p) => key.startsWith(p)));
   const prior = new Map(input.prior.map((f) => [f.key, f]));
   const seen = new Map<string, Observation>();
   for (const o of obs) if (!seen.has(o.key)) seen.set(o.key, o);
@@ -717,7 +744,8 @@ export function evaluate(input: EvaluateInput): EvaluateResult {
       text: o.text,
       ...(o.tags?.length ? { tags: [...o.tags] } : {}),
       count: typeof o.n === 'number' ? o.n : open ? (p.count || 0) + 1 : 1,
-      firstAt: open ? p.firstAt : now,
+      // When it first happened: an open finding's own start, or an earlier breach the check names (B9).
+      firstAt: open ? Math.min(p.firstAt, began(o, now)) : began(o, now),
       lastAt: typeof o.at === 'number' ? o.at : now,
       state: 'open',
       ...(o.source ? { source: o.source } : {}),

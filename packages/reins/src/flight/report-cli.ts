@@ -78,8 +78,13 @@ function readReport(file: string): FlightReport {
   }
 }
 
-/** Loads the app's config module and makes the report from its store. Throws a plain message. */
-async function fromConfig(module: string, cwd: string): Promise<FlightReport> {
+/**
+ * Loads the app's flight config module (design C14): its default export, a function returning it, or a named
+ * `config`, which must hold a store the servers share. `reins flight report` and `reins flight watch` both read
+ * it here. `use` names what the command does with the store, for the message when there is none. Throws a plain
+ * message.
+ */
+export async function loadFlightConfig(module: string, cwd: string, use = 'A report reads'): Promise<{ file: string; opts: any }> {
   const file = resolve(cwd, module);
   if (!existsSync(file) || !statSync(file).isFile()) throw new Error(`${file} not found`);
   let mod: any;
@@ -98,7 +103,13 @@ async function fromConfig(module: string, cwd: string): Promise<FlightReport> {
     throw new Error(`${file}: its config function threw (${errorCode(e)})`);
   }
   if (!opts || typeof opts !== 'object') throw new Error(`${file} exports no flight options: export default the object the server passes to flight.start(), or a function that returns it`);
-  if (!isStore(opts.store)) throw new Error(`${file}: its options have no store. A report reads the store the servers write to (fileStore or pgStore); the memory store lives only in one server, so read it there with flight.report().`);
+  if (!isStore(opts.store)) throw new Error(`${file}: its options have no store. ${use} the store the servers write to (fileStore or pgStore); the memory store lives only in one server, so read it there with flight.report().`);
+  return { file, opts };
+}
+
+/** Loads the app's config module and makes the report from its store. Throws a plain message. */
+async function fromConfig(module: string, cwd: string): Promise<FlightReport> {
+  const { opts } = await loadFlightConfig(module, cwd);
   let manifest;
   try {
     manifest = loadManifest(opts.manifest, cwd);

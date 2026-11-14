@@ -344,7 +344,7 @@ describe('reins flight check', () => {
     expect(flightMain(['check', 'broken.json'], project({ 'broken.json': '{' }), o.print, o.print)).toBe(1);
   });
 
-  it('exits 2 on a missing file, bad usage, or a command that is not there yet', async () => {
+  it('exits 2 on a missing file, bad usage, or a command that is not there', async () => {
     const o = capture();
     const empty = project({});
     expect(flightCheckMain([], empty, o.print, o.print)).toBe(2);
@@ -352,7 +352,8 @@ describe('reins flight check', () => {
     expect(flightCheckMain(['a.json', 'b.json'], empty, o.print, o.print)).toBe(2);
     expect(flightCheckMain(['--strict'], empty, o.print, o.print)).toBe(2);
     expect(flightMain([], empty, o.print, o.print)).toBe(2);
-    expect(flightMain(['watch'], empty, o.print, o.print)).toBe(2);
+    expect(flightMain(['fly'], empty, o.print, o.print)).toBe(2);
+    expect(await flightMain(['watch'], empty, o.print, o.print)).toBe(2);
     expect(await flightMain(['report'], empty, o.print, o.print)).toBe(2);
     expect(flightMain(['--help'], empty, o.print, o.print)).toBe(0);
   });

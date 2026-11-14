@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BROKEN_LOCK_MS, fileStore, safe } from '../src/flight/file-store.js';
 import { PG_TABLES, pgStore } from '../src/flight/pg-store.js';
-import { isStore, memoryStore } from '../src/flight/store.js';
+import { isStore, memoryStore, planPrune, type RunSummary } from '../src/flight/store.js';
 import { DAY, real, step, storeContract } from './flight-store-contract.js';
 
 const dirs: string[] = [];
@@ -341,6 +341,25 @@ describe('postgres store statements', () => {
     expect(() => pgStore({} as any)).toThrow(/query function/);
     expect(isStore(pgStore({ query: async () => [] }))).toBe(true);
     expect(isStore({ addSteps() {} })).toBe(false);
+  });
+});
+
+describe('B8: a prune of more than 200,000 runs at once', () => {
+  it('plans it without a RangeError and keeps the markers it kept before: the newest, up to the bound', () => {
+    const N = 250_000;
+    const run = (key: string, last: number, real: number): RunSummary => ({ process: 'payout', key, last, real, marked: real === 0, steps: [] });
+    const runs: RunSummary[] = [];
+    for (let i = 0; i < N; i++) runs.push(run(`p${i}`, i, 1));
+    // 100 runs that already hold only their marker, newer than every run that goes now.
+    for (let i = 0; i < 100; i++) runs.push(run(`m${i}`, N + 5, 0));
+    const plan = planPrune(runs, { cut: N + 10, markCut: 0, maxSteps: 1_000_000, maxMarks: 1_000 });
+    // Every real run goes; the 100 old markers are kept, and so 900 of the runs going now leave one, the newest.
+    expect(plan.gone).toHaveLength(N);
+    expect(plan.gone.every((r) => r.real === 1)).toBe(true);
+    expect(plan.mark).toHaveLength(900);
+    expect(plan.mark.map((r) => r.last)).toEqual(Array.from({ length: 900 }, (_, i) => N - 1 - i));
+    // The rest go with no trace, and are counted as such.
+    expect(plan.unmarked).toHaveLength(N - 900);
   });
 });
 

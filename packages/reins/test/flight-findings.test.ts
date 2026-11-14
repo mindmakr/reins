@@ -454,3 +454,26 @@ describe("round 3: the critics' findings on the rules", () => {
     expect(basicsAndDrift(only(minutes, manifest({ basics: { slowRouteMs: 900 } })))).toEqual(['drifting:route:GET /x']);
   });
 });
+
+describe('B9: a broken promise says when it first and last happened, in that order', () => {
+  it('a within finding opened now over runs that became overdue earlier has firstAt at the first, lastAt at the last', async () => {
+    // p2 became overdue at NOW - 2 h, p1 at NOW - 1 h; the finding opens at NOW.
+    const store = await storeWith([im('a', back(1))], [['p1', 'bank.pending', NOW - 5 * H], ['p2', 'bank.pending', NOW - 6 * H]]);
+    const one = await pass(store, manifest(), NOW);
+    const f = byKey(one, 'promise:payout:pending-settles')!;
+    expect(f).toMatchObject({ state: 'open', count: 2, firstAt: NOW - 2 * H, lastAt: NOW - H });
+    // An open finding kept from before with a later firstAt (as the u5 report showed: first 08:58, last 03:58) keeps
+    // the earlier time when the check names one.
+    const kept = { ...f, firstAt: NOW + 5 * H };
+    const two = await pass(store, manifest(), NOW + 5 * H, [kept], one.memory);
+    const g = byKey(two, 'promise:payout:pending-settles')!;
+    expect(g).toMatchObject({ state: 'open', firstAt: NOW - 2 * H, lastAt: NOW - H });
+    expect(g.lastAt).toBeGreaterThanOrEqual(g.firstAt);
+  });
+
+  it('a once finding over several breaches has firstAt at the first breach and lastAt at the last', async () => {
+    const store = await storeWith([im('a', back(1))], [['a1', 'ledger.debited', NOW - 3 * H], ['a1', 'ledger.debited', NOW - 3 * H + MIN], ['b1', 'ledger.debited', NOW - H], ['b1', 'ledger.debited', NOW - H + MIN]]);
+    const f = byKey(await pass(store, manifest(), NOW), 'promise:payout:one-debit')!;
+    expect(f).toMatchObject({ state: 'open', count: 2, firstAt: NOW - 3 * H + MIN, lastAt: NOW - H + MIN });
+  });
+});

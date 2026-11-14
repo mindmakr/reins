@@ -352,7 +352,8 @@ export function planPrune<R extends RunSummary<any>>(runs: Iterable<R>, o: { cut
     }
   }
   const removed = new Set(gone);
-  marks.push(...gone);
+  // One at a time: spread into push, a prune of some hundred thousand runs passes more arguments than a call takes (B8).
+  for (const r of gone) marks.push(r);
   marks.sort((a, b) => b.last - a.last);
   const mark: R[] = [];
   const unmarked: R[] = [];
