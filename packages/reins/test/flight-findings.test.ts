@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { check, type CheckResult } from '../src/flight/checker.js';
 import { evaluate, type EvaluateResult, type FindingsMemory, type FlightFinding, KIND_ORDER } from '../src/flight/findings.js';
 import { BASICS, DEFAULT_BASICS, LIMITS, SINK_LIMITS } from '../src/flight/limits.js';
-import { BASIC_NAMES, type ManifestResult, readManifest, validateManifest } from '../src/flight/manifest.js';
+import { BASIC_NAMES, type ManifestResult, parseManifest, readManifest, validateManifest } from '../src/flight/manifest.js';
 import { CHECKS, SOURCES } from '../src/flight/sources.js';
 import { type FlightStore, type InstanceMinute, memoryStore } from '../src/flight/store.js';
 import { type Figures, LATENCY_BOUNDS } from '../src/recorder.js';
@@ -146,6 +146,12 @@ describe('B3: blind findings', () => {
     const inv = await pass(store, bad, NOW);
     expect(byKey(inv, 'blind:manifest-invalid')).toMatchObject({ kind: 'blind', level: 'error', state: 'open' });
     expect(byKey(inv, 'blind:manifest-invalid')!.text).toMatch(/^The manifest is invalid, so no promise or probe is checked \(the basics still are\): 1 problem, the first at processes/);
+
+    // Text that is not JSON: the finding never quotes the parse message, which can quote the file.
+    const notJson = parseManifest('SECRET=hunter2');
+    expect(JSON.stringify(notJson)).toContain('is not valid JSON:');
+    const nj = await pass(store, notJson, NOW);
+    expect(byKey(nj, 'blind:manifest-invalid')!.text).toBe('The manifest is invalid, so no promise or probe is checked (the basics still are): 1 problem, the first at (root): is not valid JSON. Run `npx reins flight check`.');
   });
 
   it('no-steps waits until flight has been recording for a while', async () => {
@@ -204,6 +210,13 @@ describe('B4: unusual findings', () => {
     // A day later it is no longer new, and the finding resolves; ETIMEDOUT was known all along.
     const later = await pass(store, null, NOW + DAY, r.findings, r.memory);
     expect(byKey(later, 'unusual:code:ECONNRESET')!.state).toBe('resolved');
+  });
+
+  it('a built-in class name kept as the code is worded as an error type, not an error code', async () => {
+    const store = await storeWith([im('a', back(2), { codes: { Error: 2, TypeError: 1 } })]);
+    const r = await pass(store, null, NOW);
+    expect(byKey(r, 'unusual:code:Error')!.text).toBe('Error type Error was seen for the first time 2 min ago (2 times since).');
+    expect(byKey(r, 'unusual:code:TypeError')!.text).toBe('Error type TypeError was seen for the first time 2 min ago (1 time since).');
   });
 });
 

@@ -458,6 +458,17 @@ npx reins flight watch --config flight.config.mjs</code></pre>
         <p>Or let your agent do it: <code>/reins:flight</code> proposes the processes and promises in plain words and wires nothing until you approve them.</p>
       </div>
     </div>
+
+    <div class="panel-card flight-limits">
+      <h3>What flight does not protect against</h3>
+      <ul class="tool-list">
+        <li><b>A secret in a step name or process key.</b><span>Flight keeps both as given. Never build them from personal data or secrets.</span></li>
+        <li><b>A store or report page shown without sign-in.</b><span>The store and the report JSON hold process keys. Show the report only behind the app's own sign-in, and keep the store private.</span></li>
+        <li><b>A webhook address that points somewhere it should not.</b><span>Flight sends to the address the app gives it. Read it from the environment and check where it goes.</span></li>
+        <li><b>Anyone who already controls the server.</b><span>They can change the app, its config module or flight itself.</span></li>
+      </ul>
+      <p>These limits and flight's safety rules are in <a href="https://github.com/mindmakr/reins/blob/main/SECURITY.md#what-flight-does-not-protect-against">SECURITY.md: what flight does not protect against</a>.</p>
+    </div>
   </div>
 </section>
 

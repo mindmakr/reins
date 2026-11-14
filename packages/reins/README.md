@@ -9,6 +9,8 @@ Give coding agents the reins: development tools to drive, inspect and debug web 
 
 See the [main README](https://github.com/mindmakr/reins#readme) for setup, and [SECURITY.md](https://github.com/mindmakr/reins/blob/main/SECURITY.md) for the security model and flight's safety rules.
 
+Flight does not protect against a secret the app puts in a step name or process key, a store or report page shown without sign-in, a webhook address that points somewhere it should not, or anyone who already controls the server. See [what flight does not protect against](https://github.com/mindmakr/reins/blob/main/SECURITY.md#what-flight-does-not-protect-against).
+
 Flight (`@mindmakr/reins/flight` and `npx reins flight watch`) is ESM only: loaded with `import` it needs Node 18 or newer; loaded with `require` it needs Node 20.19 or 22.12 and newer (design C17).
 
 MIT © mindmakr

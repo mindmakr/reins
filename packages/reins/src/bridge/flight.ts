@@ -6,7 +6,7 @@
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileStore } from '../flight/file-store.js';
-import { MANIFEST_FILE, parseManifest, serviceOf, type ManifestResult } from '../flight/manifest.js';
+import { MANIFEST_FILE, parseManifest, serviceOf, withoutParseDetail, type ManifestResult } from '../flight/manifest.js';
 import { parseFlightReport, renderFlightMarkdown } from '../flight/render.js';
 import { collectReport, type FlightReport } from '../flight/report.js';
 
@@ -144,11 +144,9 @@ function readProjectManifest(root: string, p: unknown, max: number): ManifestRes
     if (p === undefined && /not found$/.test(e.message)) return null;
     throw e;
   }
-  const result = parseManifest(readCapped(file, max, 'manifest'));
   // JSON.parse's error quotes the text it read (a .env named as the manifest would show its secret), so the tool
   // says only that it is not JSON.
-  if (!result.ok) for (const p of result.problems) if (p.message.startsWith('is not valid JSON')) p.message = 'is not valid JSON';
-  return result;
+  return withoutParseDetail(parseManifest(readCapped(file, max, 'manifest')));
 }
 
 /**

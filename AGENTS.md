@@ -42,6 +42,8 @@ Flight (`@mindmakr/reins/flight`) records the steps of a server's long-running w
 - **Never invent a promise the person has not approved.** Propose processes, steps and promises in plain words, each with its `why`, and wire nothing until the person approves the manifest.
 - **Never use flight to change behaviour.** No code branches on a flight call, a finding or a report. Flight reports; a fix is a separate change the person asks for.
 
+Flight does not protect against a secret the app puts in a step name or process key, a store or report page shown without sign-in, a webhook address that points somewhere it should not, or anyone who already controls the server. See [SECURITY.md](SECURITY.md#what-flight-does-not-protect-against).
+
 Keep the development imports (`reins.connect()`, `@mindmakr/reins/node`) behind the project's development check as before. Flight does not replace them and they never go to production.
 
 ## Staging

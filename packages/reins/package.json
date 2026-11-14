@@ -1,7 +1,7 @@
 {
   "name": "@mindmakr/reins",
   "version": "0.2.0",
-  "description": "Give coding agents the reins: development tools to drive, inspect and debug web and Expo apps, and a report-only flight entry for Node servers. Production builds contain no development reins; @mindmakr/reins/flight is the only part meant for production.",
+  "description": "Give coding agents the reins: development tools to drive, inspect and debug web and Expo apps, and a report-only flight entry for Node servers. Production builds contain no development reins; @mindmakr/reins/flight is the only part meant for production. SECURITY.md says what flight does not protect against.",
   "license": "MIT",
   "author": "mindmakr",
   "homepage": "https://mindmakr.github.io/reins/",

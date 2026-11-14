@@ -568,7 +568,7 @@ const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIO
 // as `ERR_INVALID_URL`); and a built-in class name from a fixed list. Anything else, such as a key-shaped
 // `AKIAIOSFODNN7_EXAMPLE` set as a code or a name, becomes `error`.
 const CODE = /^(?:E[A-Z]{1,15}|(?=.{5,40}$)(?:UND_)?ERR_[A-Z_]+)$/;
-const ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError', 'AbortError', 'TimeoutError']);
+export const ERROR_NAMES: ReadonlySet<string> = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError', 'AbortError', 'TimeoutError']);
 const SPAN_NAME = /^[\w.:-]{1,64}$/;
 const HOST = /^(?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63}$|^\[[0-9a-f:.]{2,45}\]$/;
 
