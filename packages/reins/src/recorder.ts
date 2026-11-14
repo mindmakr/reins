@@ -684,11 +684,6 @@ function figures(a: Agg, limits: readonly number[]): Figures {
   };
 }
 
-/**
- * The strict recorder flight uses (design C16): a request is method, route pattern, status and timing; an
- * upstream call is method, host, status and timing; an error is a short code. Headers, paths, query strings,
- * bodies and error messages never enter a record. Buffers are bounded and what falls out is counted.
- */
 /** Extra limits a strict recorder counts exactly, at most. */
 const MAX_LIMITS = 4;
 
@@ -701,6 +696,9 @@ export function extraLimits(list: unknown): number[] {
 }
 
 /**
+ * The strict recorder flight uses (design C16): a request is method, route pattern, status and timing; an
+ * upstream call is method, host, status and timing; an error is a short code. Headers, paths, query strings,
+ * bodies and error messages never enter a record. Buffers are bounded and what falls out is counted.
  * `limits` are flight's own time limits (its slow-route limit and the error level): those that are not bucket
  * bounds are counted exactly per row, in `Figures.over`.
  */

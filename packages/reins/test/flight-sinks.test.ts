@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createFlight, type Flight } from '../src/flight.js';
 import type { Change, FlightFinding } from '../src/flight/findings.js';
 import { validateManifest } from '../src/flight/manifest.js';
-import { createNotifier, fileSink, fitBody, functionSink, normaliseSinks, type Notification, SinkError, sinkView, webhookSink, webhookUrl } from '../src/flight/sinks.js';
+import { createNotifier, fileSink, fitBody, functionSink, mergeNotify, normaliseSinks, type Notification, SinkError, sinkView, webhookSink, webhookUrl } from '../src/flight/sinks.js';
 import { type FlightStore, memoryStore } from '../src/flight/store.js';
 import { markDevModule } from '../src/recorder.js';
 import { fig, im, MIN } from './flight-fixtures.js';
@@ -478,7 +478,7 @@ describe("round 2: the critics' findings on sinks and the notifier", () => {
     const n = createNotifier([{ name: 'bad', send: () => Promise.reject(new SinkError('status-500')) }], { daily: false, failures: 1 });
     n.dispatch(n.plan([{ event: 'opened', finding: finding() }], undefined, Date.now(), 'api').deliveries);
     await n.idle();
-    expect(n.health()[0].text).toBe('Sink bad has failed its last 1 delivery (status-500), so findings may not reach it.');
+    expect(n.health()[0].text).toBe('Sink bad has failed its last delivery (status-500), so findings may not reach it.');
   });
 });
 
@@ -689,4 +689,248 @@ describe("round 2: the critics' findings on store outages", () => {
     expect(good.got.filter((x) => x.includes('blind:sink:bad'))).toEqual(['srv: opened blind:sink:bad', 'srv: resolved blind:sink:bad']);
     expect((await store.findings()).find((x) => x.key === 'blind:sink:bad')?.state).toBe('resolved');
   });
+});
+
+describe('round 4: one rule on the store-outage path', () => {
+  /** How one server reaches a shared store this period. */
+  type Mode = 'ok' | 'refused' | 'lock-refused' | 'slow-lock' | 'slow-lock-refused' | 'slow-read' | 'slow-write' | 'slow-check' | 'hung';
+  const fail = () => Object.assign(new Error('down'), { code: 'ECONNREFUSED' });
+  /**
+   * One server's way to a shared store: refused, slow (twice `slowMs`) at the lock, the findings read, the
+   * findings write or the check's reads, or hung until it recovers (`release`). `takeover` takes the lock as if
+   * the holder's lease ran out; `failLockAfterWrite` refuses the next lock call after a findings write.
+   */
+  function way(base: FlightStore, slowMs: number) {
+    const ctl = { mode: 'ok' as Mode, takeover: false, failLockAfterWrite: false };
+    const waiting: Array<() => void> = [];
+    let lockFails = false;
+    const store = new Proxy(base, {
+      get(t, k) {
+        const v = (t as any)[k];
+        if (typeof v !== 'function') return v;
+        return async (...a: unknown[]) => {
+          const m = ctl.mode;
+          if (m === 'refused' || (m === 'lock-refused' && k === 'lock')) throw fail();
+          if (k === 'lock' && lockFails) {
+            lockFails = false;
+            throw fail();
+          }
+          if (m === 'hung') await new Promise<void>((r) => waiting.push(r));
+          if (m === 'slow-lock-refused' && k === 'lock') {
+            await new Promise((r) => setTimeout(r, 2 * slowMs));
+            throw fail();
+          }
+          const slow = (m === 'slow-lock' && k === 'lock') || (m === 'slow-read' && k === 'findings') || (m === 'slow-write' && k === 'putFindings') || (m === 'slow-check' && k === 'minutes');
+          if (slow) await new Promise((r) => setTimeout(r, 2 * slowMs));
+          if (k === 'lock' && ctl.takeover) a = [a[0], a[1], Date.now() + 10 * MIN];
+          const out = await v.apply(t, a);
+          if (k === 'putFindings' && ctl.failLockAfterWrite) lockFails = true;
+          return out;
+        };
+      },
+    }) as FlightStore;
+    return { store, ctl, release: () => waiting.splice(0).forEach((r) => r()) };
+  }
+  interface Told {
+    inst: string;
+    type: Notification['type'];
+    key?: string;
+    at: number;
+  }
+  const record = (events: Told[], inst: string) => (n: Notification) => void events.push({ inst, type: n.type, key: n.finding?.key, at: Date.now() });
+  /** Fake timers and clock: time-outs, slow calls, the store's lock and the findings all move only when the test moves them. */
+  function fakeTime(start = Date.UTC(2026, 10, 14, 12, 0, 30)) {
+    vi.useFakeTimers({ now: start, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    onTestFinished(() => void vi.useRealTimers());
+  }
+  /** One period: every server starts a pass at once, `ms` of time passes, and the passes and deliveries settle. */
+  async function period(fs: Flight[], ms = MIN) {
+    const passes = fs.map((f) => f.checkNow());
+    await vi.advanceTimersByTimeAsync(ms);
+    await Promise.all(passes);
+    for (const f of fs) await f.sinksIdle();
+  }
+  const changes = (e: Told[]) => e.filter((x) => x.type === 'opened' || x.type === 'changed' || x.type === 'resolved');
+
+  it('M1: a late pass that resolves the outage its time-out opened clears that entry, so it is not resolved again', async () => {
+    fakeTime();
+    const w = way(memoryStore(), 200);
+    const events: Told[] = [];
+    const { f } = started([record(events, 'srv')], { store: w.store, checkTimeoutMs: 200 });
+    await period([f]);
+    w.ctl.mode = 'slow-read';
+    await period([f], 1000);
+    w.ctl.mode = 'ok';
+    for (let i = 0; i < 3; i++) await period([f]);
+    expect(changes(events).map((e) => `${e.type} ${e.key}`)).toEqual(['opened blind:store-unreachable', 'resolved blind:store-unreachable']);
+    expect((await w.store.findings()).find((x) => x.key === 'blind:store-unreachable')?.state).toBe('resolved');
+  });
+
+  it('M2: a server that never held the lock tells an outage flipping between its two kinds within the hourly limit, then one digest', async () => {
+    fakeTime(Date.UTC(2026, 10, 14, 12, 0, 30));
+    const w = way(memoryStore(), 100);
+    const events: Told[] = [];
+    const { f } = started([record(events, 'srv')], { store: w.store, checkTimeoutMs: 100 });
+    // The security critic's p7: every pass the store's failure flips between a refused lock and a lock with no answer in time.
+    for (let i = 0; i < 60; i++) {
+      w.ctl.mode = i % 2 ? 'slow-lock-refused' : 'refused';
+      await period([f]);
+    }
+    expect(changes(events)).toHaveLength(5);
+    expect(events.filter((e) => e.type === 'digest')).toHaveLength(0);
+    await period([f]);
+    expect(events.filter((e) => e.type === 'digest')).toHaveLength(1);
+  });
+
+  it('L1: a late findings write still tells what it wrote when the lock check after it fails for a moment', async () => {
+    fakeTime();
+    const base = memoryStore();
+    const w = way(base, 200);
+    const events: Told[] = [];
+    const { f } = started([record(events, 'srv')], { store: w.store, checkTimeoutMs: 200 });
+    await period([f]);
+    await errors(base, 40, 10);
+    w.ctl.mode = 'slow-write';
+    w.ctl.failLockAfterWrite = true;
+    await period([f], 1000);
+    w.ctl.mode = 'ok';
+    w.ctl.failLockAfterWrite = false;
+    for (let i = 0; i < 2; i++) await period([f]);
+    expect(changes(events).filter((e) => e.key === 'basic:error-share').map((e) => e.type)).toEqual(['opened']);
+  });
+
+  it('L3: a server whose store never answers tells the outage one lease after the pass that found it, on 59.999 s periods', async () => {
+    fakeTime();
+    const w = way(memoryStore(), 1000);
+    w.ctl.mode = 'hung';
+    const events: Told[] = [];
+    const { f } = started([record(events, 'srv')], { store: w.store });
+    // The first pass waits the whole 30 s time limit; the passes after it find the store work still hanging.
+    for (let i = 0; i < 3; i++) await period([f], 59_999);
+    expect(changes(events)).toEqual([]);
+    await period([f], 59_999);
+    expect(changes(events).map((e) => `${e.type} ${e.key}`)).toEqual(['opened blind:store-unreachable']);
+    w.ctl.mode = 'ok';
+    w.release();
+  });
+
+  it('M2: a notify state merges per sink by the later hour and the higher counts, and only a plan with the summary moves its clock', () => {
+    const n = createNotifier([{ name: 'chat', send: () => {} }]);
+    const hour = Date.UTC(2026, 10, 14, 10);
+    const opened = (i: number): Change => ({ event: 'opened', finding: finding({ key: `basic:slow-route:GET /r${i}` }) });
+    // The store says 2 sent this hour; this server told 4 while it could not reach it: 4 count, so one more goes.
+    const stored = n.plan([opened(0), opened(1)], undefined, hour + MIN, 'api').state;
+    const mine = n.plan([0, 1, 2, 3].map(opened), undefined, hour + 2 * MIN, 'api').state;
+    expect(n.plan([opened(4), opened(5)], mergeNotify(stored, mine), hour + 3 * MIN, 'api').deliveries).toHaveLength(1);
+    // A later hour wins over an earlier one, with what it held.
+    const later = n.plan([], mine, hour + H + MIN, 'api').state;
+    expect(mergeNotify(stored, later)!.sinks!.chat.hour).toBe(Math.floor((hour + H) / H));
+    // No summary given: the daily clock stays where the plan that sends the summary left it.
+    expect(n.plan([], { dailyFrom: hour }, hour + 30 * H, 'api').state.dailyFrom).toBe(hour);
+    expect(mergeNotify({ dailyFrom: hour }, n.plan([], undefined, hour + H, 'api').state)!.dailyFrom).toBe(hour);
+  });
+
+  /** A small seeded generator, so a failing sequence can be run again. */
+  function rng(seed: number) {
+    let s = seed >>> 0;
+    return () => {
+      s = (s + 0x6d2b79f5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const MODES: Mode[] = ['ok', 'ok', 'ok', 'refused', 'lock-refused', 'slow-lock', 'slow-lock-refused', 'slow-read', 'slow-write', 'slow-check', 'hung'];
+  /** The minute of the sequence a notification came in, for the failure message. */
+  const START = Date.UTC(2026, 10, 14, 12, 40, 30);
+  const when = (e: Told) => `${Math.round((e.at - START) / MIN)}m `;
+
+  /**
+   * The invariants over what the sinks heard; returns the breaches. During an outage two servers may each tell the
+   * same opening once (design: a duplicate accepted, so every sink hears of it). So, per finding: a server tells an
+   * opening again only after someone told it resolved (`since`: the servers whose opening no one has resolved
+   * since); and every "resolved" matches a told opening: the server's own, which it has not told resolved yet
+   * (`open`), or one that no one has told resolved since (`since`). A "resolved" covers every opening told before it.
+   */
+  function breaches(events: Told[], perHour: number, paired: boolean): string[] {
+    const out: string[] = [];
+    const since = new Map<string, Set<string>>();
+    const open = new Map<string, Set<string>>();
+    const sent = new Map<string, number>();
+    const digests = new Map<string, number>();
+    for (const e of events) {
+      const hour = `${e.inst}@${Math.floor(e.at / H)}`;
+      if (e.type === 'digest') {
+        digests.set(hour, (digests.get(hour) || 0) + 1);
+        if (digests.get(hour)! > 1) out.push(`${when(e)}${e.inst} got two digests in one hour`);
+        continue;
+      }
+      if (e.type === 'summary') continue;
+      sent.set(hour, (sent.get(hour) || 0) + 1);
+      if (sent.get(hour)! > perHour) out.push(`${when(e)}${e.inst} told more than ${perHour} in one hour`);
+      if (!paired) continue;
+      const told = since.get(e.key!) || new Set<string>();
+      const still = open.get(e.key!) || new Set<string>();
+      since.set(e.key!, told);
+      open.set(e.key!, still);
+      if (e.type === 'opened') {
+        if (told.has(e.inst)) out.push(`${when(e)}${e.inst} told ${e.key} opened twice for one opening`);
+        told.add(e.inst);
+        still.add(e.inst);
+      } else if (!still.has(e.inst) && !told.size) out.push(`${when(e)}${e.inst} told ${e.key} ${e.type} with no told opening`);
+      else if (e.type === 'resolved') {
+        since.set(e.key!, new Set());
+        still.delete(e.inst);
+      }
+    }
+    return out;
+  }
+
+  it.each(Array.from({ length: 40 }, (_, i) => [i + 1]))(
+    'invariants: two servers on one store through random outages (seed %i): each opening told at most once per server, no unpaired "resolved", at most the hourly limit and one digest an hour',
+    async (seed) => {
+      for (const perHour of [1000, 5]) {
+        fakeTime(Date.UTC(2026, 10, 14, 12, 40, 30));
+        const next = rng(seed);
+        const base = memoryStore();
+        const ways = [way(base, 1000), way(base, 1000)];
+        const events: Told[] = [];
+        const fs = ['A', 'B'].map((inst, i) => started([record(events, inst)], { store: ways[i].store, instance: inst, checkTimeoutMs: 1000, notify: { perHour } }).f);
+        const steps: string[] = [];
+        for (let s = 0; s < 70; s++) {
+          const settle = s >= 60;
+          for (const w of ways) {
+            const was = w.ctl.mode;
+            // Mostly the same as last period, so outages last; sometimes both servers lose the store together.
+            w.ctl.mode = settle ? 'ok' : next() < 0.6 ? was : MODES[Math.floor(next() * MODES.length)];
+            if (was === 'hung' && w.ctl.mode !== 'hung') w.release();
+          }
+          if (!settle && next() < 0.1) for (const w of ways) w.ctl.mode = 'refused';
+          if (next() < 0.3) await errors(base, 40, next() < 0.5 ? 10 : 0);
+          // The lock moves as when the holder's lease has run out: one server takes it, in a pass of its own before
+          // the other server's (a live pass renews its lease as it starts, so no server takes the lock during one).
+          const taker = !settle && next() < 0.12 ? Math.floor(next() * 2) : -1;
+          steps.push(`${Math.round((Date.now() - START) / MIN)}m ` + ways.map((w, i) => `${w.ctl.mode}${i === taker ? '+takeover' : ''}`).join('/'));
+          const ms = MIN * (1 + Math.floor(next() * 2));
+          const order = next() < 0.5 ? fs : [...fs].reverse();
+          if (taker >= 0) {
+            ways[taker].ctl.takeover = true;
+            await period([fs[taker]], 3000);
+            ways[taker].ctl.takeover = false;
+          }
+          await period(
+            order.filter((_, i) => taker < 0 || order[i] !== fs[taker]),
+            ms - (taker >= 0 ? 3000 : 0),
+          );
+        }
+        for (const w of ways) w.release();
+        const found = breaches(events, perHour, perHour === 1000);
+        expect(found, `seed ${seed}, perHour ${perHour}\nsteps: ${steps.join(', ')}\ntold: ${events.map((e) => `${when(e)} ${e.inst} ${e.type} ${e.key ?? ''}`).join(', ')}`).toEqual([]);
+        for (const f of fs) f.stop();
+        vi.useRealTimers();
+      }
+    },
+    30_000,
+  );
 });

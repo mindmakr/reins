@@ -379,6 +379,31 @@ export function nextDaily(from: number, hourUtc: number): number {
   return t;
 }
 
+const count = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+
+/**
+ * The store's notify state and a server's own as one, for a server that told sinks while it could not reach the
+ * store (or while a pass ran past its time limit): per sink the later hour, and within one hour the higher counts
+ * and the held notifications of the higher held count, so a sink never gets more than the hourly limit and one
+ * digest from this server; the later daily summary.
+ */
+export function mergeNotify(stored: NotifyState | undefined, mine: NotifyState | undefined): NotifyState | undefined {
+  if (!mine || typeof mine !== 'object') return stored;
+  if (!stored || typeof stored !== 'object') return mine;
+  const sinks: Record<string, SinkState> = { ...(stored.sinks && typeof stored.sinks === 'object' ? stored.sinks : {}) };
+  for (const [name, m] of Object.entries(mine.sinks || {})) {
+    if (!m || !Number.isFinite(m.hour)) continue;
+    const s = sinks[name];
+    if (!s || typeof s !== 'object' || !Number.isFinite(s.hour) || m.hour > s.hour) sinks[name] = m;
+    else if (m.hour === s.hour) {
+      const mineHeld = count(m.held) > count(s.held);
+      sinks[name] = { hour: s.hour, sent: Math.max(count(s.sent), count(m.sent)), held: Math.max(count(s.held), count(m.held)), kept: mineHeld ? m.kept : s.kept };
+    }
+  }
+  const daily = [stored.dailyFrom, mine.dailyFrom].filter((x): x is number => typeof x === 'number' && Number.isFinite(x));
+  return { sinks, ...(daily.length ? { dailyFrom: Math.max(...daily) } : {}) };
+}
+
 /**
  * Plans and sends notifications. `plan` is pure apart from the sink health it reads: it takes the changes of a
  * pass and the shared state, and returns the deliveries and the new state. `dispatch` sends them in the
@@ -463,7 +488,7 @@ export function createNotifier(sinksIn: unknown, o: NotifyOptions = {}) {
           level: 'warn',
           n: h.failures,
           source: sourceLine('sinks', true),
-          text: `Sink ${s.name} has failed its last ${plural(h.failures, 'delivery', 'deliveries')} (${h.reason}), so findings may not reach it.`,
+          text: `Sink ${s.name} has failed its last ${h.failures === 1 ? 'delivery' : plural(h.failures, 'delivery', 'deliveries')} (${h.reason}), so findings may not reach it.`,
         });
       }
       return out;
@@ -478,7 +503,9 @@ export function createNotifier(sinksIn: unknown, o: NotifyOptions = {}) {
       const hour = Math.floor(now / HOUR);
       const at = iso(now);
       let summaryDue = false;
-      if (daily) {
+      // Only a plan that can send the summary moves its clock on: one without it (a server telling an outage, a
+      // late write) leaves the summary to the plan that has it.
+      if (daily && summary) {
         if (typeof next.dailyFrom !== 'number' || !Number.isFinite(next.dailyFrom)) next.dailyFrom = now;
         else if (now >= nextDaily(next.dailyFrom, dailyHourUtc)) {
           summaryDue = true;

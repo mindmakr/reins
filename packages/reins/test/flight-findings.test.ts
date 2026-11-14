@@ -442,4 +442,15 @@ describe("round 3: the critics' findings on the rules", () => {
     expect(basicsAndDrift(only(minutes))).toEqual(['drifting:route:GET /x']);
     expect(basicsAndDrift(only(minutes, manifest({ basics: { slowRouteMs: 400 } })))).toEqual([]);
   });
+
+  it('round 4 L2: a route whose exact count says it is not slow still drifts, although its bucket p95 is over the limit', () => {
+    const minutes: InstanceMinute[] = [];
+    for (let n = 120; n >= 10; n--) minutes.push(im('a', back(n), { requests: [['GET', '/x', fig(10, 0, 90)]] }));
+    // Limit 900 ms: 96 requests at 850 ms and 4 at 950 ms, counted exactly (4 of 100 over it: not slow), in one bucket up to 1 s.
+    const a = fig(96, 0, 850);
+    const b = fig(4, 0, 950);
+    const mixed: Figures = { ...a, count: 100, p95Ms: 950, maxMs: 950, buckets: a.buckets!.map((x, i) => x + b.buckets![i]), over: { '900': 4, '1800': 0 } };
+    minutes.push(im('a', back(1), { requests: [['GET', '/x', mixed]] }));
+    expect(basicsAndDrift(only(minutes, manifest({ basics: { slowRouteMs: 900 } })))).toEqual(['drifting:route:GET /x']);
+  });
 });

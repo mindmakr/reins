@@ -366,11 +366,14 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
   // recorder counts a manifest's own limit and error level exactly, so the count is exact; only from a minute
   // without that exact count (an older release) is it a floor, and the text says "at least".
   const slow = new Set<string>();
+  // Routes whose count over the limit is a floor: one over the limit by its buckets may still be slow.
+  const floor = new Set<string>();
   for (const [route, f] of recent.routes) {
     const {
       total,
       over: [s, e],
     } = overCounts(f, [b.slowRouteMs, b.errorFactor * b.slowRouteMs]);
+    if (!s.exact) floor.add(route);
     if (total < b.minCalls || !s.is) continue;
     slow.add(route);
     out.push({
@@ -481,8 +484,9 @@ function basicRules(minutes: InstanceMinute[], now: number, b: Basics, out: Obse
     for (const [name, f] of now_) {
       const old = then.get(name);
       if (!old || name.endsWith('(other)') || f.count < b.minCalls || old.count < b.minRequests || old.p95Ms <= 0) continue;
-      // A slow-route basic already, or over the limit without surely being slow: neither is drift.
-      if (kind === 'route' && (slow.has(name) || f.p95Ms > b.slowRouteMs)) continue;
+      // A slow-route basic already, or over the limit by its buckets with only a floor of the count over it (it may
+      // be slow): neither is drift. With an exact count, a route that is not slow is judged on its drift.
+      if (kind === 'route' && (slow.has(name) || (floor.has(name) && f.p95Ms > b.slowRouteMs))) continue;
       if (f.p95Ms < b.baselineMinMs || f.p95Ms < b.baselineFactor * old.p95Ms) continue;
       out.push({
         key: `drifting:${kind}:${name}`,
