@@ -31,7 +31,7 @@ Write the proposal in plain words first, then as `reins.flight.json`: each proce
 
 ### 4. Wire the steps, probes, a store and at least one sink
 
-Add `flight.step(process, key, step)` where the code reaches each approved step, and `flight.probe(id, fn)` for each approved probe. Write the app's flight config module: the store (`fileStore()` for one instance or local Docker; `pgStore(query)` for several instances, with the `PG_TABLES` definition added through the project's own migration flow) and at least one sink (`webhookSink`, `fileSink` or `functionSink`), with every secret and address read from the environment. The server passes these options to `flight.start()`; `npx reins flight report --config <module>` loads the same module.
+Add `flight.step(process, key, step)` where the code reaches each approved step, and `flight.probe(id, fn)` for each approved probe. Write the app's flight config module: the store (`fileStore()` for one instance or local Docker; `pgStore({ query })` for several instances, with the `PG_TABLES` definition added through the project's own migration flow) and at least one sink (`webhookSink`, `fileSink` or `functionSink`), with every secret and address read from the environment. The server passes these options to `flight.start()`; `npx reins flight report --config <module>` loads the same module.
 
 ### 5. Check, run and show the first report
 

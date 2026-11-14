@@ -308,6 +308,19 @@ describe('B2: the renderers are pure and lead with at most five findings', () =>
     expect(md).toMatch(/\| payout \/ pending-settles \| broken by 1 run \| /);
     expect(renderFlightHtml(r)).toMatch(/<h3>payout<\/h3>/);
   });
+
+  it('keeps the layout fixes: a resolved finding wears the ok badge, number cells are class n, the probes table has its own class', async () => {
+    const { r } = await startedReport();
+    r.resolved = [finding({ key: 'promise:p:done', kind: 'promise', level: 'error', text: 'A breach that resolved.', state: 'resolved', resolvedAt: r.at })];
+    const html = renderFlightHtml(r);
+    const resolved = html.slice(html.indexOf('<h2>Resolved in this period</h2>'));
+    expect(resolved).toMatch(/<span class="badge ok">resolved<\/span>/);
+    expect(resolved).not.toMatch(/class="badge (error|warn)"/);
+    expect(html).toMatch(/<td class="n">\d+<\/td>/);
+    expect(html).toMatch(/<th scope="col" class="n">/);
+    expect(html).toMatch(/<table class="t-probes">/);
+    expect(html).toMatch(/\.t-probes th:nth-child\(1\)\{/);
+  });
 });
 
 const EVIL = '<img src=x onerror=alert(1)>';
@@ -481,7 +494,7 @@ describe('B5: reins flight report', () => {
       [['report', '--config', 'a.mjs', 'b.json'], /give one of --config, a report file or --compare/],
       [['report', '--nope'], /unknown option --nope/],
       [['report', 'missing.json'], /missing\.json not found/],
-      [['report', 'not-json.json'], /not-json\.json is not JSON/],
+      [['report', 'not-json.json'], /not-json\.json is not valid JSON$/],
       [['report', 'other.json'], /other\.json is not a flight report/],
       [['report', '--compare', 'other.json', 'not-json.json'], /other\.json is not a flight report/],
       [['report', '--config', 'missing.mjs'], /missing\.mjs not found/],
@@ -500,6 +513,26 @@ describe('B5: reins flight report', () => {
     expect(await flightMain(['report', '--help'], dir, h.print, h.perr)).toBe(0);
     expect(h.err.join('\n')).toMatch(/reins flight report --config <module> \[--json\]/);
     expect(h.err.join('\n')).toMatch(/process keys[^]*do not paste it where others can read it/);
+  });
+
+  it('gives a fixed message for a saved report that is not valid JSON, and quotes none of its content', async () => {
+    const dir = moduleDir();
+    writeFileSync(join(dir, 'env.json'), 'SECRET=hunter2\n');
+    writeFileSync(join(dir, 'half.json'), '{"format": "reins-flight-report", "token": "hunter2"');
+    writeFileSync(join(dir, 'version.json'), JSON.stringify({ format: REPORT_FORMAT, version: 'hunter2', findings: [] }));
+    const cases: Array<[string[], RegExp]> = [
+      [['report', 'env.json'], /^reins flight report: \S*env\.json is not valid JSON$/],
+      [['report', 'half.json', '--json'], /^reins flight report: \S*half\.json is not valid JSON$/],
+      [['report', '--compare', 'env.json', 'half.json'], /^reins flight report: \S*env\.json is not valid JSON$/],
+      [['report', 'version.json'], /^reins flight report: \S*version\.json is a flight report of another version; this reins reads version 1$/],
+    ];
+    for (const [args, message] of cases) {
+      const o = capture();
+      expect(await flightMain(args, dir, o.print, o.perr), args.join(' ')).toBe(2);
+      expect(o.err.join('\n'), args.join(' ')).toMatch(message);
+      expect(o.err.join('\n') + o.out.join('\n')).not.toContain('hunter2');
+    }
+    expect(() => parseFlightReport('SECRET=hunter2')).toThrow(/^is not valid JSON$/);
   });
 
   const built = fileURLToPath(new URL('../dist/cli.js', import.meta.url));

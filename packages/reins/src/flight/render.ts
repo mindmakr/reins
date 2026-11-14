@@ -156,21 +156,30 @@ function devLine(r: FlightReport): string {
 
 /** Text for HTML: every character that could start markup or end an attribute is an entity. */
 const h = (v: unknown) => line(v).replace(/[&<>"'`]/g, (c) => `&#${c.charCodeAt(0)};`);
-const tbl = (head: string[], rows: string[][]) =>
-  rows.length ? `<table><thead><tr>${head.map((x) => `<th scope="col">${h(x)}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>` : '<p class="muted">None.</p>';
+/** A table with its column widths (`cls`, a CSS class) and its number columns (`n`, by index), right-aligned. */
+const tbl = (head: string[], rows: string[][], cls: string, n: number[] = []) => {
+  const c = (i: number) => (n.includes(i) ? ' class="n"' : '');
+  return rows.length
+    ? `<table class="${cls}"><thead><tr>${head.map((x, i) => `<th scope="col"${c(i)}>${h(x)}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((x, i) => `<td${c(i)}>${x}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+    : '<p class="muted">None.</p>';
+};
 const list = (l: string[]) => (l.length ? `<ul class="plain">${l.map((x) => `<li>${h(x)}</li>`).join('')}</ul>` : '<p class="muted">None.</p>');
 const LEVELS = new Set(['error', 'warn']);
 
 function findingHtml(f: FlightFinding): string {
   const level = LEVELS.has(f.level) ? f.level : 'warn';
+  const resolved = f.state === 'resolved';
+  // A resolved finding wears a green "resolved" badge, never its level's colour; its level is named as it was.
+  const badge = resolved ? '<span class="badge ok">resolved</span>' : `<span class="badge ${level}">${h(f.level)}</span>`;
+  const kind = resolved ? `${h(f.kind)} · was ${h(f.level)}` : h(f.kind);
   const extra = [f.why ? `<p class="why">Why: ${h(f.why)}</p>` : '', f.source ? `<p class="muted small">Source: ${h(f.source)}</p>` : ''].join('');
-  return `<li class="finding ${level}${f.state === 'resolved' ? ' resolved' : ''}"><p class="head"><span class="badge ${level}">${h(f.level)}</span> <span class="kind">${h(f.kind)}</span> <code>${h(f.key)}</code></p><p class="text">${h(f.text)}</p><p class="muted small">${h(findingFacts(f))}</p>${extra}</li>`;
+  return `<li class="finding ${level}${resolved ? ' resolved' : ''}"><p class="head">${badge} <span class="kind">${kind}</span> <code>${h(f.key)}</code></p><p class="text">${h(f.text)}</p><p class="muted small">${h(findingFacts(f))}</p>${extra}</li>`;
 }
 const findingsHtml = (l: FlightFinding[], none: string) => (l.length ? `<ul class="findings">${l.map(findingHtml).join('')}</ul>` : `<p class="muted">${h(none)}</p>`);
 
 const CSS = `
-:root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--ink:#16181d;--muted:#5b6170;--line:#dde0e6;--err:#b42318;--err-bg:#fdecea;--warn:#8a5a00;--warn-bg:#fff4dc;--ok:#1d7a46;--code:#eef0f4}
-@media (prefers-color-scheme:dark){:root{--bg:#111318;--card:#1a1d24;--ink:#e8eaef;--muted:#a0a6b4;--line:#2c313c;--err:#ff8a80;--err-bg:#3a1d1b;--warn:#ffc966;--warn-bg:#352a12;--ok:#6fd49b;--code:#252a33}}
+:root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--ink:#16181d;--muted:#5b6170;--line:#dde0e6;--err:#b42318;--err-bg:#fdecea;--warn:#8a5a00;--warn-bg:#fff4dc;--ok:#1d7a46;--ok-bg:#e6f4ec;--code:#eef0f4}
+@media (prefers-color-scheme:dark){:root{--bg:#111318;--card:#1a1d24;--ink:#e8eaef;--muted:#a0a6b4;--line:#2c313c;--err:#ff8a80;--err-bg:#3a1d1b;--warn:#ffc966;--warn-bg:#352a12;--ok:#6fd49b;--ok-bg:#15301f;--code:#252a33}}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow-wrap:anywhere}
@@ -192,14 +201,24 @@ ul.plain li{background:var(--card);border:1px solid var(--line);border-radius:8p
 .badge{font-size:12px;font-weight:600;text-transform:uppercase;padding:1px 8px;border-radius:999px}
 .badge.error{background:var(--err-bg);color:var(--err)}
 .badge.warn{background:var(--warn-bg);color:var(--warn)}
+.badge.ok{background:var(--ok-bg);color:var(--ok)}
 .kind{font-size:13px;color:var(--muted)}
 .why{font-style:italic}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;margin:0 0 10px}
-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:14px}
+table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:14px;margin:0 0 14px}
+.card>table:last-child{margin-bottom:0}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
 th{font-size:12px;color:var(--muted);font-weight:600}
-th:first-child{width:40%}
 td.n,th.n{text-align:right}
+.t-steps th:nth-child(1),.t-figures th:nth-child(1){width:40%}
+.t-promises th:nth-child(1){width:28%}
+.t-promises th:nth-child(2){width:42%}
+.t-promises th:nth-child(3){width:12%}
+.t-promises th:nth-child(4){width:18%}
+.t-probes th:nth-child(1){width:24%}
+.t-probes th:nth-child(2){width:42%}
+.t-probes th:nth-child(3){width:12%}
+.t-probes th:nth-child(4){width:22%}
 .state-fine{color:var(--ok)}
 .state-finding{color:var(--err)}
 .state-not-judged{color:var(--muted)}
@@ -227,11 +246,11 @@ export function renderFlightHtml(r: FlightReport): string {
       h(ms(s.p50Ms)),
       h(ms(s.p95Ms)),
     ]);
-    return `<div class="card"><h3>${h(p.name)}${p.declared ? '' : ' <span class="muted small">(not in the manifest)</span>'}</h3><p>Started ${num(p.started) ?? 0} · in progress ${p.inProgress === null ? 'not counted' : (num(p.inProgress) ?? 0)} · ended ${num(p.ended) ?? 0}${ends.length ? ` (${ends.join(', ')})` : ''}${num(p.partial) ? ` · ${h(count(p.partial, 'run'))} partly removed by retention` : ''}</p>${tbl(['Step', 'Recorded', 'From start, p50', 'p95'], rows)}${num(p.moreSteps) ? `<p class="muted small">${h(count(p.moreSteps, 'more step'))} not shown.</p>` : ''}</div>`;
+    return `<div class="card"><h3>${h(p.name)}${p.declared ? '' : ' <span class="muted small">(not in the manifest)</span>'}</h3><p>Started ${num(p.started) ?? 0} · in progress ${p.inProgress === null ? 'not counted' : (num(p.inProgress) ?? 0)} · ended ${num(p.ended) ?? 0}${ends.length ? ` (${ends.join(', ')})` : ''}${num(p.partial) ? ` · ${h(count(p.partial, 'run'))} partly removed by retention` : ''}</p>${tbl(['Step', 'Recorded', 'From start, p50', 'p95'], rows, 't-steps', [1, 2, 3])}${num(p.moreSteps) ? `<p class="muted small">${h(count(p.moreSteps, 'more step'))} not shown.</p>` : ''}</div>`;
   });
   sec.push(`<section><h2>Processes</h2>${procs.join('') || '<p class="muted">None.</p>'}</section>`);
-  sec.push(`<section><h2>Promises</h2>${tbl(['Promise', 'State', 'Runs', 'Window'], objs<PromiseReport>(r.promises).map((p) => [`${h(p.process)} / ${h(p.id)}`, h(promiseState(p)), String(num(p.runs) ?? 0), h(ms(p.windowMs))]))}</section>`);
-  sec.push(`<section><h2>Probes</h2>${tbl(['Probe', 'State', 'Every', 'Last result'], objs<FlightReport['probes'][number]>(r.probes).map((p) => [h(p.id), h(probeState(p)), h(ms(p.everyMs)), h(p.lastAt ? when(p.lastAt) : 'none')]))}</section>`);
+  sec.push(`<section><h2>Promises</h2>${tbl(['Promise', 'State', 'Runs', 'Window'], objs<PromiseReport>(r.promises).map((p) => [`${h(p.process)} / ${h(p.id)}`, h(promiseState(p)), String(num(p.runs) ?? 0), h(ms(p.windowMs))]), 't-promises', [2, 3])}</section>`);
+  sec.push(`<section><h2>Probes</h2>${tbl(['Probe', 'State', 'Every', 'Last result'], objs<FlightReport['probes'][number]>(r.probes).map((p) => [h(p.id), h(probeState(p)), h(ms(p.everyMs)), h(p.lastAt ? when(p.lastAt) : 'none')]), 't-probes', [2])}</section>`);
 
   const fig = (l: unknown) => objs<FlightReport['basics']['routes'][number]>(l).map((x) => [h(x.name), String(num(x.count) ?? 0), String(num(x.errors) ?? 0), h(ms(x.p95Ms))]);
   const checks = objs<FlightReport['basics']['checks'][number]>(b.checks).map((c) => {
@@ -239,7 +258,7 @@ export function renderFlightHtml(r: FlightReport): string {
     return `<li><span class="state-${st}">${st === 'finding' ? 'Finding' : st === 'fine' ? 'Fine' : 'Not judged'}</span>: ${h(c.text)}</li>`;
   });
   sec.push(
-    `<section><h2>Basics</h2><p>In the last ${h(ms(b.windowMs) || 'window')}: ${h(count(b.requests, 'request'))}, ${num(b.failed) ?? 0} failed, from ${h(count(b.instances, 'instance'))}${num(b.loopP99Ms) !== null ? `; event loop p99 up to ${h(ms(b.loopP99Ms))}` : ''}${num(b.heapUsedMb) !== null ? `; heap up to ${Math.round(b.heapUsedMb!)} MB` : ''}.</p>${arr(b.routes).length ? tbl(['Route', 'Requests', 'Failed', 'p95'], fig(b.routes)) : ''}${arr(b.upstream).length ? tbl(['Upstream host', 'Calls', 'Failed', 'p95'], fig(b.upstream)) : ''}<ul class="plain">${checks.join('')}</ul></section>`,
+    `<section><h2>Basics</h2><p>In the last ${h(ms(b.windowMs) || 'window')}: ${h(count(b.requests, 'request'))}, ${num(b.failed) ?? 0} failed, from ${h(count(b.instances, 'instance'))}${num(b.loopP99Ms) !== null ? `; event loop p99 up to ${h(ms(b.loopP99Ms))}` : ''}${num(b.heapUsedMb) !== null ? `; heap up to ${Math.round(b.heapUsedMb!)} MB` : ''}.</p>${arr(b.routes).length ? tbl(['Route', 'Requests', 'Failed', 'p95'], fig(b.routes), 't-figures', [1, 2, 3]) : ''}${arr(b.upstream).length ? tbl(['Upstream host', 'Calls', 'Failed', 'p95'], fig(b.upstream), 't-figures', [1, 2, 3]) : ''}<ul class="plain">${checks.join('')}</ul></section>`,
   );
   sec.push(`<section><h2>Development instruments</h2><p class="card">${h(devLine(r))}</p></section>`);
   sec.push(`<section><h2>Checked and found fine</h2>${list(arr<string>(r.checked))}</section>`);
@@ -265,16 +284,19 @@ export function renderFlightHtml(r: FlightReport): string {
 
 // ---- saved reports and compare ---------------------------------------------------------------------------------
 
-/** Reads a saved report (the JSON of `flight.report()` or `reins flight report --json`). Throws a plain message. */
+/**
+ * Reads a saved report (the JSON of `flight.report()` or `reins flight report --json`). Throws a fixed message that
+ * quotes nothing of the file: not the parser's error, which can quote its text, and not its version field.
+ */
 export function parseFlightReport(text: string): FlightReport {
   let v: any;
   try {
     v = JSON.parse(text);
   } catch {
-    throw new Error('is not JSON');
+    throw new Error('is not valid JSON');
   }
   if (!v || typeof v !== 'object' || v.format !== REPORT_FORMAT) throw new Error(`is not a flight report (no "format": "${REPORT_FORMAT}")`);
-  if (v.version !== REPORT_VERSION) throw new Error(`is a flight report of version ${line(v.version).slice(0, 20)}; this reins reads version ${REPORT_VERSION}`);
+  if (v.version !== REPORT_VERSION) throw new Error(`is a flight report of another version; this reins reads version ${REPORT_VERSION}`);
   if (!Array.isArray(v.findings)) throw new Error('has no findings list');
   for (const f of [...v.findings, ...arr(v.resolved)]) if (!f || typeof f !== 'object' || typeof f.key !== 'string') throw new Error('has a finding without a key');
   return { ...v, service: line(v.service).slice(0, 200) } as FlightReport;

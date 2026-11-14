@@ -379,7 +379,8 @@ function checkPromise(q: unknown, path: string, c: Checker, declared: Set<string
     return undefined;
   }
   const k = kind as PromiseKind;
-  c.known(obj, path, [...PROMISE_COMMON, ...KIND_FIELDS[k]], `${/^[aeiou]/.test(k) ? 'an' : 'a'} "${k}" promise`);
+  // "once" is said with a w sound, so it takes "a": an "ends", an "order", but a "once" and a "within" promise.
+  c.known(obj, path, [...PROMISE_COMMON, ...KIND_FIELDS[k]], `${k === 'ends' || k === 'order' ? 'an' : 'a'} "${k}" promise`);
   const step = (field: string) => c.step(obj[field], join(path, field), declared, proc);
 
   let fields: Record<string, unknown> | undefined;

@@ -7,7 +7,7 @@ description: Use when setting up reins in a new or existing web (Vite, Next.js, 
 
 **reins** gives coding agents instruments, hands, and eyes inside web, Expo, and Node apps: named actions, redacted state, network and error buffers, lifecycle and render timings (`reins_perf`), DOM/CSS layout checks (`reins_dom`), backend request and DB spans (`reins_server`), Markdown/JSON session reports (`reins_report`), and `<ReinsPanel>` screenshots over a localhost MCP bridge.
 
-Built for [**Lucid Coding**](https://mindmakr.github.io/coordinator/lucid-coding.html) — Principle #2 (*"Give agents instruments, not just screenshots"*) and Principle #8 (*"Performance comes with measurement"*).
+Built for [**Lucid Coding**](https://mindmakr.github.io/coordinator/lucid-coding.html) (Principles #2 and #8).
 
 ## Commands & Playbooks
 
@@ -21,9 +21,9 @@ Call `/reins:<command>` (Claude Code plugin) or `/reins <command>` (skill). Read
 | `companion` | Pair **reins** with **Coordinator** for Lucid Coding (builder + blind visual critic) | `references/companion.md` |
 | `flight` | Add report-only production checks to a Node server | `references/flight.md` |
 
-## One-package architecture (`npm i -D @mindmakr/reins`)
+## Dev install for the development tools (`npm i -D @mindmakr/reins`)
 
-Everything ships in the single `@mindmakr/reins` package:
+Flight runs in production: install it as a regular dependency, `npm i @mindmakr/reins` (`references/flight.md`).
 
 - `@mindmakr/reins` — browser/RN core (< 5 KB min+gzip, 0 browser deps): `action`, `state`, `panel`, `markComponent`, `perf`, `dom`
 - `@mindmakr/reins/react` — `useReinsAction`, `useReinsState`, `<ReinsPanel id>` (tracks mount time & render counts)

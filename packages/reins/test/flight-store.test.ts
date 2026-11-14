@@ -283,7 +283,9 @@ describe('file store', () => {
       await s.unlock('a');
       expect(readdirSync(lockDir(dir))).toHaveLength(1);
       expect(await fileStore({ dir }).lock('b', 60_000, t + 301)).toBe(true);
-    }, 30_000);
+      // Each renewal writes and renames files: on Windows under a full-suite run 200 of them took over 30 s once,
+      // so the limit is generous; the assertions do not depend on the time taken.
+    }, 180_000);
   });
 });
 

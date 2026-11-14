@@ -1,6 +1,6 @@
 # reins flight: design
 
-Status: draft for the owner's review (2026-11-13). Design only; no product code changes with this document.
+Status: built in reins 0.2.0 (2026-11-14). Written as a draft for the owner's review on 2026-11-13; section 14 records what the build chose where this design left the choice open, and where it differs. The user-facing documentation is the README's flight section and [SECURITY.md](../../SECURITY.md).
 
 reins today is for development: it gives a coding agent instruments inside a running app, and it is removed from production builds. Flight is a new, production-safe part of reins. It records what a deployed server is doing, checks that against promises written down in the repo, and reports when behaviour has drifted, is drifting, or looks unusual. It reports only. It never corrects anything.
 
@@ -363,3 +363,21 @@ The example lives in its own repository and is part of this work, as a separate 
 | Recording from browsers and phones in production | reins, after the consent and privacy rules are designed |
 | Agent-ready app: actions, WebMCP, MCP, CLI and API in production, opt-in per action | reins, with its own design |
 | Deployment discipline: playbooks per process area with cited sources, and the path from local Docker to a cloud platform | Coordinator, with its own design. It may extend the manifest with deployment sections under a new `schema` number |
+
+---
+
+## 14. As built (0.2.0)
+
+What the build chose where section 12 left the choice open, and where it reads or differs from this design. The README's flight section documents the API; SECURITY.md documents the safety rules with their tests, the limits of the stores and the lock, and what flight does not protect against.
+
+| Topic | As built |
+|---|---|
+| `ws` and the MCP SDK | They stay regular dependencies of `@mindmakr/reins`. The flight entry never imports either (the safety walk refuses them, and `flight-install.test.ts` runs the built entry from an install where neither exists); in ESM a module loads only when imported, so a server that imports only `@mindmakr/reins/flight` has them on disk and never loads them. Making them optional would break `npx reins bridge` for every installer. Flight therefore needs a regular install, `npm i @mindmakr/reins`, not `-D` |
+| Stuck runs (C15) | `within` and `ends` count the runs overdue now, whatever their age: a stuck run stays counted until it reaches its expected or end step, or retention removes it (then the `blind` fact `overdue-pruned` says so). The window still bounds which late arrivals are listed. `once` and `order` judge only runs with a step inside the window. The owner chose this reading |
+| Drift | A `within` or `ends` promise is drifting when the 95th percentile of its finished runs reaches `driftShare` (0.8) of its limit, judged only with at least `driftMinRuns` (20) runs that finished in the window; the manifest's `basics` can change both |
+| The watcher and the lock | A watcher takes the lock when it is free and keeps it while it runs; the servers' checkers stand down meanwhile. While a server holds the lock, the watcher waits and takes over once the server stops renewing it. Section 8's "when a watcher runs, it is the checker" therefore holds only once the watcher has the lock; making the watcher always take precedence comes after 0.2.0 |
+| Health address | `healthUrl` in the config module, polled by the watcher only (http or https, no user or password, no port fetch refuses), within 10 s and at most half of `checkTimeoutMs`. When no watcher polls, an open health finding resolves after 10 minutes as "no longer checked" |
+| Store outages | Each server copy alerts its own store outage, through its own hourly-capped counter (section 8). A store that refuses the findings write gives a `blind` finding the same way |
+| Stores and retention | Defaults and their measured costs, markers, the file store's young-segment overshoot, and the 10 s broken-lock bound: README, "Stores", and SECURITY.md, "Stores, the lock and several copies" |
+| Express mounts | The `mounts` option lists Express mount paths; an undeclared mount is recorded as `(mount)`, because Express gives it as real path text |
+| Postgres and U+0000 | Postgres refuses text holding U+0000. Keys with control characters are refused before any store; strings in finding data have U+0000 removed before they are stored |
