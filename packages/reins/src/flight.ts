@@ -396,19 +396,40 @@ export function createFlight(env: Record<string, string | undefined> = process.e
   /**
    * A server that no longer holds the lock writes the findings it kept from an outage (only what a sink was
    * told), where the store has nothing newer, so the server that holds the lock now resolves them and tells it,
-   * once. An entry stays, marked handed, until the store shows a newer record of it: then the holder has judged
-   * it, and it goes. Throws when the store does; the entries are then kept for the next pass.
+   * once. An open entry stays, marked handed, until the store shows a newer record of it: then the holder has
+   * judged it, and it goes. A resolved entry goes once the store holds it (this write, or an earlier one) or
+   * anything newer: a holder writes a finding again only while it is open or when it changes, so it may leave a
+   * resolved one at the entry's own time for good, and no server tells anything of a finding that stays resolved.
+   * The view of each entry that goes is then what the store holds as told, so a step that cannot read the store
+   * later does not tell again what the holder told meanwhile. Throws when the store does; the entries are then
+   * kept for the next pass.
    */
   async function handOver(r: NonNullable<typeof run>): Promise<void> {
     if (!r.outage.size) return;
     // Another server holds the lock and judges these from now on: this server no longer tells their changes, even
     // while this write has not reached the store.
     for (const e of r.outage.values()) e.handed = true;
-    const stored = new Map((await r.store.findings()).map((x) => [x.key, x.updatedAt]));
+    const records = await r.store.findings();
+    const stored = new Map(records.map((x) => [x.key, x.updatedAt]));
+    const at = (k: string) => stored.get(k) ?? -Infinity;
     const entries = [...r.outage.entries()];
-    const list = entries.filter(([k, e]) => !((stored.get(k) ?? -Infinity) >= e.at)).map(([, e]) => toRecord(e.finding, e.at));
-    if (list.length) await r.store.putFindings(list);
-    for (const [k, e] of entries) if (r.outage.get(k) === e && (stored.get(k) ?? -Infinity) > e.at) r.outage.delete(k);
+    const list = entries.filter(([k, e]) => !(at(k) >= e.at));
+    if (list.length) await r.store.putFindings(list.map(([, e]) => toRecord(e.finding, e.at)));
+    // Every entry is now in the store at its own time at the least (it was, or this write put it there): a resolved
+    // one goes, an open one once a newer record shows the holder judged it.
+    const judged = (k: string, e: OutageEntry) => at(k) > e.at || e.finding.state !== 'open';
+    const dropped = entries.filter(([k, e]) => r.outage.get(k) === e && judged(k, e));
+    for (const [k] of dropped) r.outage.delete(k);
+    if (run !== r || !dropped.length) return;
+    // This server's view of a dropped entry is now what the store holds as told: the holder's judgement, or this
+    // entry's own resolved state. Only those: another server's openings are its own to resolve and tell.
+    const fromStore = new Map(fromRecords(records).map((f) => [f.key, f]));
+    const view = new Map(r.known.map((f) => [f.key, f]));
+    for (const [k, e] of dropped) {
+      const f = at(k) > e.at ? fromStore.get(k) : e.finding;
+      if (f) view.set(k, f);
+    }
+    r.known = [...view.values()];
   }
 
   /** One checker pass, when this server holds the store lock; null when another checker holds it. */
