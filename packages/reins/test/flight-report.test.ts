@@ -308,6 +308,19 @@ describe('B2: the renderers are pure and lead with at most five findings', () =>
     expect(md).toMatch(/\| payout \/ pending-settles \| broken by 1 run \| /);
     expect(renderFlightHtml(r)).toMatch(/<h3>payout<\/h3>/);
   });
+
+  it('keeps the layout fixes: a resolved finding wears the ok badge, number cells are class n, the probes table has its own class', async () => {
+    const { r } = await startedReport();
+    r.resolved = [finding({ key: 'promise:p:done', kind: 'promise', level: 'error', text: 'A breach that resolved.', state: 'resolved', resolvedAt: r.at })];
+    const html = renderFlightHtml(r);
+    const resolved = html.slice(html.indexOf('<h2>Resolved in this period</h2>'));
+    expect(resolved).toMatch(/<span class="badge ok">resolved<\/span>/);
+    expect(resolved).not.toMatch(/class="badge (error|warn)"/);
+    expect(html).toMatch(/<td class="n">\d+<\/td>/);
+    expect(html).toMatch(/<th scope="col" class="n">/);
+    expect(html).toMatch(/<table class="t-probes">/);
+    expect(html).toMatch(/\.t-probes th:nth-child\(1\)\{/);
+  });
 });
 
 const EVIL = '<img src=x onerror=alert(1)>';
