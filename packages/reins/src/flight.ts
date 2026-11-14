@@ -414,6 +414,9 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     let over = false;
     const current = () => live() && !over;
     const work = (async (): Promise<CheckResult | null> => {
+      // A watcher polls the health address beside the lock and the check, within its own time limit, so a slow
+      // lock does not push the poll past the pass's limit; a server leaves it unjudged. The poll never throws.
+      const polled = r.health ? r.health() : undefined;
       let held: boolean;
       try {
         held = await r.store.lock(r.owner, lease());
@@ -434,8 +437,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
         return null;
       }
       let minutes: InstanceMinute[] | null = null;
-      // A watcher polls the health address beside the check; a server leaves it unjudged.
-      const [result, health] = await Promise.all([check(r.store, r.manifest, { minutes: (m) => (minutes = m) }), r.health ? r.health() : undefined]);
+      const [result, health] = await Promise.all([check(r.store, r.manifest, { minutes: (m) => (minutes = m) }), polled]);
       await conclude(r, result, minutes, true, current, health);
       if (live() && Date.now() - r.lastPrune >= PRUNE_EVERY_MS) {
         r.lastPrune = Date.now();

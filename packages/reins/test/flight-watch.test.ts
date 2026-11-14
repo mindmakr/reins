@@ -207,7 +207,7 @@ describe('B2: the health address, from the config module', () => {
     expect(await done).toBe(0);
   });
 
-  it('once no watcher polls the address, a server checker resolves the health finding instead of carrying it open', async () => {
+  it('once no watcher polls the address, a server checker keeps the health finding open for a while, then resolves it as no longer checked', async () => {
     const h = await healthServer();
     h.ctl.up = false;
     const store = memoryStore();
@@ -221,10 +221,58 @@ describe('B2: the health address, from the config module', () => {
     await store.putMinute(im('a', Date.now() - MIN, { requests: [['GET', '/api/pay', fig(100, 0, 20)]] }));
     expect(await srv.checkNow()).not.toBeNull();
     await srv.sinksIdle();
+    // A watcher restarting: within 10 min of the last poll the finding stays open and nothing is told.
+    expect(srv.findings().find((f) => f.key === 'basic:health')).toMatchObject({ state: 'open', kind: 'basic' });
+    expect(s.told().filter((t) => t.endsWith('basic:health'))).toEqual(['opened basic:health']);
+    // The last poll 11 min ago: it resolves, worded as no longer checked, not as a recovery.
+    const rec = (await store.findings()).find((r) => r.key === 'basic:health')!;
+    await store.putFindings([{ ...rec, updatedAt: Date.now() + 1000, data: { ...rec.data, lastAt: Date.now() - 11 * MIN } }]);
+    expect(await srv.checkNow()).not.toBeNull();
+    await srv.sinksIdle();
     expect(srv.findings().find((f) => f.key === 'basic:health')).toMatchObject({ state: 'resolved', kind: 'basic' });
     expect((await store.findings()).find((r) => r.key === 'basic:health')!.state).toBe('resolved');
     expect(s.told().filter((t) => t.endsWith('basic:health'))).toEqual(['opened basic:health', 'resolved basic:health']);
+    const resolved = s.got.find((n) => n.type === 'resolved' && n.finding?.key === 'basic:health')!.finding!;
+    expect(resolved.text).toBe("No watcher has polled the server's health address for 10 min, so it is no longer checked (not a recovery).");
   });
+
+  it('a watcher that restarts during an outage tells nothing new: no Resolved, then Opened again', async () => {
+    const h = await healthServer();
+    h.ctl.up = false;
+    const store = memoryStore();
+    const s = collect();
+    const w1 = watcher({ store, healthUrl: h.url, sinks: [s.sink] });
+    await w1.checkNow();
+    await until(async () => (await store.findings()).some((r) => r.key === 'basic:health' && r.state === 'open'));
+    w1.stop();
+    await w1.closed();
+    // A server checks in the gap, then the watcher is back while the address still fails.
+    const srv = server({ store, sinks: [s.sink] });
+    expect(await srv.checkNow()).not.toBeNull();
+    srv.stop();
+    await srv.closed();
+    const w2 = watcher({ store, healthUrl: h.url, sinks: [s.sink] });
+    expect(await w2.checkNow()).not.toBeNull();
+    await w2.sinksIdle();
+    expect(w2.findings().find((f) => f.key === 'basic:health')).toMatchObject({ state: 'open' });
+    expect(s.told().filter((t) => t.endsWith('basic:health'))).toEqual(['opened basic:health']);
+  });
+
+  it('polls the health address beside a slow lock: a short pass limit still opens the health finding, not a store outage', async () => {
+    const h = await healthServer();
+    h.ctl.up = false;
+    h.ctl.hang = true;
+    const inner = memoryStore();
+    // A lock that takes 2 s: with the poll after it (2 s + 1.5 s), the pass would run past its 3 s limit.
+    const store: FlightStore = Object.assign(Object.create(inner), { lock: async (...a: Parameters<FlightStore['lock']>) => (await new Promise((r) => setTimeout(r, 2000)), inner.lock(...a)) });
+    const w = watcher({ store, healthUrl: h.url, checkTimeoutMs: 3000 });
+    const t0 = Date.now();
+    expect(await w.checkNow()).not.toBeNull();
+    expect(Date.now() - t0).toBeLessThan(3000);
+    const keys = w.findings().filter((f) => f.state === 'open').map((f) => f.key);
+    expect(keys).toContain('basic:health');
+    expect(keys).not.toContain('blind:store-unreachable');
+  }, 15_000);
 
   it('with a pass time limit under 10 s, a health address that never answers opens the health finding, not a store outage', async () => {
     const h = await healthServer();
@@ -417,14 +465,20 @@ describe('B4: no port, no route, no shell; a config module that cannot load', ()
   it('prints only the code of what a config getter throws, never its message', async () => {
     const dir = moduleDir();
     (globalThis as any).__reinsFlightWatchTest = { store: memoryStore() };
-    // A store getter that throws from its nth read on: in loading the module, in reading its store, in watch().
+    // A store getter that throws from its nth read on: in looking for the store, in reading it, and after both
+    // (the watcher gets the store as read once, so it never reads the getter a third time).
     for (const n of [0, 1, 2]) writeFileSync(join(dir, `getter${n}.mjs`), `let reads = 0;\nexport default { get store() { if (reads++ >= ${n}) throw new Error('s3cr3t-TOKEN-xyz'); return globalThis.__reinsFlightWatchTest.store; } };\n`);
+    // A store whose `lock` getter throws: named as the store's error, not the config function's.
+    const lockGetter = `get(t, k) { if (k === 'lock') throw new Error('s3cr3t-TOKEN-xyz'); const v = t[k]; return typeof v === 'function' ? v.bind(t) : v; }`;
+    writeFileSync(join(dir, 'lockgetter.mjs'), `export default { store: new Proxy(globalThis.__reinsFlightWatchTest.store, { ${lockGetter} }) };\n`);
     writeFileSync(join(dir, 'service.mjs'), `export default { store: globalThis.__reinsFlightWatchTest.store, get service() { throw new Error('s3cr3t-TOKEN-xyz'); } };\n`);
     const cases: Array<[string[], RegExp]> = [
-      [['watch', 'getter0.mjs'], /getter0\.mjs: its config function threw \(Error\)$/],
+      [['watch', 'getter0.mjs'], /getter0\.mjs: its store could not be read \(Error\)$/],
       [['watch', 'getter1.mjs'], /getter1\.mjs: its store could not be read \(Error\)$/],
-      [['watch', 'getter2.mjs'], /getter2\.mjs: its options cannot start a watcher/],
+      [['watch', 'lockgetter.mjs'], /lockgetter\.mjs: its store could not be read \(Error\)$/],
       [['watch', 'service.mjs'], /service\.mjs: its options cannot start a watcher/],
+      [['report', 'getter0.mjs'], /getter0\.mjs: its store could not be read \(Error\)$/],
+      [['report', 'lockgetter.mjs'], /lockgetter\.mjs: its store could not be read \(Error\)$/],
       [['report', 'getter1.mjs'], /getter1\.mjs: its store could not be read \(Error\)$/],
       [['report', 'service.mjs'], /service\.mjs: its service could not be read \(Error\)$/],
     ];
@@ -440,6 +494,12 @@ describe('B4: no port, no route, no shell; a config module that cannot load', ()
       expect(o.err[0], copy).toMatch(re);
       expect(o.err.join('\n') + o.out.join('\n')).not.toMatch(/s3cr3t|\n\s+at /);
     }
+    // The getter that throws from its third read on: the watcher starts with the store the CLI read once.
+    writeFileSync(join(dir, 'watch-getter2.mjs'), readFileSync(join(dir, 'getter2.mjs'), 'utf8'));
+    const o = capture();
+    expect(await flightWatchMain(['--config', 'watch-getter2.mjs'], dir, o.print, o.perr, Promise.resolve(), 300)).toBe(0);
+    expect(o.err).toEqual([]);
+    expect(o.out[0]).toMatch(/^reins flight watch: watching from .*watch-getter2\.mjs/);
   });
 
   it('says in its usage that it checks while it holds the lock, and takes over once a server stops renewing it', () => {

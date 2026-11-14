@@ -111,21 +111,27 @@ export async function loadFlightConfig(module: string, cwd: string, command: key
     throw new FlightCliError(`${file} could not be loaded (${errorCode(e)}${e instanceof SyntaxError ? ': a syntax error, or a module Node cannot run as it is' : ''})`);
   }
   // The default export, or the named `config` (a CommonJS module has a default that is its whole exports object).
-  const options = async (v: any) => (typeof v === 'function' ? await v() : v);
-  let opts: any;
-  try {
-    opts = await options(mod && typeof mod === 'object' && 'default' in mod ? mod.default : mod?.config);
-    if (!isStore(opts?.store) && mod && typeof mod === 'object' && 'default' in mod && mod.config !== undefined) opts = await options(mod.config);
-  } catch (e) {
-    throw new FlightCliError(`${file}: its config function threw (${errorCode(e)})`);
-  }
+  const options = async (v: () => any) => {
+    try {
+      const o = v();
+      return typeof o === 'function' ? await o() : o;
+    } catch (e) {
+      throw new FlightCliError(`${file}: its config function threw (${errorCode(e)})`);
+    }
+  };
+  // A getter that throws on the store, or on one of its methods, is named as the store's, not the config function's.
+  const storeRead = <T>(f: () => T): T => {
+    try {
+      return f();
+    } catch (e) {
+      throw new FlightCliError(`${file}: its store could not be read (${errorCode(e)})`);
+    }
+  };
+  const isMod = mod && typeof mod === 'object';
+  let opts = await options(() => (isMod && 'default' in mod ? mod.default : mod?.config));
+  if (!storeRead(() => isStore(opts?.store)) && isMod && 'default' in mod && mod.config !== undefined) opts = await options(() => mod.config);
   if (!opts || typeof opts !== 'object') throw new FlightCliError(`${file} exports no flight options: export default the object the server passes to flight.start(), or a function that returns it`);
-  let store: unknown;
-  try {
-    store = opts.store;
-  } catch (e) {
-    throw new FlightCliError(`${file}: its store could not be read (${errorCode(e)})`);
-  }
+  const store: unknown = storeRead(() => opts.store);
   if (!isStore(store)) throw new FlightCliError(`${file}: its options have no store. ${NO_STORE[command]}`);
   return { file, opts, store };
 }

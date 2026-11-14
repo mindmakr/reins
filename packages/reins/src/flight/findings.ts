@@ -102,13 +102,20 @@ export interface EvaluateInput {
   extra?: Observation[];
   /**
    * The server's health address, when the watcher polled it this pass: null when it answered, else its finding
-   * (key HEALTH_KEY). Left out (no watcher polls the address any more), an open health finding resolves.
+   * (key HEALTH_KEY). Left out (no watcher polled it), an open health finding stays open for HEALTH_UNCHECKED_MS
+   * after the last poll, then resolves as no longer checked.
    */
   health?: Observation | null;
 }
 
 /** The key of the watcher's finding that the server stopped answering its health address (design section 5). */
 export const HEALTH_KEY = 'basic:health';
+
+/**
+ * How long an open health finding waits for a watcher to poll again (one restarting, say) before it resolves as no
+ * longer checked: a restart during an outage tells nothing, rather than Resolved and then Opened again.
+ */
+export const HEALTH_UNCHECKED_MS = 10 * 60_000;
 
 export interface EvaluateResult {
   /** Every finding known, open and resolved, in report order. */
@@ -721,11 +728,15 @@ export function evaluate(input: EvaluateInput): EvaluateResult {
     for (const x of input.extra || []) obs.push(x);
   });
   // The health finding is open only while a watcher's poll says the address does not answer. A pass that polled
-  // no address (a server's, or a watcher's with none) means no watcher polls it any more: an open one resolves.
+  // no address (a server's, or a watcher's with none) leaves an open one as it is until HEALTH_UNCHECKED_MS after
+  // the last poll; then it resolves as no longer checked, never as a recovery.
   if (input.health) obs.push({ ...input.health, key: HEALTH_KEY, kind: 'basic' });
-  judged.add(HEALTH_KEY);
+  const lastHealth = input.prior.find((f) => f.key === HEALTH_KEY && f.state === 'open');
+  const unchecked = input.health === undefined && !!lastHealth;
+  const healthJudged = !unchecked || !(now - lastHealth!.lastAt < HEALTH_UNCHECKED_MS);
 
-  const isJudged = (key: string) => judged.has(key) || judgedPrefixes.some((p) => key.startsWith(p));
+  // The health key is judged by the rule above alone, not by the basic rules' prefix.
+  const isJudged = (key: string) => (key === HEALTH_KEY ? healthJudged : judged.has(key) || judgedPrefixes.some((p) => key.startsWith(p)));
   const prior = new Map(input.prior.map((f) => [f.key, f]));
   const seen = new Map<string, Observation>();
   for (const o of obs) if (!seen.has(o.key)) seen.set(o.key, o);
@@ -759,6 +770,7 @@ export function evaluate(input: EvaluateInput): EvaluateResult {
     if (out.has(key)) continue;
     if (p.state === 'open' && isJudged(key)) {
       const f: FlightFinding = { ...p, state: 'resolved', resolvedAt: now };
+      if (key === HEALTH_KEY && unchecked) f.text = `No watcher has polled the server's health address for ${duration(HEALTH_UNCHECKED_MS)}, so it is no longer checked (not a recovery).`;
       out.set(key, f);
       changes.push({ event: 'resolved', finding: f });
     } else out.set(key, p);

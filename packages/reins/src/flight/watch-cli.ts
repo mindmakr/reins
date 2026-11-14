@@ -123,8 +123,9 @@ export async function flightWatchMain(
   }
   let file: string;
   let opts: any;
+  let store: unknown;
   try {
-    ({ file, opts } = await loadFlightConfig(config, cwd, 'watch'));
+    ({ file, opts, store } = await loadFlightConfig(config, cwd, 'watch'));
   } catch (e) {
     err(`reins flight watch: ${shownError(e, 'the config module could not be loaded')}`);
     return 2;
@@ -132,7 +133,8 @@ export async function flightWatchMain(
   const f = createFlight();
   let started: boolean;
   try {
-    started = f.watch(opts, cwd);
+    // The store as the module gave it once, not read again: the rest of the options are read as they are.
+    started = f.watch(new Proxy(opts, { get: (t, k) => (k === 'store' ? store : Reflect.get(t, k)) }), cwd);
   } catch (e: any) {
     // Only `strict: true` with an invalid manifest throws, with a message of flight's own about the manifest.
     const own = e instanceof Error && e.message.startsWith('reins flight: the manifest is invalid');
