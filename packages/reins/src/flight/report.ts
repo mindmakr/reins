@@ -547,6 +547,14 @@ type Read = Pick<ReportInput, 'check' | 'minutes' | 'stored' | 'storedAt' | 'pro
 async function readStore(o: CollectOptions, now: number, from: number): Promise<Read> {
   let minutes: InstanceMinute[] = [];
   const c = await check(o.store, o.manifest, { now, minutes: (x) => (minutes = Array.isArray(x) ? x : []) });
+  // The checker reads 24 hours of minutes, or the longest promise window. For a longer report window, read the
+  // minutes of the whole window, so undeclared processes, dev instances and Node versions are not from a shorter read.
+  if (now - from > DEFAULT_WINDOW_MS && !c.blind.some((f) => f.kind === 'store-unreachable')) {
+    try {
+      const wide = await o.store.minutes(from - (from % MIN));
+      if (Array.isArray(wide)) minutes = wide;
+    } catch {}
+  }
   let stored: FlightFinding[] | null = null;
   let storedAt: number | null = null;
   try {

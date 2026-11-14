@@ -207,6 +207,18 @@ describe('B1: flight.report() returns the data of design section 6', () => {
 });
 
 describe('B4: development instruments and what this Node version cannot record', () => {
+  it('reads the minutes of a window longer than the checker reads, for dev instances and Node versions', async () => {
+    const now = Date.now();
+    const store = memoryStore();
+    // 30 hours ago: older than the checker's 24 hours, inside a 48 hour window.
+    await store.putMinute(im('old', now - 30 * H, {}, { devModule: true }));
+    const day = await collectReport({ store, manifest: null, service: 'svc', now });
+    expect(day.dev.instances).toBe(0);
+    const two = await collectReport({ store, manifest: null, service: 'svc', now, windowMs: 48 * H });
+    expect(two.dev.instances).toBe(1);
+    expect(two.dev.off).toBe(false);
+  });
+
   it('states that development instruments are off', async () => {
     const { r } = await startedReport();
     expect(r.dev).toMatchObject({ off: true, instances: 0, thisProcess: { devModuleLoaded: false } });
@@ -351,6 +363,10 @@ describe('B3: the HTML page holds no script and no external resource, and shows 
     expect(md).toContain('\\<img src=x onerror=alert(1)\\>');
     // A key with backticks stays one code span.
     expect(findingMarkdown(finding({ key: 'a`b' }))).toMatch(/``a`b``/);
+    // A backtick in app text cannot open a code span, and a bare URL is not left to autolink.
+    const t = findingMarkdown(finding({ text: 'run `rm` at https://evil.example/x and www.evil.example' }));
+    expect(t).toContain('run \\`rm\\` at https\\://evil.example/x and www\\.evil.example');
+    expect(t).not.toMatch(/https:\/\/|www\.|(^|[^\\])`rm/);
   });
 });
 
@@ -384,6 +400,21 @@ const capture = () => {
   return { out, err, print: (s: string) => out.push(s), perr: (s: string) => err.push(s) };
 };
 
+describe('a saved report with null entries', () => {
+  it('renders without them instead of crashing', () => {
+    const r: any = JSON.parse(JSON.stringify(withFindings(1)));
+    r.processes = [null, { name: 'payout', started: 1, ended: 0, inProgress: 0, steps: [null, { step: 'requested', declared: true, count: 1 }], declared: true }];
+    r.promises = [null];
+    r.probes = [null];
+    r.basics.checks = [null];
+    r.basics.routes = [null];
+    const text = JSON.stringify(r);
+    expect(() => renderFlightMarkdown(parseFlightReport(text))).not.toThrow();
+    expect(() => renderFlightHtml(parseFlightReport(text))).not.toThrow();
+    expect(renderFlightMarkdown(parseFlightReport(text))).toContain('payout');
+  });
+});
+
 describe('B5: reins flight report', () => {
   it('prints the report from the app config module, as Markdown or JSON', async () => {
     const now = Date.now();
@@ -404,6 +435,16 @@ describe('B5: reins flight report', () => {
     const data = JSON.parse(j.out.join('\n')) as FlightReport;
     expect(data).toMatchObject({ format: REPORT_FORMAT, service: 'payday-api', manifest: 'ok' });
     expect(data.promises.find((p) => p.id === 'pending-settles')?.state).toBe('broken');
+  });
+
+  it('picks the named config of a CommonJS module, whose default is its whole exports object', async () => {
+    const dir = moduleDir();
+    const store = await seeded(Date.now(), fileStore({ dir: join(dir, '.reins', 'flight') }));
+    (globalThis as any).__reinsFlightReportTest = { store, service: 'cjs-api' };
+    writeFileSync(join(dir, 'flight.config.cjs'), 'exports.config = globalThis.__reinsFlightReportTest;\n');
+    const o = capture();
+    expect(await flightMain(['report', '--config', 'flight.config.cjs'], dir, o.print, o.perr)).toBe(0);
+    expect(o.out.join('\n')).toMatch(/^# reins flight report: cjs-api$/m);
   });
 
   it('renders a saved report file, and compares two by key', async () => {
@@ -458,6 +499,7 @@ describe('B5: reins flight report', () => {
     const h = capture();
     expect(await flightMain(['report', '--help'], dir, h.print, h.perr)).toBe(0);
     expect(h.err.join('\n')).toMatch(/reins flight report --config <module> \[--json\]/);
+    expect(h.err.join('\n')).toMatch(/process keys[^]*do not paste it where others can read it/);
   });
 
   const built = fileURLToPath(new URL('../dist/cli.js', import.meta.url));

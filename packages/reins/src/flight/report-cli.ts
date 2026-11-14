@@ -15,7 +15,8 @@ export const FLIGHT_REPORT_USAGE = `usage:
   reins flight report <report.json> [--json]
   reins flight report --compare <before.json> <after.json> [--json]
 
-Prints the flight report as Markdown (--json: the report data). With --config, loads the app's
+Prints the flight report as Markdown (--json: the report data, with process keys such as payout
+ids, which are server-side data: do not paste it where others can read it). With --config, loads the app's
 flight config module (its default export, or a function returning it: the options the server
 passes to flight.start(), with its store) and reads the store; the manifest is the config's
 \`manifest\`, else ${MANIFEST_FILE} in the current folder. With a saved report file (the JSON of
@@ -87,9 +88,12 @@ async function fromConfig(module: string, cwd: string): Promise<FlightReport> {
   } catch (e) {
     throw new Error(`${file} could not be loaded (${errorCode(e)}${e instanceof SyntaxError ? ': a syntax error, or a module Node cannot run as it is' : ''})`);
   }
-  let opts: any = mod && typeof mod === 'object' && 'default' in mod ? mod.default : mod?.config;
+  // The default export, or the named `config` (a CommonJS module has a default that is its whole exports object).
+  const options = async (v: any) => (typeof v === 'function' ? await v() : v);
+  let opts: any;
   try {
-    if (typeof opts === 'function') opts = await opts();
+    opts = await options(mod && typeof mod === 'object' && 'default' in mod ? mod.default : mod?.config);
+    if (!isStore(opts?.store) && mod && typeof mod === 'object' && 'default' in mod && mod.config !== undefined) opts = await options(mod.config);
   } catch (e) {
     throw new Error(`${file}: its config function threw (${errorCode(e)})`);
   }

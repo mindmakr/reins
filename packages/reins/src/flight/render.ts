@@ -10,6 +10,8 @@ import { type FlightReport, type PromiseReport, reasonText, REPORT_FORMAT, REPOR
 // ---- shared ----------------------------------------------------------------------------------------------------
 
 const arr = <T>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
+/** A list from a saved file without its null and non-object entries. */
+const objs = <T>(v: unknown): T[] => arr<unknown>(v).filter((x) => x && typeof x === 'object') as T[];
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 /** A string from the report on one line: control characters and line breaks become spaces. */
 const line = (v: unknown) => String(v ?? '').replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ');
@@ -61,8 +63,15 @@ function findingFacts(f: FlightFinding): string {
 
 // ---- Markdown --------------------------------------------------------------------------------------------------
 
-/** App text in Markdown: on one line, with the characters that make links, images, HTML or table cells escaped. */
-const md = (v: unknown) => line(v).replace(/[\\[\]<>|*_]/g, '\\$&');
+/**
+ * App text in Markdown: on one line, with the characters that make links, images, HTML, code or table cells
+ * escaped, and bare URLs (`https://`, `www.`) kept from turning into links.
+ */
+const md = (v: unknown) =>
+  line(v)
+    .replace(/[\\[\]<>|*_`]/g, '\\$&')
+    .replace(/\b(https?|ftp):\/\//gi, '$1\\://')
+    .replace(/\bwww\./gi, (w) => `${w.slice(0, 3)}\\.`);
 /** A code span that holds any text: a fence longer than any run of backticks in it. */
 function code(v: unknown): string {
   const s = line(v);
@@ -100,7 +109,7 @@ export function renderFlightMarkdown(r: FlightReport): string {
   out.push(`## Resolved in this period`, '', findingList(resolved, '- None.'), '');
 
   out.push(`## Processes`, '');
-  const procs = arr<FlightReport['processes'][number]>(r.processes);
+  const procs = objs<FlightReport['processes'][number]>(r.processes);
   if (!procs.length) out.push('_None._', '');
   for (const p of procs) {
     const ends = Object.entries(p.byEnd && typeof p.byEnd === 'object' ? p.byEnd : {}).map(([k, v]) => `${md(k)} ${num(v) ?? 0}`);
@@ -109,15 +118,15 @@ export function renderFlightMarkdown(r: FlightReport): string {
       `Started ${num(p.started) ?? 0} · in progress ${p.inProgress === null ? 'not counted' : (num(p.inProgress) ?? 0)} · ended ${num(p.ended) ?? 0}${ends.length ? ` (${ends.join(', ')})` : ''}${num(p.partial) ? ` · ${count(p.partial, 'run')} partly removed by retention` : ''}.`,
       '',
     );
-    out.push(table(['Step', 'Recorded', 'From start, p50', 'p95'], arr<FlightReport['processes'][number]['steps'][number]>(p.steps).map((s) => [`${md(s.step)}${s.end ? ' (end)' : ''}${s.declared ? '' : ' (not declared)'}`, String(num(s.count) ?? 0), ms(s.p50Ms), ms(s.p95Ms)])));
+    out.push(table(['Step', 'Recorded', 'From start, p50', 'p95'], objs<FlightReport['processes'][number]['steps'][number]>(p.steps).map((s) => [`${md(s.step)}${s.end ? ' (end)' : ''}${s.declared ? '' : ' (not declared)'}`, String(num(s.count) ?? 0), ms(s.p50Ms), ms(s.p95Ms)])));
     if (num(p.moreSteps)) out.push('', `_${count(p.moreSteps, 'more step')} not shown._`);
     out.push('');
   }
 
   out.push(`## Promises`, '');
-  out.push(table(['Promise', 'State', 'Runs', 'Window'], arr<PromiseReport>(r.promises).map((p) => [`${md(p.process)} / ${md(p.id)}`, md(promiseState(p)), String(num(p.runs) ?? 0), ms(p.windowMs)])), '');
+  out.push(table(['Promise', 'State', 'Runs', 'Window'], objs<PromiseReport>(r.promises).map((p) => [`${md(p.process)} / ${md(p.id)}`, md(promiseState(p)), String(num(p.runs) ?? 0), ms(p.windowMs)])), '');
   out.push(`## Probes`, '');
-  out.push(table(['Probe', 'State', 'Every', 'Last result'], arr<FlightReport['probes'][number]>(r.probes).map((p) => [md(p.id), md(probeState(p)), ms(p.everyMs), p.lastAt ? when(p.lastAt) : 'none'])), '');
+  out.push(table(['Probe', 'State', 'Every', 'Last result'], objs<FlightReport['probes'][number]>(r.probes).map((p) => [md(p.id), md(probeState(p)), ms(p.everyMs), p.lastAt ? when(p.lastAt) : 'none'])), '');
 
   const b = r.basics || ({} as FlightReport['basics']);
   out.push(`## Basics`, '');
@@ -125,10 +134,10 @@ export function renderFlightMarkdown(r: FlightReport): string {
     `In the last ${ms(b.windowMs) || 'window'}: ${count(b.requests, 'request')}, ${num(b.failed) ?? 0} failed, from ${count(b.instances, 'instance')}${num(b.loopP99Ms) !== null ? `; event loop p99 up to ${ms(b.loopP99Ms)}` : ''}${num(b.heapUsedMb) !== null ? `; heap up to ${Math.round(b.heapUsedMb!)} MB` : ''}.`,
     '',
   );
-  const fig = (l: unknown) => arr<FlightReport['basics']['routes'][number]>(l).map((x) => [md(x.name), String(num(x.count) ?? 0), String(num(x.errors) ?? 0), ms(x.p95Ms)]);
+  const fig = (l: unknown) => objs<FlightReport['basics']['routes'][number]>(l).map((x) => [md(x.name), String(num(x.count) ?? 0), String(num(x.errors) ?? 0), ms(x.p95Ms)]);
   if (arr(b.routes).length) out.push(table(['Route', 'Requests', 'Failed', 'p95'], fig(b.routes)), '');
   if (arr(b.upstream).length) out.push(table(['Upstream host', 'Calls', 'Failed', 'p95'], fig(b.upstream)), '');
-  out.push(arr<FlightReport['basics']['checks'][number]>(b.checks).map((c) => `- ${c.state === 'finding' ? '**Finding**' : c.state === 'fine' ? 'Fine' : 'Not judged'}: ${md(c.text)}`).join('\n') || '- None.', '');
+  out.push(objs<FlightReport['basics']['checks'][number]>(b.checks).map((c) => `- ${c.state === 'finding' ? '**Finding**' : c.state === 'fine' ? 'Fine' : 'Not judged'}: ${md(c.text)}`).join('\n') || '- None.', '');
 
   out.push(`## Development instruments`, '', md(devLine(r)), '');
   out.push(`## Checked and found fine`, '', bullets(arr<string>(r.checked)), '');
@@ -210,9 +219,9 @@ export function renderFlightHtml(r: FlightReport): string {
   if (rest.length) sec.push(`<section><h2>Everything else</h2>${findingsHtml(rest, '')}</section>`);
   sec.push(`<section><h2>Resolved in this period</h2>${findingsHtml(resolved, 'None.')}</section>`);
 
-  const procs = arr<FlightReport['processes'][number]>(r.processes).map((p) => {
+  const procs = objs<FlightReport['processes'][number]>(r.processes).map((p) => {
     const ends = Object.entries(p.byEnd && typeof p.byEnd === 'object' ? p.byEnd : {}).map(([k, v]) => `${h(k)} ${num(v) ?? 0}`);
-    const rows = arr<FlightReport['processes'][number]['steps'][number]>(p.steps).map((s) => [
+    const rows = objs<FlightReport['processes'][number]['steps'][number]>(p.steps).map((s) => [
       `${h(s.step)}${s.end ? ' <span class="muted small">(end)</span>' : ''}${s.declared ? '' : ' <span class="muted small">(not declared)</span>'}`,
       String(num(s.count) ?? 0),
       h(ms(s.p50Ms)),
@@ -221,11 +230,11 @@ export function renderFlightHtml(r: FlightReport): string {
     return `<div class="card"><h3>${h(p.name)}${p.declared ? '' : ' <span class="muted small">(not in the manifest)</span>'}</h3><p>Started ${num(p.started) ?? 0} · in progress ${p.inProgress === null ? 'not counted' : (num(p.inProgress) ?? 0)} · ended ${num(p.ended) ?? 0}${ends.length ? ` (${ends.join(', ')})` : ''}${num(p.partial) ? ` · ${h(count(p.partial, 'run'))} partly removed by retention` : ''}</p>${tbl(['Step', 'Recorded', 'From start, p50', 'p95'], rows)}${num(p.moreSteps) ? `<p class="muted small">${h(count(p.moreSteps, 'more step'))} not shown.</p>` : ''}</div>`;
   });
   sec.push(`<section><h2>Processes</h2>${procs.join('') || '<p class="muted">None.</p>'}</section>`);
-  sec.push(`<section><h2>Promises</h2>${tbl(['Promise', 'State', 'Runs', 'Window'], arr<PromiseReport>(r.promises).map((p) => [`${h(p.process)} / ${h(p.id)}`, h(promiseState(p)), String(num(p.runs) ?? 0), h(ms(p.windowMs))]))}</section>`);
-  sec.push(`<section><h2>Probes</h2>${tbl(['Probe', 'State', 'Every', 'Last result'], arr<FlightReport['probes'][number]>(r.probes).map((p) => [h(p.id), h(probeState(p)), h(ms(p.everyMs)), h(p.lastAt ? when(p.lastAt) : 'none')]))}</section>`);
+  sec.push(`<section><h2>Promises</h2>${tbl(['Promise', 'State', 'Runs', 'Window'], objs<PromiseReport>(r.promises).map((p) => [`${h(p.process)} / ${h(p.id)}`, h(promiseState(p)), String(num(p.runs) ?? 0), h(ms(p.windowMs))]))}</section>`);
+  sec.push(`<section><h2>Probes</h2>${tbl(['Probe', 'State', 'Every', 'Last result'], objs<FlightReport['probes'][number]>(r.probes).map((p) => [h(p.id), h(probeState(p)), h(ms(p.everyMs)), h(p.lastAt ? when(p.lastAt) : 'none')]))}</section>`);
 
-  const fig = (l: unknown) => arr<FlightReport['basics']['routes'][number]>(l).map((x) => [h(x.name), String(num(x.count) ?? 0), String(num(x.errors) ?? 0), h(ms(x.p95Ms))]);
-  const checks = arr<FlightReport['basics']['checks'][number]>(b.checks).map((c) => {
+  const fig = (l: unknown) => objs<FlightReport['basics']['routes'][number]>(l).map((x) => [h(x.name), String(num(x.count) ?? 0), String(num(x.errors) ?? 0), h(ms(x.p95Ms))]);
+  const checks = objs<FlightReport['basics']['checks'][number]>(b.checks).map((c) => {
     const st = c.state === 'finding' || c.state === 'fine' ? c.state : 'not-judged';
     return `<li><span class="state-${st}">${st === 'finding' ? 'Finding' : st === 'fine' ? 'Fine' : 'Not judged'}</span>: ${h(c.text)}</li>`;
   });
