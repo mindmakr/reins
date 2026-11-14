@@ -58,6 +58,10 @@ export interface InstanceMinute {
   stepsDropped: Record<string, number>;
   /** `flight.step` calls with bad arguments in this minute. They are not steps, so no process is named. */
   stepsInvalid: number;
+  /** Steps recorded in this minute, by `process step` (counts only, never keys). Absent when there were none. */
+  steps?: Record<string, number>;
+  /** Present when development reins is loaded in this instance and NODE_ENV is production (design C12). */
+  devModule?: true;
   /**
    * Runs of each process that retention removed whole while they had reached no end step: they may still have
    * been overdue. Written by `prune`, under the instance PRUNE_INSTANCE, so a checker in any process sees it.
@@ -95,6 +99,54 @@ export interface FindingRecord {
   state: 'open' | 'resolved';
   updatedAt: number;
   data: Record<string, unknown>;
+}
+
+const NUL_ALL = /\u0000/g;
+const LONE_ALL = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/** Text every store keeps the same: U+0000 removed (Postgres refuses it), a lone surrogate made U+FFFD. */
+export const storableText = (s: string): string => s.replace(NUL_ALL, '').replace(LONE_ALL, '�');
+
+/** A JSON value with every string and object key made storable; what JSON cannot hold is left out, as JSON.stringify would. */
+function storableJson(v: unknown, depth = 0): unknown {
+  if (typeof v === 'string') return storableText(v);
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'boolean' || v === null) return v;
+  if (depth > 32 || typeof v !== 'object') return undefined;
+  // As JSON.stringify does: a value with toJSON (a Date) is kept as what toJSON gives. Only below the top level:
+  // the top level is a finding's `data`, which stays an object (a Date there keeps its own fields: none).
+  if (depth > 0 && typeof (v as { toJSON?: unknown }).toJSON === 'function') {
+    try {
+      return storableJson((v as { toJSON: () => unknown }).toJSON(), depth + 1);
+    } catch {
+      return undefined;
+    }
+  }
+  if (Array.isArray(v)) return v.map((x) => storableJson(x, depth + 1) ?? null);
+  const out: Record<string, unknown> = {};
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    const y = storableJson(x, depth + 1);
+    if (y !== undefined) Object.defineProperty(out, storableText(k), { value: y, enumerable: true, writable: true, configurable: true });
+  }
+  return out;
+}
+
+/**
+ * The findings as every store keeps them (the door of each store's `putFindings`): records of the wrong shape are
+ * left out, and the key and every string in `data` are made storable, so a finding whose text holds U+0000 or a
+ * lone surrogate is kept, cleaned the same way, by memory, file and Postgres alike.
+ */
+export function storableFindings(list: FindingRecord[]): FindingRecord[] {
+  if (!Array.isArray(list)) return [];
+  const out: FindingRecord[] = [];
+  for (const f of list) {
+    if (!f || typeof f !== 'object' || typeof f.key !== 'string' || (f.state !== 'open' && f.state !== 'resolved') || !Number.isFinite(f.updatedAt)) continue;
+    const key = storableText(f.key);
+    if (!key) continue;
+    const data = f.data && typeof f.data === 'object' && !Array.isArray(f.data) ? (storableJson(f.data) as Record<string, unknown>) : {};
+    out.push({ key, state: f.state, updatedAt: f.updatedAt, data });
+  }
+  return out;
 }
 
 /** Bounds on what a store keeps. Applied by `prune`, which the lock holder calls. */
@@ -467,7 +519,7 @@ export function memoryStore(r: Retention & { ends?: Record<string, string[]> } =
       return [...probes.values()].map((p) => ({ ...p }));
     },
     async putFindings(list) {
-      for (const f of list) findings.set(f.key, structuredClone(f));
+      for (const f of storableFindings(list)) findings.set(f.key, f);
     },
     async findings() {
       return [...findings.values()].map((f) => structuredClone(f));

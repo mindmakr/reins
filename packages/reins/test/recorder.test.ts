@@ -321,6 +321,25 @@ describe('strict recording (flight)', () => {
     expect(ok).toMatchObject({ method: 'GET', count: 2, errors: 0, status: { '2xx': 2 } });
     expect(fail).toMatchObject({ count: 1, errors: 1, status: { '5xx': 1 } });
     expect(ok.p95Ms).toBeLessThanOrEqual(ok.maxMs);
+    expect(ok.over).toBeUndefined();
+  });
+
+  it("counts the requests over flight's own slow-route limit and its error level exactly when they lie between two bucket bounds (M2)", async () => {
+    const f = started({ routes: ['/x'], manifest: { schema: 1, service: 'x', processes: [], basics: { slowRouteMs: 30 } } });
+    const base = await serve(
+      f.wrapHandler(async (_q: IncomingMessage, res: ServerResponse) => {
+        await wait(35);
+        res.end();
+      }),
+    );
+    await Promise.all(Array.from({ length: 10 }, () => fetch(`${base}/x`)));
+    await settle();
+    const rows = f.recorder()!.summaries().flatMap((m) => m.requests);
+    expect(rows.every((x) => Object.keys(x.over || {}).join() === '30,60')).toBe(true);
+    expect(rows.reduce((a, x) => a + (x.over?.['30'] || 0), 0)).toBe(10);
+    await f.flush();
+    await f.checkNow();
+    expect(f.findings().find((x) => x.key === 'basic:slow-route:GET /x')).toMatchObject({ state: 'open', count: 10 });
   });
 
   it('records calls and spans that finish after the response as top-level ones, never into the finished request', async () => {

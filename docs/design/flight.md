@@ -287,7 +287,8 @@ Flight changes what reins promises, so the rule is restated and enforced in code
 - **One checker at a time.** The store holds the lock. When a watcher runs, it is the checker and the servers' own checkers stand down.
 - **The Postgres table is the app's to create** (C4). Flight ships its definition; the setup skill adds it through the project's own migration flow.
 - **Retention is bounded** by age and by count, with defaults, so the record cannot grow without limit.
-- **With several instances,** a finding is notified once.
+- **With several instances,** a finding is notified once. That holds across instances only while the store is reachable: findings about the app are told by the lock holder, from the store, on one shared count.
+- **A store outage is each instance's own.** An instance that cannot reach the store tells its sinks once that flight cannot see, and once when it can see again, through its own hourly-capped counter; nothing is handed between instances, so two instances that both lose the store each send that pair, and the store never holds this finding.
 - **Steps use wall-clock time,** because they are compared across instances and restarts.
 
 ---

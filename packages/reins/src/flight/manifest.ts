@@ -1,8 +1,10 @@
 // The flight manifest, reins.flight.json (docs/design/flight.md section 4): its types, the
 // duration parser and the validator. The validator never throws: every problem comes back as
 // data, with its path in the document, so an invalid manifest can never crash a server (C8).
-// This module imports only Node built-ins.
+// This module imports only Node built-ins and the limits table.
 import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
+import { BASICS, type BasicName } from './limits.js';
 
 /** The manifest schema this release understands. A higher number is refused with "update reins". */
 export const MANIFEST_SCHEMA = 1;
@@ -12,13 +14,11 @@ export const MANIFEST_FILE = 'reins.flight.json';
 export const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The limits `basics` may override, each with its allowed range. This is the one list of allowed
- * names: add a basic check's limit here and the validator accepts it.
+ * The limits `basics` may override, each with its allowed range: the BASICS of limits.ts, the one place
+ * every default limit lives. Add a basic check's limit there and the validator accepts it.
  */
-export const BASIC_LIMITS = {
-  errorShare: { min: 0, max: 1 },
-} as const satisfies Record<string, { min: number; max: number }>;
-export type BasicName = keyof typeof BASIC_LIMITS;
+export const BASIC_LIMITS: Readonly<Record<BasicName, { min: number; max: number }>> = BASICS;
+export type { BasicName };
 export const BASIC_NAMES = Object.keys(BASIC_LIMITS) as BasicName[];
 
 /** Durations are written 30s, 15m, 4h or 7d. */
@@ -443,7 +443,8 @@ export function readManifest(file: string): ManifestResult {
     text = readFileSync(file, 'utf8');
   } catch (e: any) {
     const why = e && e.code === 'ENOENT' ? 'no such file' : e && e.code ? e.code : 'could not be read';
-    return { ok: false, problems: [{ path: ROOT, message: `${file}: ${why}` }] };
+    // The base name only: the folder is the server's own, and the problem text reaches sinks.
+    return { ok: false, problems: [{ path: ROOT, message: `${basename(String(file))}: ${why}` }] };
   }
   return parseManifest(text);
 }

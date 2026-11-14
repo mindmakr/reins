@@ -103,6 +103,14 @@ let als: AsyncLocalStorage<Capture> | null = null;
 const pending = new WeakMap<object, { e: RawCall; cap?: Capture; t0: number }>();
 const subs: Array<() => void> = [];
 let devModule = false;
+/** Set inside `untracked`: an outbound call started there is not recorded (flight's own sink deliveries). */
+let quiet: AsyncLocalStorage<true> | null = null;
+
+/** Runs `fn` so that outbound calls it starts are not recorded: flight's own webhook deliveries are not the app's upstream calls. */
+export function untracked<T>(fn: () => T): T {
+  quiet = quiet || new AsyncLocalStorage<true>();
+  return quiet.run(true, fn);
+}
 
 function fault() {
   for (const k of consumers)
@@ -333,6 +341,7 @@ function hostHeader(request: any): string {
 
 function subscribe() {
   const start = (request: object, via: RawCall['via'], method: unknown, origin: string, path: unknown) => {
+    if (quiet?.getStore()) return;
     const cap = als?.getStore();
     const t0 = now();
     pending.set(request, { e: { via, method: String(method || 'GET'), origin, path: String(path || ''), status: 0, startMs: r1(t0 - (cap ? cap.startMs : 0)), ms: 0, failed: false }, cap, t0 });
@@ -457,6 +466,19 @@ export interface Figures {
   /** Upper bound of the latency bucket that holds the 95th percentile (capped at the maximum). */
   p95Ms: number;
   maxMs: number;
+  /**
+   * Counts per latency bucket, one per bound of `LATENCY_BOUNDS` (the last has no upper bound), so figures from
+   * several minutes and instances add up exactly before a limit is applied.
+   */
+  buckets?: number[];
+  /**
+   * How many took longer than each of flight's own time limits that is not a bucket bound (a manifest's slow-route
+   * limit and its error level), keyed by the limit in ms: exact where the buckets give only a floor. Request rows only,
+   * and only when the recorder was given such limits.
+   */
+  over?: Record<string, number>;
+  /** Refused responses by status: `401`, `403` and `429`, only those seen. */
+  refused?: Record<string, number>;
 }
 
 export interface MinuteSummary {
@@ -465,6 +487,8 @@ export interface MinuteSummary {
   requests: Array<{ method: string; route: string } & Figures>;
   upstream: Array<{ method: string; host: string } & Figures>;
   unmatched: number;
+  /** Error codes seen this minute (requests, spans and upstream calls), each a short code (`errorCode`), with counts. */
+  codes?: Record<string, number>;
   /** Sampled when the minute closes (live for the current minute). The event-loop histogram is reset then. */
   runtime: ServerRuntime | null;
 }
@@ -513,7 +537,31 @@ export const UNMATCHED = '(unmatched)';
 export const MOUNT = '(mount)';
 const OTHER = '(other)';
 const MAX_KEYS = 300;
-const BOUNDS = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, Infinity];
+// 800 and 1600 are flight's default slow-route limit and its error level (limits.ts): a route is judged on whole
+// buckets. Other limits (a manifest's own) are counted exactly beside the buckets (`Figures.over`, `extraLimits`).
+const BOUNDS = [10, 25, 50, 100, 250, 500, 800, 1000, 1600, 2500, 5000, 10000, 30000, Infinity];
+/** Upper bounds of the latency buckets of `Figures.buckets`, in ms; the last bucket has none. A bucket holds the times over the bound before it. */
+export const LATENCY_BOUNDS: readonly number[] = BOUNDS;
+
+/** The 95th percentile of figures kept in latency buckets: the upper bound of the bucket that holds it, capped at the maximum. */
+export function bucketP95(buckets: readonly number[], count: number, max: number): number {
+  for (let i = 0, seen = 0; i < BOUNDS.length; i++) {
+    seen += Number(buckets[i]) || 0;
+    if (count && seen >= Math.ceil(count * 0.95)) return Math.min(BOUNDS[i], max);
+  }
+  return max;
+}
+
+/** How many of the figures surely took longer than `ms`: those in buckets whose lower bound is `ms` or more. Exact when `ms` is a bound. */
+export function bucketsOver(buckets: readonly number[], ms: number): number {
+  let n = 0;
+  for (let i = 1; i < BOUNDS.length; i++) if (BOUNDS[i - 1] >= ms) n += Number(buckets[i]) || 0;
+  return n;
+}
+/** Statuses counted one by one as refused: sign-in required, forbidden, too many requests. */
+export const REFUSED_STATUSES: readonly number[] = [401, 403, 429];
+/** Distinct error codes counted per minute; more are counted under `(other)`. */
+const MAX_CODES = 50;
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT']);
 // Known prefixes and shapes only: an errno-style code (`E` and upper-case letters, at most 16 characters, such
 // as `ECONNREFUSED`), or `ERR_`/`UND_ERR_` and upper-case letters and underscores, at most 40 characters (such
@@ -605,6 +653,9 @@ interface Agg {
   sum: number;
   max: number;
   buckets: number[];
+  /** Counts over each of the recorder's extra limits, in their order. */
+  over: number[];
+  refused: Record<string, number>;
 }
 
 interface Minute {
@@ -612,29 +663,47 @@ interface Minute {
   requests: Map<string, Agg>;
   upstream: Map<string, Agg>;
   unmatched: number;
+  codes: Record<string, number>;
   runtime: ServerRuntime | null;
 }
 
 const statusClass = (s: number) => (s >= 100 && s < 600 ? `${Math.floor(s / 100)}xx` : '0');
 
-function figures(a: Agg): Figures {
-  let p95 = a.max;
-  for (let i = 0, seen = 0; i < BOUNDS.length; i++) {
-    seen += a.buckets[i];
-    if (seen >= Math.ceil(a.count * 0.95)) {
-      p95 = Math.min(BOUNDS[i], a.max);
-      break;
-    }
-  }
-  return { count: a.count, errors: a.errors, status: { ...a.status }, avgMs: a.count ? r1(a.sum / a.count) : 0, p95Ms: r1(p95), maxMs: r1(a.max) };
+function figures(a: Agg, limits: readonly number[]): Figures {
+  const p95 = bucketP95(a.buckets, a.count, a.max);
+  return {
+    count: a.count,
+    errors: a.errors,
+    status: { ...a.status },
+    avgMs: a.count ? r1(a.sum / a.count) : 0,
+    p95Ms: r1(p95),
+    maxMs: r1(a.max),
+    buckets: [...a.buckets],
+    ...(limits.length ? { over: Object.fromEntries(limits.map((l, i) => [String(l), a.over[i]])) } : {}),
+    ...(Object.keys(a.refused).length ? { refused: { ...a.refused } } : {}),
+  };
+}
+
+/** Extra limits a strict recorder counts exactly, at most. */
+const MAX_LIMITS = 4;
+
+/** Flight's own time limits that are not bucket bounds: finite, above zero, distinct, at most MAX_LIMITS, in order. */
+export function extraLimits(list: unknown): number[] {
+  if (!Array.isArray(list)) return [];
+  const out = new Set<number>();
+  for (const v of list) if (typeof v === 'number' && Number.isFinite(v) && v > 0 && !BOUNDS.includes(v) && out.size < MAX_LIMITS) out.add(v);
+  return [...out].sort((a, b) => a - b);
 }
 
 /**
  * The strict recorder flight uses (design C16): a request is method, route pattern, status and timing; an
  * upstream call is method, host, status and timing; an error is a short code. Headers, paths, query strings,
  * bodies and error messages never enter a record. Buffers are bounded and what falls out is counted.
+ * `limits` are flight's own time limits (its slow-route limit and the error level): those that are not bucket
+ * bounds are counted exactly per row, in `Figures.over`.
  */
-export function createStrictRecorder(o: StrictOptions = {}) {
+export function createStrictRecorder(o: StrictOptions = {}, limits: readonly number[] = []) {
+  const extra = extraLimits(limits);
   const size = int(o.bufferSize, 1000, 10, 100000);
   const keep = int(o.minutes, 60, 1, 1440);
   const match = routeMatcher(o.routes);
@@ -706,7 +775,7 @@ export function createStrictRecorder(o: StrictOptions = {}) {
       // that the summaries still add up to what was recorded.
       const oldest = minutes.size >= keep ? Math.min(...minutes.keys()) : -Infinity;
       if (key < oldest) return minutes.get(oldest)!;
-      m = { minute: key, requests: new Map(), upstream: new Map(), unmatched: 0, runtime: null };
+      m = { minute: key, requests: new Map(), upstream: new Map(), unmatched: 0, codes: Object.create(null), runtime: null };
       minutes.set(key, m);
       // Evict the oldest minute, not the first inserted: a wall clock that steps back must not evict the current one.
       while (minutes.size > keep) minutes.delete(Math.min(...minutes.keys()));
@@ -722,17 +791,29 @@ export function createStrictRecorder(o: StrictOptions = {}) {
       id = Object.values(key).join(' ');
     }
     let a = map.get(id);
-    if (!a) map.set(id, (a = { key, count: 0, errors: 0, status: {}, sum: 0, max: 0, buckets: BOUNDS.map(() => 0) }));
+    if (!a) map.set(id, (a = { key, count: 0, errors: 0, status: {}, sum: 0, max: 0, buckets: BOUNDS.map(() => 0), over: extra.map(() => 0), refused: {} }));
     a.count++;
     if (failed || status === 0 || status >= 500) a.errors++;
     const sc = statusClass(status);
     a.status[sc] = (a.status[sc] || 0) + 1;
+    if (REFUSED_STATUSES.includes(status)) a.refused[status] = (a.refused[status] || 0) + 1;
     a.sum += ms;
     a.max = Math.max(a.max, ms);
     a.buckets[BOUNDS.findIndex((b) => ms <= b)]++;
+    for (let i = 0; i < extra.length; i++) if (ms > extra[i]) a.over[i]++;
   }
 
-  const addCall = (m: Minute, u: StrictCall) => add(m.upstream, { method: u.method, host: u.host }, u.status, u.ms, !!u.error);
+  /** Counts an error code in the minute; codes are short (`errorCode`), and past MAX_CODES they go under `(other)`. */
+  const addCode = (m: Minute, code: string | undefined) => {
+    if (!code) return;
+    const k = code in m.codes || Object.keys(m.codes).length < MAX_CODES ? code : OTHER;
+    m.codes[k] = (m.codes[k] || 0) + 1;
+  };
+
+  const addCall = (m: Minute, u: StrictCall) => {
+    add(m.upstream, { method: u.method, host: u.host }, u.status, u.ms, !!u.error);
+    addCode(m, u.error);
+  };
 
   const consumer: Consumer = {
     kind: 'strict',
@@ -756,12 +837,16 @@ export function createStrictRecorder(o: StrictOptions = {}) {
       const m = minute(r.at);
       if (r.route === UNMATCHED) m.unmatched++;
       add(m.requests, { method: r.method, route: r.route }, r.status, r.ms, !!r.error);
+      addCode(m, r.error);
+      for (const s of r.spans) addCode(m, s.error);
       for (const u of r.upstream) addCall(m, u);
       onRecord?.(r);
     },
     // A late span or call (finished after its request was recorded) is kept as a top-level one.
     span(s) {
-      spans.push(toSpan(s, Date.now()));
+      const x = toSpan(s, Date.now());
+      spans.push(x);
+      addCode(minute(x.at!), x.error);
     },
     call(k) {
       const u = toCall(k, Date.now());
@@ -775,9 +860,10 @@ export function createStrictRecorder(o: StrictOptions = {}) {
 
   const view = (m: Minute): MinuteSummary => ({
     minute: m.minute,
-    requests: [...m.requests.values()].map((a) => ({ ...(a.key as { method: string; route: string }), ...figures(a) })),
-    upstream: [...m.upstream.values()].map((a) => ({ ...(a.key as { method: string; host: string }), ...figures(a) })),
+    requests: [...m.requests.values()].map((a) => ({ ...(a.key as { method: string; route: string }), ...figures(a, extra) })),
+    upstream: [...m.upstream.values()].map((a) => ({ ...(a.key as { method: string; host: string }), ...figures(a, []) })),
     unmatched: m.unmatched,
+    ...(Object.keys(m.codes).length ? { codes: { ...m.codes } } : {}),
     runtime: m.runtime || (detach ? runtimeOf(loop) : null),
   });
 
