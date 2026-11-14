@@ -1,6 +1,8 @@
 # AGENTS.md: adding reins to an app
 
-This page is for coding agents asked to add reins to a web or Expo app, or to work in this repository. For the full automated playbooks, read [`skills/reins/SKILL.md`](skills/reins/SKILL.md), [`skills/reins/references/setup.md`](skills/reins/references/setup.md) and [`skills/reins/references/drive.md`](skills/reins/references/drive.md).
+This page is for coding agents asked to add reins to a web or Expo app, or to work in this repository. For the full automated playbooks, read [`skills/reins/SKILL.md`](skills/reins/SKILL.md), [`skills/reins/references/setup.md`](skills/reins/references/setup.md), [`skills/reins/references/drive.md`](skills/reins/references/drive.md) and, for flight, [`skills/reins/references/flight.md`](skills/reins/references/flight.md).
+
+**The production promise: production builds contain no development reins, and the flight entry (`@mindmakr/reins/flight`) is the only part of reins meant for production.** Keep both true in every change you make to an app or to this repository.
 
 ## Adding reins to an app
 
@@ -32,6 +34,18 @@ Rules for actions:
 
 **Panels: the screens worth comparing with designs.** Wrap them in `<ReinsPanel id="checkout">` from `@mindmakr/reins/react` (web) or `<ReinsPanel id="checkout">` from `@mindmakr/reins/expo` (a View with `testID`). Use stable, kebab-case ids that match screen names. Each `<ReinsPanel id>` also records its mount timestamp (`mountedAtMs`), latest render timestamp (`lastRenderMs`), and render count (`renders`) for `reins_perf`, and can be inspected on demand with `reins_dom({ panel: id })`.
 
+## Flight on a production server
+
+Flight (`@mindmakr/reins/flight`) records the steps of a server's long-running work, checks them against the promises in `reins.flight.json`, and reports findings. Follow [`skills/reins/references/flight.md`](skills/reins/references/flight.md). For flight, install `@mindmakr/reins` as a regular dependency (`npm i @mindmakr/reins`), because it runs in production. Three rules:
+
+- **Never put a value in a step name or a process key that identifies a person**: no email, name, phone, account or card number. Step names are fixed words from the manifest; a key is a run id such as a payout id.
+- **Never invent a promise the person has not approved.** Propose processes, steps and promises in plain words, each with its `why`, and wire nothing until the person approves the manifest.
+- **Never use flight to change behaviour.** No code branches on a flight call, a finding or a report. Flight reports; a fix is a separate change the person asks for.
+
+Flight does not protect against a secret the app puts in a step name or process key, a store or report page shown without sign-in, a webhook address that points somewhere it should not, or anyone who already controls the server. See [SECURITY.md](SECURITY.md#what-flight-does-not-protect-against).
+
+Keep the development imports (`reins.connect()`, `@mindmakr/reins/node`) behind the project's development check as before. Flight does not replace them and they never go to production.
+
 ## Staging
 
 Only build with `REINS_ENABLE=1` for a private staging environment that the person asked for. Staging builds must not include test-only actions such as seeding or resetting data. Never set it for a public or production build.
@@ -44,3 +58,4 @@ Only build with `REINS_ENABLE=1` for a private staging environment that the pers
 - Guard all globals. Do nothing before pairing. Redact by default. No eval. No shell strings: use `execFileSync` with an argument array.
 - The bridge only binds to `127.0.0.1`. Do not add a host option.
 - Security changes need tests. Update `SECURITY.md` in the same change.
+- The flight entry (`packages/reins/src/flight.ts` and `src/flight/`) imports only Node built-ins and reins' shared modules, never the bridge, the pairing code, `ws` or the MCP SDK. `packages/reins/test/flight-safety.test.ts` walks its imports; keep it passing.

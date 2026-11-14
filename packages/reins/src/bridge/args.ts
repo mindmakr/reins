@@ -13,6 +13,7 @@ export const USAGE = `usage:
   reins bridge [options]
   reins verify <dir> [<dir>...]
   reins report [--from <session.json>] [--compare <before.json> <after.json>] [--out <dir|file.md>]
+  reins flight check [file]
 
 Starts the reins bridge on 127.0.0.1 and an MCP server on stdio, checks a production bundle for reins dev code, or renders saved session reports.
 

@@ -7,7 +7,7 @@ description: Use when setting up reins in a new or existing web (Vite, Next.js, 
 
 **reins** gives coding agents instruments, hands, and eyes inside web, Expo, and Node apps: named actions, redacted state, network and error buffers, lifecycle and render timings (`reins_perf`), DOM/CSS layout checks (`reins_dom`), backend request and DB spans (`reins_server`), Markdown/JSON session reports (`reins_report`), and `<ReinsPanel>` screenshots over a localhost MCP bridge.
 
-Built for [**Lucid Coding**](https://mindmakr.github.io/coordinator/lucid-coding.html) — Principle #2 (*"Give agents instruments, not just screenshots"*) and Principle #8 (*"Performance comes with measurement"*).
+Built for [**Lucid Coding**](https://mindmakr.github.io/coordinator/lucid-coding.html) (Principles #2 and #8).
 
 ## Commands & Playbooks
 
@@ -15,14 +15,15 @@ Call `/reins:<command>` (Claude Code plugin) or `/reins <command>` (skill). Read
 
 | Command | Use it to | Playbook |
 |---|---|---|
-| `setup` | Inspect a repo and wire `@mindmakr/reins` (frontend, optional `@mindmakr/reins/node` backend, optional `@mindmakr/reins/record`) | `references/setup.md` |
+| `setup` | Inspect a repo and wire `@mindmakr/reins` (frontend, optional `@mindmakr/reins/node` backend, optional `@mindmakr/reins/record`); Step 8 trims the agent prompt prefix | `references/setup.md` |
 | `drive` | Drive actions, check state/network/errors/perf/DOM/server, snap panels, and save session reports | `references/drive.md` |
 | `verify` | Run the production build and verify that `@mindmakr/reins` and `@mindmakr/reins/record` were swapped for 0-marker stubs | `references/setup.md` (Step 7) |
 | `companion` | Pair **reins** with **Coordinator** for Lucid Coding (builder + blind visual critic) | `references/companion.md` |
+| `flight` | Add report-only production checks to a Node server | `references/flight.md` |
 
-## One-package architecture (`npm i -D @mindmakr/reins`)
+## Dev install for the development tools (`npm i -D @mindmakr/reins`)
 
-Everything ships in the single `@mindmakr/reins` package:
+Flight runs in production: install it as a regular dependency, `npm i @mindmakr/reins` (`references/flight.md`).
 
 - `@mindmakr/reins` — browser/RN core (< 5 KB min+gzip, 0 browser deps): `action`, `state`, `panel`, `markComponent`, `perf`, `dom`
 - `@mindmakr/reins/react` — `useReinsAction`, `useReinsState`, `<ReinsPanel id>` (tracks mount time & render counts)
@@ -32,7 +33,7 @@ Everything ships in the single `@mindmakr/reins` package:
 - `@mindmakr/reins/report` & `npx reins report [--compare a.json b.json]` — Markdown/JSON session reports and before/after regression diffs
 - `@mindmakr/reins/adapters` — `zustand`, `redux`, `reactQuery`, `routerLocation`, `fromStore`
 - `@mindmakr/reins/vite`, `@mindmakr/reins/next`, `@mindmakr/reins/metro` — bundler plugins (serve token in dev, swap to stubs in prod)
-- `npx reins bridge` — localhost (`127.0.0.1:7357`) WebSocket hub and stdio MCP server (11 tools)
+- `npx reins bridge` — localhost (`127.0.0.1:7357`) WebSocket hub and stdio MCP server (12 tools)
 - `npx reins verify <dir>` — fails if `__REINS_DEV_ONLY__` is in a production build
 
 ## Hard rules

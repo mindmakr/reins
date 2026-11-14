@@ -1,7 +1,7 @@
 {
   "name": "@mindmakr/reins",
-  "version": "0.1.0",
-  "description": "Give coding agents the reins: a tiny dev-only library to drive, inspect and debug your web and Expo apps",
+  "version": "0.2.0",
+  "description": "Give coding agents the reins: development tools to drive, inspect and debug web and Expo apps, and a report-only flight entry for Node servers. Production builds contain no development reins; @mindmakr/reins/flight is the only part meant for production. SECURITY.md says what flight does not protect against.",
   "license": "MIT",
   "author": "mindmakr",
   "homepage": "https://mindmakr.github.io/reins/",
@@ -28,6 +28,7 @@
     "./bridge": { "types": "./dist/bridge/index.d.ts", "default": "./dist/bridge/index.js" },
     "./report": { "types": "./dist/report.d.ts", "default": "./dist/report.js" },
     "./node": { "types": "./dist/node.d.ts", "default": "./dist/node.js" },
+    "./flight": { "types": "./dist/flight.d.ts", "default": "./dist/flight.js" },
     "./record": { "types": "./dist/record.d.ts", "default": "./dist/record.js" },
     "./record-stub": { "types": "./dist/record-stub.d.ts", "default": "./dist/record-stub.js" }
   },

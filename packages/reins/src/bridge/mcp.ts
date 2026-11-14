@@ -3,7 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { callTool, TOOLS, type ToolContext } from './tools.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 /** Serves the reins tools over MCP on stdio. stdout belongs to MCP; logs go to stderr. */
 export async function startMcp(ctx: ToolContext): Promise<Server> {

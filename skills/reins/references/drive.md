@@ -13,6 +13,8 @@ Use this playbook when verifying a feature, reproducing a bug, or running a visu
    - `states`: registered state sources (`location`, `localStorage`, `sessionStorage`, `cookies`, plus app stores)
    - `panels`: every `<ReinsPanel id="...">` currently mounted
 
+Before a long or multi-agent session, run the prefix check in `setup.md` (Step 8): it measures the fixed prompt prefix and offers a per-project trim, which the person approves before anything is written.
+
 If `reins_list_actions` says `No app is paired`, open the dev URL in the browser (or reload the page) so `reins.connect()` fetches `/__reins/token` and pairs.
 
 ## 2. Drive flows through actions, not pixel clicks

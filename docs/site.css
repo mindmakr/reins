@@ -148,6 +148,9 @@ table.cmp { width: 100%; border-collapse: collapse; text-align: left; font-size:
 .tool-list li:first-child { border-top: 0; padding-top: 0; }
 .tool-list code { font-weight: 600; color: var(--ink); }
 .tool-list span { display: block; color: var(--ink-2); font-size: .95rem; margin-top: .2rem; }
+.tool-list b { color: var(--ink); }
+.flight-limits { margin-top: 2rem; }
+.flight-limits p { margin-top: 1rem; color: var(--ink-2); font-size: .95rem; overflow-wrap: anywhere; }
 
 .sec-list { list-style: none; margin: 0; padding: 0; counter-reset: sec; }
 .sec-list li { counter-increment: sec; position: relative; padding: .75rem 0 .75rem 2.3rem; border-top: 1px solid var(--line); color: var(--ink-2); font-size: .95rem; }

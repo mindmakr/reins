@@ -2,24 +2,42 @@
 // It pairs with the bridge like the browser client does, records inbound requests, spans and outbound fetches,
 // and serves them to `reins_server`, `reins_perf` and `reins_report`.
 // Like the browser core, it records nothing until the bridge has accepted its token (or `standalone` says otherwise).
-import { AsyncLocalStorage } from 'node:async_hooks';
-import { channel } from 'node:diagnostics_channel';
+// The hooks, spans, upstream calls and runtime figures come from the shared recorder (./recorder.ts), which
+// @mindmakr/reins/flight also uses: an app installs the hooks once and they feed whichever is started.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
+import { performance } from 'node:perf_hooks';
 import { msg, ring } from './network.js';
 import { redactHeaders, redactUrl } from './redact.js';
+import {
+  attach,
+  type Capture,
+  type Consumer,
+  createLoop,
+  fastify as hookFastify,
+  keepCall,
+  keepSpan,
+  markDevModule,
+  middleware as hookMiddleware,
+  r1,
+  type RawCall,
+  type RawSpan,
+  runtimeOf,
+  span as hookSpan,
+  wrapHandler as hookWrapHandler,
+} from './recorder.js';
 import { routeStats } from './report.js';
-import type { Action, ActionInfo, ServerOutbound, ServerReport, ServerRequest, ServerRuntime, ServerSpan } from './types.js';
+import type { Action, ActionInfo, ServerOutbound, ServerReport, ServerRequest, ServerSpan } from './types.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 /** The header the browser core adds to same-origin calls while paired. */
 export const TRACE_HEADER = 'x-reins-trace';
 
+// Lets flight state that the development module is loaded in this process (design C12).
+markDevModule();
+
 const NAME = /^[\w][\w.-]{0,63}$/;
 const TRACE = /^[\w-]{1,64}$/;
-const CHANNELS = ['undici:request:create', 'undici:request:headers', 'undici:request:error'] as const;
-const r1 = (n: number) => Math.round(n * 10) / 10;
 const fail = (s: string): never => {
   throw new Error('reins: ' + s);
 };
@@ -61,16 +79,13 @@ export function nodeEnabled(env: Record<string, string | undefined> = process.en
   return env.NODE_ENV !== 'production' || /^(1|true)$/.test(env.REINS_ENABLE || '');
 }
 
-type Rec = ServerRequest & { done?: boolean };
-
 /** Creates an instance. Most apps use the `reinsNode` singleton. */
 export function createReinsNode(env: Record<string, string | undefined> = process.env) {
-  const als = new AsyncLocalStorage<Rec>();
   const actions = new Map<string, Action>();
-  const loop = monitorEventLoopDelay({ resolution: 10 });
-  const pending = new WeakMap<object, { e: ServerOutbound; rec?: Rec; t0: number }>();
+  const loop = createLoop();
   let opts: NodeConnectOptions = {};
-  let requests = ring<Rec>(200);
+  /** Finished requests as captured; the redacted view is made when they are read. */
+  let requests = ring<Capture>(200);
   let spans = ring<ServerSpan>(100);
   let outbound = ring<ServerOutbound>(100);
   /** `connect()` was called and `disconnect()` was not: keep trying to pair. */
@@ -82,194 +97,98 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
   let retry: NodeJS.Timeout | null = null;
   let delay = 2000;
   let bridgeHttp = '';
-  const subs: Array<() => void> = [];
+  let detach: (() => void) | null = null;
 
   const now = () => performance.now();
   const allow = () => opts.allow || {};
+  const toBridge = (k: RawCall) => !!bridgeHttp && k.origin === bridgeHttp;
 
-  // ---- inbound requests -------------------------------------------------------------------------
+  // ---- the development view of what the shared recorder captures ----------------------------------
 
-  function begin(req: any): Rec {
-    const url = String(req.originalUrl || req.url || '/');
-    const t = req.headers?.[TRACE_HEADER];
-    const headers: Record<string, string> = {};
-    for (const [k, v] of Object.entries(req.headers || {})) if (typeof v === 'string') headers[k] = v;
+  const devSpan = (s: RawSpan): ServerSpan => ({ name: s.name, startMs: s.startMs, ms: s.ms, error: s.failed ? msg(s.error) : undefined });
+
+  function devCall(k: RawCall): ServerOutbound {
+    const e: ServerOutbound = { method: k.method, url: redactUrl(k.origin + k.path, allow().queryKeys), status: k.status, startMs: k.startMs, ms: k.ms };
+    if (k.failed) e.error = msg(k.error);
+    return e;
+  }
+
+  const dbMs = (spans: Array<{ name: string; ms: number }>) => r1(spans.filter((s) => s.name.startsWith('db.')).reduce((a, s) => a + s.ms, 0));
+
+  /**
+   * Made when read, so spans and calls that finish after the response still show, as before (up to
+   * CAPTURE_MAX each). The headers were copied when the request began (`dev.begin`).
+   */
+  function devRequest(c: Capture): ServerRequest {
+    const headers = c.headers || {};
+    const t = headers[TRACE_HEADER];
+    const spanList = c.spans.map(devSpan);
     return {
-      method: String(req.method || 'GET').toUpperCase(),
-      route: url.split(/[?#]/)[0],
-      url: redactUrl(url, allow().queryKeys),
-      status: 0,
-      ms: 0,
-      startMs: Math.round(now()),
-      at: Date.now(),
+      method: c.method,
+      route: c.route || c.url.split(/[?#]/)[0],
+      url: redactUrl(c.url, allow().queryKeys),
+      status: c.status,
+      ms: c.ms,
+      startMs: c.startMs,
+      at: c.at,
       traceId: typeof t === 'string' && TRACE.test(t) ? t : undefined,
-      dbMs: 0,
-      spans: [],
-      outbound: [],
+      dbMs: dbMs(spanList),
+      spans: spanList,
+      outbound: c.calls.filter((k) => !toBridge(k)).map(devCall),
       requestHeaders: redactHeaders(headers, allow().headers),
     };
   }
 
-  const dbMs = (rec: Rec) => r1(rec.spans.filter((s) => s.name.startsWith('db.')).reduce((a, s) => a + s.ms, 0));
+  const dev: Consumer = {
+    kind: 'dev',
+    begin(c, req) {
+      if (c.headers) return;
+      const h: any = req?.headers || {};
+      const copy: Record<string, string> = {};
+      for (const [k, v] of Object.entries(h)) if (typeof v === 'string') copy[k] = v;
+      c.headers = copy;
+    },
+    request: (c) => requests.push(c),
+    // A late span or call joins its request's view, which is bounded by CAPTURE_MAX.
+    // (Another development instance may have added it already.)
+    span: (s, late) => void (late ? late.spans.includes(s) || keepSpan(late, s) : spans.push(devSpan(s))),
+    // Calls to the bridge are left out before they are kept, so they use none of the view's CAPTURE_MAX slots.
+    call: (k, late) => void (toBridge(k) || (late ? late.calls.includes(k) || keepCall(late, k) : outbound.push(devCall(k)))),
+    fault: () => {},
+  };
 
-  function end(rec: Rec, status: number, route?: unknown) {
-    if (rec.done) return;
-    rec.done = true;
-    rec.status = status;
-    rec.ms = Math.round(now() - rec.startMs);
-    if (typeof route === 'string' && route) rec.route = route;
-    rec.dbMs = dbMs(rec);
-    requests.push(rec);
+  function timing(c: Capture): string | undefined {
+    if (!active) return;
+    const el = runtimeOf(loop).eventLoop.p99Ms;
+    const desc = `${c.method} ${c.route || c.url.split(/[?#]/)[0]}`.replace(/["\\\r\n]/g, '');
+    return `app;dur=${Math.round(now() - c.startMs)};desc="${desc}", db;dur=${dbMs(c.spans)}, el-p99;dur=${el}`;
   }
 
-  const expressRoute = (req: any) => (req.route && typeof req.route.path === 'string' ? (req.baseUrl || '') + req.route.path : undefined);
+  const hookOptions = (o: MiddlewareOptions) => (o.serverTiming ? { timing } : {});
 
-  function timing(rec: Rec): string {
-    const el = runtime().eventLoop.p99Ms;
-    const desc = `${rec.method} ${rec.route}`.replace(/["\\\r\n]/g, '');
-    return `app;dur=${Math.round(now() - rec.startMs)};desc="${desc}", db;dur=${dbMs(rec)}, el-p99;dur=${el}`;
-  }
-
-  function track(rec: Rec, req: any, res: any, o: MiddlewareOptions) {
-    const fin = () => end(rec, res.statusCode, expressRoute(req));
-    res.once?.('finish', fin);
-    res.once?.('close', fin);
-    if (o.serverTiming && typeof res.writeHead === 'function') {
-      const writeHead = res.writeHead;
-      res.writeHead = function (...args: any[]) {
-        try {
-          if (!res.headersSent) res.setHeader('Server-Timing', timing(rec));
-        } catch {}
-        return writeHead.apply(this, args);
-      };
-    }
-  }
+  // ---- the shared hooks: installed once, they feed this instance and flight, whichever is started ----
 
   /**
    * Express/Connect middleware. Register it early, but after body parsers if you want spans in
    * handlers of POST routes to attach (stream callbacks lose the async context).
    */
-  function middleware(o: MiddlewareOptions = {}) {
-    return (req: any, res: any, next: (err?: unknown) => void) => {
-      if (!active) return next();
-      const rec = begin(req);
-      track(rec, req, res, o);
-      als.run(rec, () => next());
-    };
-  }
+  const middleware = (o: MiddlewareOptions = {}) => hookMiddleware(hookOptions(o));
 
   /** Wraps a plain `http.createServer` handler (or any `(req, res)` handler). */
-  function wrapHandler<H extends (req: any, res: any, ...rest: any[]) => any>(handler: H, o: MiddlewareOptions = {}): H {
-    return function (this: unknown, req: any, res: any, ...rest: any[]) {
-      if (!active) return handler.call(this, req, res, ...rest);
-      const rec = begin(req);
-      track(rec, req, res, o);
-      return als.run(rec, () => handler.call(this, req, res, ...rest));
-    } as H;
-  }
+  const wrapHandler = <H extends (req: any, res: any, ...rest: any[]) => any>(handler: H, o: MiddlewareOptions = {}): H => hookWrapHandler(handler, hookOptions(o));
 
   /** Fastify hooks: `reinsNode.fastify(app)`. Spans attach in handlers of routes without a body. */
-  function fastify(app: { addHook(name: string, fn: (...a: any[]) => void): unknown }) {
-    const KEY = Symbol.for('reins.rec');
-    app.addHook('onRequest', (req: any, _reply: any, done: () => void) => {
-      if (!active) return done();
-      const rec = begin(req.raw || req);
-      req[KEY] = rec;
-      als.run(rec, done);
-    });
-    app.addHook('onResponse', (req: any, reply: any, done: () => void) => {
-      const rec: Rec | undefined = req[KEY];
-      if (rec) end(rec, reply.statusCode, req.routeOptions?.url || req.routerPath);
-      done();
-    });
-    return app;
-  }
-
-  // ---- spans and outbound calls ---------------------------------------------------------------
+  const fastify = <A extends { addHook(name: string, fn: (...a: any[]) => void): unknown }>(app: A): A => hookFastify(app);
 
   /** Times `fn` (sync or async) as a span of the current request, or at top level outside one. */
-  function span<T>(name: string, fn: () => T): T {
-    if (!active) return fn();
-    const rec = als.getStore();
-    const t0 = now();
-    const done = (error?: string) => {
-      const s: ServerSpan = { name: String(name).slice(0, 80), startMs: r1(t0 - (rec ? rec.startMs : 0)), ms: r1(now() - t0), error };
-      rec ? rec.spans.push(s) : spans.push(s);
-    };
-    try {
-      const v: any = fn();
-      if (v && typeof v.then === 'function')
-        return v.then(
-          (x: unknown) => (done(), x),
-          (e: unknown) => (done(msg(e)), Promise.reject(e)),
-        );
-      done();
-      return v;
-    } catch (e) {
-      done(msg(e));
-      throw e;
-    }
-  }
+  const span = <T>(name: string, fn: () => T): T => hookSpan(name, fn);
 
-  function subscribe() {
-    const finish = (request: object, status: number, error?: string) => {
-      const p = pending.get(request);
-      if (!p) return;
-      pending.delete(request);
-      p.e.status = status;
-      p.e.ms = r1(now() - p.t0);
-      if (error) p.e.error = error;
-      p.rec ? p.rec.outbound.push(p.e) : outbound.push(p.e);
-    };
-    const handlers: Record<(typeof CHANNELS)[number], (m: any) => void> = {
-      'undici:request:create': ({ request }) => {
-        if (!active || !request) return;
-        const origin = String(request.origin || '');
-        if (bridgeHttp && origin === bridgeHttp) return;
-        const rec = als.getStore();
-        const t0 = now();
-        pending.set(request, { e: { method: String(request.method || 'GET'), url: redactUrl(origin + (request.path || ''), allow().queryKeys), status: 0, startMs: r1(t0 - (rec ? rec.startMs : 0)), ms: 0 }, rec, t0 });
-      },
-      'undici:request:headers': ({ request, response }) => finish(request, response?.statusCode || 0),
-      'undici:request:error': ({ request, error }) => finish(request, 0, msg(error)),
-    };
-    for (const name of CHANNELS) {
-      const ch = channel(name);
-      const fn = (m: unknown) => {
-        try {
-          handlers[name](m);
-        } catch {}
-      };
-      ch.subscribe(fn);
-      subs.push(() => ch.unsubscribe(fn));
-    }
-  }
-
-  // ---- runtime and report ---------------------------------------------------------------------
-
-  function runtime(): ServerRuntime {
-    const m = process.memoryUsage();
-    const pct = (p: number) => {
-      try {
-        return r1(loop.percentile(p) / 1e6);
-      } catch {
-        return 0;
-      }
-    };
-    return {
-      node: process.version,
-      pid: process.pid,
-      uptimeS: Math.round(process.uptime()),
-      rssMb: r1(m.rss / 1048576),
-      heapUsedMb: r1(m.heapUsed / 1048576),
-      eventLoop: { p50Ms: pct(50), p99Ms: pct(99), maxMs: r1((loop.max || 0) / 1e6) },
-    };
-  }
+  // ---- report ---------------------------------------------------------------------------------
 
   /** The same data `reins_server` returns, for this process. */
   function report(): ServerReport {
-    const reqs = requests.list().map(({ done, ...r }) => ({ ...r, dbMs: dbMs(r as Rec) }));
-    return { runtime: active ? runtime() : null, requests: reqs, slowest: routeStats(reqs), spans: spans.list(), outbound: outbound.list(), actions: list() };
+    const reqs = requests.list().map(devRequest);
+    return { runtime: active ? runtimeOf(loop) : null, requests: reqs, slowest: routeStats(reqs), spans: spans.list(), outbound: outbound.list(), actions: list() };
   }
 
   // ---- server actions -------------------------------------------------------------------------
@@ -309,14 +228,15 @@ export function createReinsNode(env: Record<string, string | undefined> = proces
     if (active) return;
     active = true;
     loop.enable();
-    subscribe();
+    detach = attach(dev);
   }
 
   function stop() {
     if (!active) return;
     active = false;
     loop.disable();
-    subs.splice(0).forEach((f) => f());
+    detach?.();
+    detach = null;
   }
 
   // ---- pairing --------------------------------------------------------------------------------

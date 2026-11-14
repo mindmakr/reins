@@ -25,11 +25,31 @@ packages/reins/src/
   react.ts, expo.ts   hooks and <ReinsPanel> for web and React Native
   adapters.ts         state sources for Zustand, Redux, TanStack Query and routers
   vite.ts, next.ts, next-token-route.ts, metro.ts   build plugins and token routes (Node)
-  node.ts             `@mindmakr/reins/node`: backend instrumentation (Node)
+  node.ts             `@mindmakr/reins/node`: backend instrumentation (Node, development only)
+  recorder.ts         the request, span, upstream-call and runtime recorder shared by `node` and `flight`
+  flight.ts           `@mindmakr/reins/flight`: the production-safe, report-only entry (Node)
+  flight/             flight's parts, imported by flight.ts or the CLI:
+    manifest.ts         reins.flight.json: the validator and durations
+    steps.ts            the step writer: bounded buffer, flush, dropped counts
+    store.ts            the store interface, retention and the memory store
+    file-store.ts       the file store and its lock (one machine)
+    pg-store.ts         the Postgres store and PG_TABLES
+    probes.ts           flight.probe: registry and runs with a time limit
+    checker.ts          the checker pass: promises, probes and blind facts from the store
+    findings.ts         findings from a check: kinds, levels, open and resolved
+    limits.ts           every default limit, with its range and source
+    sources.ts          the documents the basic checks and limits follow
+    sinks.ts            webhook, file and function sinks, and the notifier
+    report.ts           the report data
+    render.ts           the Markdown and HTML renderers, and the compare
+    check-cli.ts        `reins flight check`, and the `reins flight` commands
+    report-cli.ts       `reins flight report`, and loading the app's config module
+    watch-cli.ts        `reins flight watch`
   record.ts, record-stub.ts   tester record mode and its production stand-in
   report.ts           session reports, shared by the bridge and record mode (no Node or DOM imports)
   verify.ts, verify-cli.ts    `reins verify` and `reins-verify-bundle`
   bridge/             `reins bridge`: WebSocket hub, MCP tools, audit log, snaps, session files
+    flight.ts           the read-only `reins_flight` tool
   cli.ts              the `reins` command
 packages/reins/test/  one test file per area; all run against the sources
 ```
@@ -44,6 +64,7 @@ A new import path needs an entry in `exports` in `packages/reins/package.json`, 
 - **Redact by default.** New data sources must redact values unless the key is allowlisted.
 - **No eval and no shell strings.** In Node code, run programs with `execFileSync` and an argument array.
 - **The bridge binds to 127.0.0.1.** Do not add a host option.
+- **Flight stays report only and free of development reins.** `src/flight.ts` and `src/flight/` import Node built-ins and reins' shared modules only; `test/flight-safety.test.ts` walks the imports. Flight opens no port, registers no route and never retries, restarts, rolls back or blocks anything.
 - Security-related changes need tests, not only docs. Update [SECURITY.md](SECURITY.md) and the README's security section in the same PR.
 
 ## Pull requests

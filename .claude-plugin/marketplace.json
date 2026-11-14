@@ -6,7 +6,7 @@
     {
       "name": "reins",
       "source": "./",
-      "description": "Set up reins in a new or existing web or Expo app, drive named actions, inspect redacted state and network calls, and take pixel-exact panel snapshots."
+      "description": "Set up reins in a new or existing web or Expo app, drive named actions, inspect redacted state and network calls, take pixel-exact panel snapshots, and add report-only flight checks to a Node server."
     }
   ]
 }

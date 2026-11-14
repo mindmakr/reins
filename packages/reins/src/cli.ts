@@ -5,6 +5,7 @@ import { fileAudit } from './bridge/audit.js';
 import { DEFAULT_PORT, Hub } from './bridge/hub.js';
 import { startMcp } from './bridge/mcp.js';
 import { reportMain } from './bridge/report-cli.js';
+import { flightMain } from './flight/check-cli.js';
 import { tokenPath } from './bridge/token.js';
 import { main as verifyMain } from './verify.js';
 
@@ -18,6 +19,14 @@ async function main() {
   }
   if (argv[0] === 'report') {
     process.exitCode = reportMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'flight') {
+    const code = await flightMain(argv.slice(1));
+    process.exitCode = code;
+    // A report or a watcher loads the app's config module, whose store (a database pool) may keep the process
+    // alive: exit once what was printed has been written.
+    if (argv[1] === 'report' || argv[1] === 'watch') process.stdout.write('', () => process.exit(code));
     return;
   }
   let args;
