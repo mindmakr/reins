@@ -11,13 +11,15 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createFlight, type Flight } from '../src/flight.js';
 import { type Change, type FlightFinding, STATE_KEY } from '../src/flight/findings.js';
 import { validateManifest } from '../src/flight/manifest.js';
-import { createNotifier, fileSink, fitBody, functionSink, mergeNotify, normaliseSinks, type Notification, SinkError, sinkView, webhookSink, webhookUrl } from '../src/flight/sinks.js';
+import { createNotifier, fileSink, fitBody, functionSink, normaliseSinks, type Notification, SinkError, sinkView, webhookSink, webhookUrl } from '../src/flight/sinks.js';
 import { type FlightStore, memoryStore } from '../src/flight/store.js';
 import { markDevModule } from '../src/recorder.js';
 import { fig, im, MIN } from './flight-fixtures.js';
 import { step } from './flight-store-contract.js';
 
 const SECRET = 'a-shared-secret-of-32-bytes-long!';
+/** The findings about a server's own way to the store (B13). */
+const STORE_KEYS = new Set(['blind:store-unreachable', 'blind:lock-unavailable']);
 const H = 60 * MIN;
 
 interface Hit {
@@ -505,103 +507,6 @@ describe("round 2: the critics' findings on store outages", () => {
     return { got, as: (inst: string) => (n: Notification) => void got.push(`${inst}: ${n.type} ${n.finding?.key}`) };
   };
 
-  it('M2: an outage told by one instance is resolved once by the instance that next holds the lock', async () => {
-    const { store, ctl } = flaky();
-    const t = told();
-    const one = started([t.as('one')], { store, instance: 'one' }).f;
-    const two = started([t.as('two')], { store, instance: 'two' }).f;
-    await checkAndDeliver(one);
-    await checkAndDeliver(two);
-    ctl.down = true;
-    await checkAndDeliver(one);
-    await checkAndDeliver(two);
-    await checkAndDeliver(one);
-    ctl.down = false;
-    ctl.takeover = 'two-';
-    for (let i = 0; i < 3; i++) {
-      await checkAndDeliver(two);
-      await checkAndDeliver(one);
-    }
-    expect(t.got).toEqual(['one: opened blind:lock-unavailable', 'two: resolved blind:lock-unavailable']);
-  });
-
-  /** A clock the test moves on: flight, the store's lock and the findings all read Date.now. */
-  function clock() {
-    const c = { now: Date.UTC(2026, 10, 14, 12, 0, 30) };
-    vi.spyOn(Date, 'now').mockImplementation(() => c.now);
-    onTestFinished(() => void vi.restoreAllMocks());
-    return c;
-  }
-  /** One round: each server runs a pass and delivers, then the clock moves on a minute (one period). */
-  async function round(c: { now: number }, ...fs: Flight[]) {
-    for (const f of fs) await checkAndDeliver(f);
-    c.now += MIN;
-  }
-
-  it('H1: one server whose store is down from boot tells the outage once it has lasted the lock lease, and its end', async () => {
-    const c = clock();
-    const { store, ctl } = flaky();
-    ctl.down = true;
-    const t = told();
-    const { f } = started([t.as('srv')], { store });
-    for (let i = 0; i < 3; i++) await round(c, f);
-    // Two minutes in: shorter than the lease (three periods of at least a minute), so a holder could still tell it.
-    expect(t.got).toEqual([]);
-    expect(f.findings().find((x) => x.key === 'blind:lock-unavailable')?.state).toBe('open');
-    for (let i = 0; i < 3; i++) await round(c, f);
-    expect(t.got).toEqual(['srv: opened blind:lock-unavailable']);
-    ctl.down = false;
-    for (let i = 0; i < 3; i++) await round(c, f);
-    expect(t.got).toEqual(['srv: opened blind:lock-unavailable', 'srv: resolved blind:lock-unavailable']);
-  });
-
-  it('H1: two servers whose store is down from boot each tell the outage at most once, and its end is told once', async () => {
-    const c = clock();
-    const { store, ctl } = flaky();
-    ctl.down = true;
-    const t = told();
-    const one = started([t.as('one')], { store, instance: 'one' }).f;
-    const two = started([t.as('two')], { store, instance: 'two' }).f;
-    for (let i = 0; i < 6; i++) await round(c, one, two);
-    ctl.down = false;
-    for (let i = 0; i < 4; i++) await round(c, one, two);
-    expect(t.got).toEqual(['one: opened blind:lock-unavailable', 'two: opened blind:lock-unavailable', 'one: resolved blind:lock-unavailable']);
-    expect((await store.findings()).find((x) => x.key === 'blind:lock-unavailable')?.state).toBe('resolved');
-  });
-
-  it('H1: a store that comes back before the lease has run tells nothing, and no unpaired "resolved"', async () => {
-    const c = clock();
-    const { store, ctl } = flaky();
-    ctl.down = true;
-    const t = told();
-    const one = started([t.as('one')], { store, instance: 'one' }).f;
-    const two = started([t.as('two')], { store, instance: 'two' }).f;
-    for (let i = 0; i < 2; i++) await round(c, one, two);
-    ctl.down = false;
-    for (let i = 0; i < 4; i++) await round(c, one, two);
-    expect(t.got).toEqual([]);
-  });
-
-  it('L2 and L3: a server that told an outage hands it over to the holder, and a failed hand-over is not a lock failure', async () => {
-    const c = clock();
-    const base = memoryStore();
-    const a = flaky(base);
-    const b = flaky(base);
-    const t = told();
-    const one = started([t.as('one')], { store: a.store, instance: 'one' }).f;
-    const two = started([t.as('two')], { store: b.store, instance: 'two' }).f;
-    await checkAndDeliver(one);
-    b.ctl.down = true;
-    for (let i = 0; i < 4; i++) await round(c, one, two);
-    expect(t.got).toEqual(['two: opened blind:lock-unavailable']);
-    b.ctl.down = false;
-    b.ctl.fail = 'findings';
-    expect(await two.checkNow()).toBeNull();
-    b.ctl.fail = '';
-    for (let i = 0; i < 2; i++) await round(c, two, one);
-    expect(t.got).toEqual(['two: opened blind:lock-unavailable', 'one: resolved blind:lock-unavailable']);
-  });
-
   it('M1: after a time-out, the late findings write tells only what the time-out step had not told', async () => {
     const { store, ctl } = flaky();
     const t = told();
@@ -691,7 +596,7 @@ describe("round 2: the critics' findings on store outages", () => {
   });
 });
 
-describe('round 4: one rule on the store-outage path', () => {
+describe('B10 and B13: findings about the app once across copies, and each copy its own outage', () => {
   /** How one server reaches a shared store this period. */
   type Mode = 'ok' | 'refused' | 'lock-refused' | 'slow-lock' | 'slow-lock-refused' | 'slow-read' | 'slow-write' | 'slow-check' | 'hung';
   const fail = () => Object.assign(new Error('down'), { code: 'ECONNREFUSED' });
@@ -737,8 +642,12 @@ describe('round 4: one rule on the store-outage path', () => {
     type: Notification['type'];
     key?: string;
     at: number;
+    /** A digest: how many it held, and whether it came from the server's own counter (its outages only). */
+    held?: number;
+    own?: boolean;
   }
-  const record = (events: Told[], inst: string) => (n: Notification) => void events.push({ inst, type: n.type, key: n.finding?.key, at: Date.now() });
+  const record = (events: Told[], inst: string) => (n: Notification) =>
+    void events.push({ inst, type: n.type, key: n.finding?.key, at: Date.now(), ...(n.type === 'digest' ? { held: n.held, own: (n.findings || []).every((f) => STORE_KEYS.has(f.key)) } : {}) });
   /** Fake timers and clock: time-outs, slow calls, the store's lock and the findings all move only when the test moves them. */
   function fakeTime(start = Date.UTC(2026, 10, 14, 12, 0, 30)) {
     vi.useFakeTimers({ now: start, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
@@ -752,8 +661,10 @@ describe('round 4: one rule on the store-outage path', () => {
     for (const f of fs) await f.sinksIdle();
   }
   const changes = (e: Told[]) => e.filter((x) => x.type === 'opened' || x.type === 'changed' || x.type === 'resolved');
+  /** What the sinks heard of the servers' own ways to the store. */
+  const outageTold = (e: Told[]) => changes(e).filter((x) => STORE_KEYS.has(x.key!)).map((x) => `${x.inst}: ${x.type} ${x.key}`);
 
-  it('M1: a late pass that resolves the outage its time-out opened clears that entry, so it is not resolved again', async () => {
+  it('M1: a late pass after the time-out that opened this server\'s outage tells nothing more of it; the next live pass says it can see again, once', async () => {
     fakeTime();
     const w = way(memoryStore(), 200);
     const events: Told[] = [];
@@ -764,23 +675,25 @@ describe('round 4: one rule on the store-outage path', () => {
     w.ctl.mode = 'ok';
     for (let i = 0; i < 3; i++) await period([f]);
     expect(changes(events).map((e) => `${e.type} ${e.key}`)).toEqual(['opened blind:store-unreachable', 'resolved blind:store-unreachable']);
-    expect((await w.store.findings()).find((x) => x.key === 'blind:store-unreachable')?.state).toBe('resolved');
+    // The outage is this server's own: it is not in the store, and its view shows it resolved.
+    expect((await w.store.findings()).some((x) => x.key === 'blind:store-unreachable')).toBe(false);
+    expect(f.findings().find((x) => x.key === 'blind:store-unreachable')?.state).toBe('resolved');
   });
 
-  it('M2: a server that never held the lock tells an outage flipping between its two kinds within the hourly limit, then one digest', async () => {
+  it("M2 (security p7): an outage flipping between its two kinds every pass is one outage, told once each way", async () => {
     fakeTime(Date.UTC(2026, 10, 14, 12, 0, 30));
     const w = way(memoryStore(), 100);
     const events: Told[] = [];
     const { f } = started([record(events, 'srv')], { store: w.store, checkTimeoutMs: 100 });
-    // The security critic's p7: every pass the store's failure flips between a refused lock and a lock with no answer in time.
     for (let i = 0; i < 60; i++) {
       w.ctl.mode = i % 2 ? 'slow-lock-refused' : 'refused';
       await period([f]);
     }
-    expect(changes(events)).toHaveLength(5);
-    expect(events.filter((e) => e.type === 'digest')).toHaveLength(0);
-    await period([f]);
-    expect(events.filter((e) => e.type === 'digest')).toHaveLength(1);
+    expect(outageTold(events)).toEqual(['srv: opened blind:lock-unavailable']);
+    w.ctl.mode = 'ok';
+    for (let i = 0; i < 2; i++) await period([f]);
+    expect(outageTold(events)).toEqual(['srv: opened blind:lock-unavailable', 'srv: resolved blind:lock-unavailable']);
+    expect(events.filter((e) => e.type === 'digest')).toEqual([]);
   });
 
   it('L1: a late findings write still tells what it wrote when the lock check after it fails for a moment', async () => {
@@ -800,27 +713,58 @@ describe('round 4: one rule on the store-outage path', () => {
     expect(changes(events).filter((e) => e.key === 'basic:error-share').map((e) => e.type)).toEqual(['opened']);
   });
 
-  it('L3: a server whose store never answers tells the outage one lease after the pass that found it, on 59.999 s periods', async () => {
+  const of = (inst: string, e: Told[]) => outageTold(e).filter((x) => x.startsWith(`${inst}:`));
+  /** Two servers on one memory store, each with its own way to it; A takes the lock in the first period. */
+  async function pair() {
     fakeTime();
-    const w = way(memoryStore(), 1000);
-    w.ctl.mode = 'hung';
+    const base = memoryStore();
+    const wa = way(base, 1000);
+    const wb = way(base, 1000);
     const events: Told[] = [];
-    const { f } = started([record(events, 'srv')], { store: w.store });
-    // The first pass waits the whole 30 s time limit; the passes after it find the store work still hanging.
-    for (let i = 0; i < 3; i++) await period([f], 59_999);
-    expect(changes(events)).toEqual([]);
-    await period([f], 59_999);
-    expect(changes(events).map((e) => `${e.type} ${e.key}`)).toEqual(['opened blind:store-unreachable']);
-    w.ctl.mode = 'ok';
-    w.release();
+    const A = started([record(events, 'A')], { store: wa.store, instance: 'A', checkTimeoutMs: 1000 }).f;
+    const B = started([record(events, 'B')], { store: wb.store, instance: 'B', checkTimeoutMs: 1000 }).f;
+    await period([A]);
+    return { base, wa, wb, events, A, B };
+  }
+
+  it('B13: when the store fails, each copy tells once that flight cannot see, and once that it can again; a second outage is told again', async () => {
+    const { base, wa, wb, events, A, B } = await pair();
+    wa.ctl.mode = wb.ctl.mode = 'refused';
+    for (let i = 0; i < 10; i++) await period([A, B]);
+    expect(of('A', events)).toEqual(['A: opened blind:lock-unavailable']);
+    expect(of('B', events)).toEqual(['B: opened blind:lock-unavailable']);
+    wa.ctl.mode = wb.ctl.mode = 'ok';
+    for (let i = 0; i < 3; i++) await period([A, B]);
+    expect(of('A', events)).toEqual(['A: opened blind:lock-unavailable', 'A: resolved blind:lock-unavailable']);
+    expect(of('B', events)).toEqual(['B: opened blind:lock-unavailable', 'B: resolved blind:lock-unavailable']);
+    // Neither outage is in the store: each lives in its own copy.
+    expect((await base.findings()).filter((x) => STORE_KEYS.has(x.key))).toEqual([]);
+    // A second outage, this time with no answer at all, is told again by each copy, and its end too.
+    events.length = 0;
+    wa.ctl.mode = wb.ctl.mode = 'hung';
+    for (let i = 0; i < 4; i++) await period([A, B]);
+    wa.ctl.mode = wb.ctl.mode = 'ok';
+    wa.release();
+    wb.release();
+    for (let i = 0; i < 3; i++) await period([A, B]);
+    expect(of('A', events)).toEqual(['A: opened blind:store-unreachable', 'A: resolved blind:store-unreachable']);
+    expect(of('B', events)).toEqual(['B: opened blind:store-unreachable', 'B: resolved blind:store-unreachable']);
   });
 
-  /**
-   * B's own way to the store hangs while A holds the lock: B tells the outage, then (refused) tells its kind change
-   * and the end of the first kind, then hands both over when the store answers. The resolved entry is one the
-   * holder never writes again (it does not change), so the store keeps it at the hand-over's own time.
-   */
-  async function ownOutageHandedOver(B: Flight, A: Flight, wb: ReturnType<typeof way>) {
+  it('B13: a copy that never held the lock tells its own outage at once and its end, while the holder tells nothing of it', async () => {
+    const { wb, events, A, B } = await pair();
+    await period([A, B]);
+    wb.ctl.mode = 'lock-refused';
+    await period([A, B]);
+    expect(outageTold(events)).toEqual(['B: opened blind:lock-unavailable']);
+    for (let i = 0; i < 6; i++) await period([A, B]);
+    wb.ctl.mode = 'ok';
+    for (let i = 0; i < 3; i++) await period([A, B]);
+    expect(outageTold(events)).toEqual(['B: opened blind:lock-unavailable', 'B: resolved blind:lock-unavailable']);
+  });
+
+  it("B13 (round 5 H1): a second outage on one copy's own way to the store, the other the healthy holder, is told", async () => {
+    const { wb, events, A, B } = await pair();
     await period([A, B]);
     wb.ctl.mode = 'hung';
     for (let i = 0; i < 5; i++) await period([A, B]);
@@ -829,23 +773,9 @@ describe('round 4: one rule on the store-outage path', () => {
     for (let i = 0; i < 2; i++) await period([A, B]);
     wb.ctl.mode = 'ok';
     for (let i = 0; i < 4; i++) await period([A, B]);
-  }
-
-  /** What the sinks heard of the store outage itself (B's failed step writes are findings of their own). */
-  const outageTold = (e: Told[]) => changes(e).filter((x) => x.key === 'blind:store-unreachable' || x.key === 'blind:lock-unavailable').map((x) => `${x.inst}: ${x.type} ${x.key}`);
-
-  it("round 5 H1: a second outage on a server's own path is told", async () => {
-    fakeTime();
-    const base = memoryStore();
-    const wa = way(base, 1000);
-    const wb = way(base, 1000);
-    const events: Told[] = [];
-    const A = started([record(events, 'A')], { store: wa.store, instance: 'A', checkTimeoutMs: 1000 }).f;
-    const B = started([record(events, 'B')], { store: wb.store, instance: 'B', checkTimeoutMs: 1000 }).f;
-    await ownOutageHandedOver(B, A, wb);
-    expect(outageTold(events)).toEqual(['B: opened blind:store-unreachable', 'B: resolved blind:store-unreachable', 'B: opened blind:lock-unavailable', 'A: resolved blind:lock-unavailable']);
+    // One outage, whichever kind each pass met: told once each way, under the kind it was told under.
+    expect(outageTold(events)).toEqual(['B: opened blind:store-unreachable', 'B: resolved blind:store-unreachable']);
     events.length = 0;
-    // The second outage on B's own path, A still the healthy holder.
     wb.ctl.mode = 'hung';
     for (let i = 0; i < 8; i++) await period([A, B]);
     expect(outageTold(events)).toEqual(['B: opened blind:store-unreachable']);
@@ -853,70 +783,46 @@ describe('round 4: one rule on the store-outage path', () => {
     wb.release();
   });
 
-  it('round 5 M1: a server whose hand-over was judged by the holder does not tell its end again when its first pass as holder times out', async () => {
-    fakeTime();
-    const base = memoryStore();
-    const wa = way(base, 1000);
-    const wb = way(base, 1000);
+  it("B13: a copy's own outage notifications keep the hourly limit, then one digest", async () => {
+    fakeTime(Date.UTC(2026, 10, 14, 12, 0, 30));
+    const w = way(memoryStore(), 1000);
     const events: Told[] = [];
-    const A = started([record(events, 'A')], { store: wa.store, instance: 'A', checkTimeoutMs: 1000 }).f;
-    const B = started([record(events, 'B')], { store: wb.store, instance: 'B', checkTimeoutMs: 1000 }).f;
-    await period([A, B]);
-    // A, the holder, cannot renew its lock: it tells the outage at once; its lease runs out and B takes the lock.
-    wa.ctl.mode = 'lock-refused';
-    for (let i = 0; i < 4; i++) await period([A, B]);
-    // A reaches the store again: it hands the outage over, B resolves it, and A drops the entry.
-    wa.ctl.mode = 'ok';
-    for (let i = 0; i < 3; i++) await period([A, B]);
-    expect(changes(events).map((e) => `${e.inst}: ${e.type} ${e.key}`)).toEqual(['A: opened blind:lock-unavailable', 'B: resolved blind:lock-unavailable']);
-    // B goes and gives its lock back; A takes the lock, and its findings read runs past the time limit.
-    B.stop();
-    await vi.advanceTimersByTimeAsync(4 * MIN);
-    wa.ctl.mode = 'slow-read';
-    await period([A], 3000);
-    expect(changes(events).filter((e) => e.key === 'blind:lock-unavailable' && e.type === 'resolved')).toHaveLength(1);
+    const { f } = started([record(events, 'srv')], { store: w.store, checkTimeoutMs: 1000 });
+    // The store goes and comes back every other minute for half an hour: 15 outages, 30 notifications.
+    for (let i = 0; i < 30; i++) {
+      w.ctl.mode = i % 2 ? 'ok' : 'refused';
+      await period([f]);
+    }
+    // The step writes that failed meanwhile are a finding about the app, on the shared counter: not counted here.
+    const own = () => outageTold(events).map((x) => x.split(' ')[1]);
+    expect(own()).toEqual(['opened', 'resolved', 'opened', 'resolved', 'opened']);
+    expect(events.filter((e) => e.type === 'digest')).toEqual([]);
+    w.ctl.mode = 'ok';
+    for (let i = 0; i < 40; i++) await period([f]);
+    const digests = events.filter((e) => e.type === 'digest' && e.own);
+    expect(digests).toHaveLength(1);
+    expect(digests[0].held).toBe(25);
+    expect(own()).toHaveLength(5);
   });
 
-  it('M2: a notify state merges per sink by the later hour and the higher counts, and only a plan with the summary moves its clock', () => {
+  it('B10: while the store is reachable, two copies notify a finding about the app once across them, as the lock moves', async () => {
+    const { base, wb, events, A, B } = await pair();
+    await errors(base, 40, 10);
+    for (let i = 0; i < 3; i++) await period([A, B]);
+    // B takes the lock, as when A's lease has run out, and the finding resolves on its watch.
+    wb.ctl.takeover = true;
+    await period([B], 3000);
+    wb.ctl.takeover = false;
+    for (let i = 0; i < 2; i++) await period([B, A]);
+    await errors(base, 4000, 0);
+    for (let i = 0; i < 3; i++) await period([A, B]);
+    expect(changes(events).map((e) => `${e.inst}: ${e.type} ${e.key}`)).toEqual(['A: opened basic:error-share', 'B: resolved basic:error-share']);
+  });
+
+  it('M2: only a plan with the summary moves the daily clock', () => {
     const n = createNotifier([{ name: 'chat', send: () => {} }]);
     const hour = Date.UTC(2026, 10, 14, 10);
-    const opened = (i: number): Change => ({ event: 'opened', finding: finding({ key: `basic:slow-route:GET /r${i}` }) });
-    // The store says 2 sent this hour; this server told 4 while it could not reach it: 4 count, so one more goes.
-    const stored = n.plan([opened(0), opened(1)], undefined, hour + MIN, 'api').state;
-    const mine = n.plan([0, 1, 2, 3].map(opened), undefined, hour + 2 * MIN, 'api').state;
-    expect(n.plan([opened(4), opened(5)], mergeNotify(stored, mine), hour + 3 * MIN, 'api').deliveries).toHaveLength(1);
-    // A later hour wins over an earlier one, with what it held.
-    const later = n.plan([], mine, hour + H + MIN, 'api').state;
-    expect(mergeNotify(stored, later)!.sinks!.chat.hour).toBe(Math.floor((hour + H) / H));
-    // No summary given: the daily clock stays where the plan that sends the summary left it.
     expect(n.plan([], { dailyFrom: hour }, hour + 30 * H, 'api').state.dailyFrom).toBe(hour);
-    expect(mergeNotify({ dailyFrom: hour }, n.plan([], undefined, hour + H, 'api').state)!.dailyFrom).toBe(hour);
-  });
-
-  it("round 5 L1: a later hour's notify state keeps the store's held digest, sends it once, and one digest an hour", () => {
-    const n = createNotifier([{ name: 'chat', send: () => {} }], { daily: false });
-    const h0 = Date.UTC(2026, 10, 14, 10);
-    const opened = (i: number): Change => ({ event: 'opened', finding: finding({ key: `basic:slow-route:GET /r${i}` }) });
-    const seven = [0, 1, 2, 3, 4, 5, 6].map(opened);
-    const digests = (p: { deliveries: { n: Notification }[] }) => p.deliveries.filter((d) => d.n.type === 'digest').map((d) => d.n.held);
-    // The holder told 5 and held 2 in hour 10, and wrote it; this server planned in hour 11 with nothing to tell.
-    const stored = n.plan(seven, undefined, h0 + MIN, 'api').state;
-    const mine = n.plan([], undefined, h0 + H + MIN, 'api').state;
-    for (const merged of [mergeNotify(stored, mine), mergeNotify(mine, stored)]) {
-      const p = n.plan([], merged, h0 + H + 2 * MIN, 'api');
-      expect(digests(p)).toEqual([2]);
-      // Sent once: the next plan owes nothing.
-      expect(n.plan([], p.state, h0 + H + 3 * MIN, 'api').deliveries).toEqual([]);
-    }
-    // A line that sent hour 10's digest itself owes it no more.
-    const rolled = n.plan([], stored, h0 + H + MIN, 'api');
-    expect(digests(rolled)).toEqual([2]);
-    expect(n.plan([], mergeNotify(stored, rolled.state), h0 + H + 2 * MIN, 'api').deliveries).toEqual([]);
-    // An earlier hour's digest owed in an hour this line already sent one goes with the next hour's, as one.
-    const hour9 = n.plan(seven, undefined, h0 - H + MIN, 'api').state;
-    const owing = n.plan([], mergeNotify(hour9, rolled.state), h0 + H + 2 * MIN, 'api');
-    expect(owing.deliveries).toEqual([]);
-    expect(digests(n.plan([], owing.state, h0 + 2 * H + MIN, 'api'))).toEqual([2]);
   });
 
   /** A small seeded generator, so a failing sequence can be run again. */
@@ -936,57 +842,63 @@ describe('round 4: one rule on the store-outage path', () => {
   const when = (e: Told) => `${Math.round((e.at - START) / MIN)}m `;
 
   /**
-   * The invariants over what the sinks heard; returns the breaches. During an outage two servers may each tell the
-   * same opening once (design: a duplicate accepted, so every sink hears of it). So, per finding: a server tells an
-   * opening again only after someone told it resolved (`since`: the servers whose opening no one has resolved
-   * since); and every "resolved" matches a told opening: the server's own, which it has not told resolved yet
-   * (`open`), or one that no one has told resolved since (`since`). A "resolved" covers every opening told before it.
+   * The invariants over what the sinks heard; returns the breaches. Findings about the app are told once across the
+   * servers (B10): an opening is told again only after it was told resolved, and a "changed" or "resolved" follows a
+   * told opening. Findings about a server's own way to the store are that server's own (B13): per server, "cannot
+   * see" and "can see again" alternate, once each per outage, under one key. Counted per hour: the findings about the
+   * app on the store's shared counter (both servers' sinks share one name), each server's outages on its own; at
+   * most the hourly limit and one digest an hour on each.
    */
   function breaches(events: Told[], perHour: number, paired: boolean): string[] {
     const out: string[] = [];
-    const since = new Map<string, Set<string>>();
-    const open = new Map<string, Set<string>>();
+    const appOpen = new Set<string>();
+    const ownOpen = new Map<string, string>();
     const sent = new Map<string, number>();
     const digests = new Map<string, number>();
     for (const e of events) {
-      const hour = `${e.inst}@${Math.floor(e.at / H)}`;
+      if (e.type === 'summary') continue;
+      const own = e.type === 'digest' ? e.own : STORE_KEYS.has(e.key!);
+      const counter = `${own ? `${e.inst}'s own counter` : 'the shared counter'} in hour ${Math.floor(e.at / H)}`;
       if (e.type === 'digest') {
-        digests.set(hour, (digests.get(hour) || 0) + 1);
-        if (digests.get(hour)! > 1) out.push(`${when(e)}${e.inst} got two digests in one hour`);
+        digests.set(counter, (digests.get(counter) || 0) + 1);
+        if (digests.get(counter)! > 1) out.push(`${when(e)}${e.inst} got two digests from ${counter}`);
         continue;
       }
-      if (e.type === 'summary') continue;
-      sent.set(hour, (sent.get(hour) || 0) + 1);
-      if (sent.get(hour)! > perHour) out.push(`${when(e)}${e.inst} told more than ${perHour} in one hour`);
+      sent.set(counter, (sent.get(counter) || 0) + 1);
+      if (sent.get(counter)! > perHour) out.push(`${when(e)}${e.inst} told more than ${perHour} from ${counter}`);
       if (!paired) continue;
-      const told = since.get(e.key!) || new Set<string>();
-      const still = open.get(e.key!) || new Set<string>();
-      since.set(e.key!, told);
-      open.set(e.key!, still);
-      if (e.type === 'opened') {
-        if (told.has(e.inst)) out.push(`${when(e)}${e.inst} told ${e.key} opened twice for one opening`);
-        told.add(e.inst);
-        still.add(e.inst);
-      } else if (!still.has(e.inst) && !told.size) out.push(`${when(e)}${e.inst} told ${e.key} ${e.type} with no told opening`);
-      else if (e.type === 'resolved') {
-        since.set(e.key!, new Set());
-        still.delete(e.inst);
+      if (own) {
+        const was = ownOpen.get(e.inst);
+        if (e.type === 'opened') {
+          if (was) out.push(`${when(e)}${e.inst} told it cannot see twice in one outage (${was}, ${e.key})`);
+          ownOpen.set(e.inst, e.key!);
+        } else if (e.type === 'resolved' && was === e.key) ownOpen.delete(e.inst);
+        else out.push(`${when(e)}${e.inst} told ${e.key} ${e.type} with no own outage open under that key`);
+        continue;
       }
+      if (e.type === 'opened') {
+        if (appOpen.has(e.key!)) out.push(`${when(e)}${e.inst} told ${e.key} opened again while it was told open`);
+        appOpen.add(e.key!);
+      } else if (!appOpen.has(e.key!)) out.push(`${when(e)}${e.inst} told ${e.key} ${e.type} with no told opening`);
+      else if (e.type === 'resolved') appOpen.delete(e.key!);
     }
+    // Once every server reaches the store again, each has told that it can see.
+    if (paired) for (const [inst, key] of ownOpen) out.push(`end: ${inst} never told that it can see again (${key})`);
     return out;
   }
 
   /**
-   * The end state: once the store is back for both servers, what the store holds is what the sinks last heard. A
-   * finding the store holds open was last told opened (or changed); one it holds resolved, or does not hold, was
-   * last told resolved or never told at all.
+   * The end state: once the store is back for both servers, what the store holds is what the sinks last heard of
+   * the app. A finding the store holds open was last told opened (or changed); one it holds resolved, or does not
+   * hold, was last told resolved or never told at all. The store holds no server's own outage.
    */
   async function endBreaches(events: Told[], store: FlightStore): Promise<string[]> {
     const out: string[] = [];
     const last = new Map<string, string>();
-    for (const e of changes(events)) last.set(e.key!, e.type);
+    for (const e of changes(events)) if (!STORE_KEYS.has(e.key!)) last.set(e.key!, e.type);
     const recs = (await store.findings()).filter((x) => x.key !== STATE_KEY);
     for (const rec of recs) {
+      if (STORE_KEYS.has(rec.key)) out.push(`end: the store holds ${rec.key}, a server's own outage`);
       const l = last.get(rec.key);
       if (rec.state === 'resolved' && l && l !== 'resolved') out.push(`end: the store holds ${rec.key} resolved, the sinks last heard ${l}`);
       if (rec.state === 'open' && (!l || l === 'resolved')) out.push(`end: the store holds ${rec.key} open, the sinks last heard ${l ?? 'nothing'}`);
@@ -999,7 +911,7 @@ describe('round 4: one rule on the store-outage path', () => {
   const SEEDS = Number(process.env.INVARIANT_SEEDS) || 40;
   const FROM = Number(process.env.INVARIANT_FROM) || 1;
   it.each(Array.from({ length: SEEDS }, (_, i) => [i + FROM]))(
-    'invariants: two servers on one store through random outages (seed %i): each opening told at most once per server, no unpaired "resolved", at most the hourly limit and one digest an hour, the store ends as the sinks last heard, and a second outage on one server\'s own path after a hand-over is told',
+    'invariants: two servers on one store through random outages (seed %i): a finding about the app told once across them, each server its own outage once each way, at most the hourly limit and one digest an hour per counter, the store ends as the sinks last heard, and a second outage on one server\'s own path is told',
     async (seed) => {
       for (const perHour of [1000, 5]) {
         fakeTime(Date.UTC(2026, 10, 14, 12, 40, 30));
@@ -1041,8 +953,8 @@ describe('round 4: one rule on the store-outage path', () => {
           );
         }
         for (const w of ways) w.release();
-        // Then one server's own way to the store hangs while the other holds it, fails, and comes back: it hands
-        // its outage over. Its own way hangs again: it tells this second outage too.
+        // Then one server's own way to the store hangs while the other holds it, fails, and comes back: it tells
+        // its outage and its end. Its own way hangs again: it tells this second outage too.
         const v = seed % 2;
         const own = async (mode: Mode, n: number, failed = false) => {
           if (ways[v].ctl.mode === 'hung' && mode !== 'hung') ways[v].release(failed);

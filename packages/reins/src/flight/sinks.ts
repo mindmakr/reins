@@ -323,17 +323,15 @@ interface SinkState {
   sent: number;
   held: number;
   kept: Kept[];
-  /** The hour whose digest this state's line sent last, so a merge does not owe that digest again. */
-  digested?: number;
-  /** The hour this state's line last sent a digest in: one digest an hour at most. */
-  digestIn?: number;
-  /** The digest of an earlier hour a merge found unsent (a later hour's state took its place): sent by the next plan. */
-  owed?: { held: number; kept: Kept[] };
 }
 
 type Kept = { type: 'opened' | 'changed' | 'resolved'; finding: SinkFinding };
 
-/** What the notifier keeps in the store (FindingsMemory.notify), so several instances count as one service. */
+/**
+ * A notify state: one counter per sink. The shared one lives in the store (FindingsMemory.notify), so several
+ * instances count the findings about the app as one service; each instance also keeps one of its own, in memory,
+ * for what it tells about its own way to the store (flight.ts, B13).
+ */
 export interface NotifyState {
   sinks?: Record<string, SinkState>;
   /** When the last daily summary went, or when the notifier first ran. */
@@ -389,62 +387,6 @@ export function nextDaily(from: number, hourUtc: number): number {
 
 const count = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
 const keptOf = (v: unknown): Kept[] => (Array.isArray(v) ? v : []);
-const digestedOf = (s: SinkState) => (typeof s.digested === 'number' && Number.isFinite(s.digested) ? s.digested : -Infinity);
-
-/**
- * A later hour's state, with what an earlier hour's state still owes: its held notifications, unless the later
- * state's line sent that hour's digest, and any digest either already owed (the larger: one may come from the other).
- */
-function withOwed(later: SinkState, earlier: SinkState): SinkState {
-  const own = count(earlier.held) > 0 && digestedOf(later) !== earlier.hour ? { held: count(earlier.held), kept: keptOf(earlier.kept) } : null;
-  const before = count(later.owed?.held) >= count(earlier.owed?.held) ? later.owed : earlier.owed;
-  const held = count(before?.held) + (own ? own.held : 0);
-  if (!held) return later;
-  return { ...later, owed: { held, kept: [...keptOf(before?.kept), ...(own ? own.kept : [])].slice(0, HELD_KEPT) } };
-}
-
-/**
- * The store's notify state and a server's own as one, for a server that told sinks while it could not reach the
- * store (or while a pass ran past its time limit): per sink the later hour, and within one hour the higher counts
- * and the held notifications of the higher held count, so a sink never gets more than the hourly limit and one
- * digest from this server; the later daily summary. An earlier hour's held notifications whose digest the later
- * state's line has not sent stay owed, and the next plan sends their digest.
- *
- * The higher count, not the sum: the two states may count the same notifications (one was merged from the other),
- * and they cannot tell which. So the hourly limit holds per server and not per sink while servers told on their
- * own (an outage, a pass past its time limit): two servers may each tell up to the limit in one hour, the
- * duplicate accepted during an outage (`conclude` in flight.ts).
- */
-export function mergeNotify(stored: NotifyState | undefined, mine: NotifyState | undefined): NotifyState | undefined {
-  if (!mine || typeof mine !== 'object') return stored;
-  if (!stored || typeof stored !== 'object') return mine;
-  const sinks: Record<string, SinkState> = { ...(stored.sinks && typeof stored.sinks === 'object' ? stored.sinks : {}) };
-  for (const [name, m] of Object.entries(mine.sinks || {})) {
-    if (!m || !Number.isFinite(m.hour)) continue;
-    const s = sinks[name];
-    if (!s || typeof s !== 'object' || !Number.isFinite(s.hour)) sinks[name] = m;
-    else if (m.hour !== s.hour) {
-      const [later, earlier] = m.hour > s.hour ? [m, s] : [s, m];
-      sinks[name] = withOwed(later, earlier);
-    } else {
-      const mineHeld = count(m.held) > count(s.held);
-      const owed = count(m.owed?.held) > count(s.owed?.held) ? m.owed : s.owed;
-      const digested = Math.max(digestedOf(s), digestedOf(m));
-      const digestIn = Math.max(...[s.digestIn, m.digestIn].map((x) => (typeof x === 'number' && Number.isFinite(x) ? x : -Infinity)));
-      sinks[name] = {
-        hour: s.hour,
-        sent: Math.max(count(s.sent), count(m.sent)),
-        held: Math.max(count(s.held), count(m.held)),
-        kept: mineHeld ? m.kept : s.kept,
-        ...(Number.isFinite(digested) ? { digested } : {}),
-        ...(Number.isFinite(digestIn) ? { digestIn } : {}),
-        ...(owed && count(owed.held) ? { owed } : {}),
-      };
-    }
-  }
-  const daily = [stored.dailyFrom, mine.dailyFrom].filter((x): x is number => typeof x === 'number' && Number.isFinite(x));
-  return { sinks, ...(daily.length ? { dailyFrom: Math.max(...daily) } : {}) };
-}
 
 /**
  * Plans and sends notifications. `plan` is pure apart from the sink health it reads: it takes the changes of a
@@ -545,8 +487,8 @@ export function createNotifier(sinksIn: unknown, o: NotifyOptions = {}) {
       const hour = Math.floor(now / HOUR);
       const at = iso(now);
       let summaryDue = false;
-      // Only a plan that can send the summary moves its clock on: one without it (a server telling an outage, a
-      // late write) leaves the summary to the plan that has it.
+      // Only a plan that can send the summary moves its clock on: one without it (a server telling its own way to
+      // the store) leaves the summary to the plan that has it.
       if (daily && summary) {
         if (typeof next.dailyFrom !== 'number' || !Number.isFinite(next.dailyFrom)) next.dailyFrom = now;
         else if (now >= nextDaily(next.dailyFrom, dailyHourUtc)) {
@@ -557,32 +499,19 @@ export function createNotifier(sinksIn: unknown, o: NotifyOptions = {}) {
       const built = summaryDue && summary ? summary() : null;
       for (const sink of sinks) {
         const prev = next.sinks![sink.name];
-        const { owed, ...last }: SinkState = prev && typeof prev === 'object' && Number.isFinite(prev.hour) ? prev : { hour, sent: 0, held: 0, kept: [] };
-        let s: SinkState = { ...last, kept: [...keptOf(last.kept)] };
-        const due = { held: count(owed?.held), kept: keptOf(owed?.kept) };
-        const digest = (held: number, kept: Kept[], when: string) => {
-          const lines = kept.map((k) => `- ${LINE[k.type] || k.type}: ${k.finding.text}`).join('\n');
-          deliveries.push({
-            sink,
-            n: { type: 'digest', service, at, held, findings: kept.map((k) => k.finding), text: `[${service}] ${held} more notifications were held back ${when} (at most ${perHour} an hour):\n${lines}${held > kept.length ? `\n- and ${held - kept.length} more` : ''}` },
-          });
-        };
+        let s: SinkState = prev && typeof prev === 'object' && Number.isFinite(prev.hour) ? { ...prev, kept: [...keptOf(prev.kept)] } : { hour, sent: 0, held: 0, kept: [] };
         if (s.hour !== hour) {
-          // The hour ended: its digest, with any an earlier hour still owed, as one.
-          const held = count(s.held) + due.held;
-          if (held > 0) digest(held, [...s.kept, ...due.kept].slice(0, HELD_KEPT), due.held ? 'in the last hours' : 'in the last hour');
-          const digested = count(s.held) > 0 ? s.hour : digestedOf(s);
-          s = { hour, sent: 0, held: 0, kept: [], ...(Number.isFinite(digested) ? { digested } : {}), ...(held > 0 ? { digestIn: hour } : {}) };
-        } else if (due.held) {
-          // An earlier hour's digest a merge found unsent: now, or, when this line sent a digest this hour, with
-          // this hour's own.
-          if (s.digestIn === hour) {
-            s.held = count(s.held) + due.held;
-            s.kept = [...s.kept, ...due.kept].slice(0, HELD_KEPT);
-          } else {
-            digest(due.held, due.kept, 'in an earlier hour');
-            s.digestIn = hour;
+          // The hour ended: its digest, then a new count.
+          const held = count(s.held);
+          if (held > 0) {
+            const kept = s.kept.slice(0, HELD_KEPT);
+            const lines = kept.map((k) => `- ${LINE[k.type] || k.type}: ${k.finding.text}`).join('\n');
+            deliveries.push({
+              sink,
+              n: { type: 'digest', service, at, held, findings: kept.map((k) => k.finding), text: `[${service}] ${held} more notifications were held back in the last hour (at most ${perHour} an hour):\n${lines}${held > kept.length ? `\n- and ${held - kept.length} more` : ''}` },
+            });
           }
+          s = { hour, sent: 0, held: 0, kept: [] };
         }
         for (const c of changes) {
           if (c.finding.key === `blind:sink:${sink.name}`) continue;
