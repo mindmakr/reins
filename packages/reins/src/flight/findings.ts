@@ -102,7 +102,7 @@ export interface EvaluateInput {
   extra?: Observation[];
   /**
    * The server's health address, when the watcher polled it this pass: null when it answered, else its finding
-   * (key HEALTH_KEY). Left out, the health finding is not judged and stays as it was: only a watcher sees it.
+   * (key HEALTH_KEY). Left out (no watcher polls the address any more), an open health finding resolves.
    */
   health?: Observation | null;
 }
@@ -332,8 +332,9 @@ function promiseRules(check: CheckResult, m: FlightManifest, b: Basics, out: Obs
       out.push({ key, kind: 'broken', level: 'error', n: c.count, firstAt: c.firstBreachAt, at: c.lastBreachAt, process: c.process, keys: c.keys.slice(0, MAX_KEYS), text: promiseText(c, m), ...(promise?.why ? { why: promise.why } : {}) });
       continue;
     }
-    // Held: drifting when the slowest 5% of the runs that finished take most of the time allowed (B5).
-    if ((promise?.kind === 'within' || promise?.kind === 'ends') && c.took && c.took.p95Ms !== null && c.took.p95Ms >= b.driftShare * promise.withinMs) {
+    // Held: drifting when the slowest 5% of the runs that finished take most of the time allowed (B5), judged only
+    // from enough runs for a 95th percentile to mean something (driftMinRuns).
+    if ((promise?.kind === 'within' || promise?.kind === 'ends') && c.took && c.took.p95Ms !== null && c.took.runs >= b.driftMinRuns && c.took.p95Ms >= b.driftShare * promise.withinMs) {
       out.push({
         key: drift,
         kind: 'drifting',
@@ -719,15 +720,12 @@ export function evaluate(input: EvaluateInput): EvaluateResult {
   rule(['blind:sink:'], () => {
     for (const x of input.extra || []) obs.push(x);
   });
-  const health = input.health;
-  if (health !== undefined)
-    rule([], () => {
-      if (health) obs.push({ ...health, key: HEALTH_KEY, kind: 'basic' });
-      judged.add(HEALTH_KEY);
-    });
+  // The health finding is open only while a watcher's poll says the address does not answer. A pass that polled
+  // no address (a server's, or a watcher's with none) means no watcher polls it any more: an open one resolves.
+  if (input.health) obs.push({ ...input.health, key: HEALTH_KEY, kind: 'basic' });
+  judged.add(HEALTH_KEY);
 
-  // The health finding is judged only by a pass that polled the address (a watcher's), never by the basics' prefix.
-  const isJudged = (key: string) => judged.has(key) || (key !== HEALTH_KEY && judgedPrefixes.some((p) => key.startsWith(p)));
+  const isJudged = (key: string) => judged.has(key) || judgedPrefixes.some((p) => key.startsWith(p));
   const prior = new Map(input.prior.map((f) => [f.key, f]));
   const seen = new Map<string, Observation>();
   for (const o of obs) if (!seen.has(o.key)) seen.set(o.key, o);

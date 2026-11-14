@@ -64,9 +64,11 @@ export interface FlightOptions extends StrictOptions {
   /** The service name in notifications. Default the manifest's `service`, else `server`. */
   service?: string;
   /**
-   * The server's health address (`http:` or `https:`), for `reins flight watch` only: the watcher polls it each
-   * period and opens a basic finding while it does not answer with a 2xx status. A server ignores it. It comes from
-   * the environment, like the sinks, never from the manifest.
+   * The server's health address (`http:` or `https:`, with no user or password, as fetch refuses those), for
+   * `reins flight watch` only: the watcher polls it each period (within 10 s, and at most half of
+   * `checkTimeoutMs`) and opens a basic finding while it does not answer with a 2xx status. A server ignores it,
+   * and resolves that finding once no watcher polls the address. It comes from the environment, like the sinks,
+   * never from the manifest.
    */
   healthUrl?: string;
   /** What the store keeps. Default 7 days (or the widest promise window and a day, if longer), and the store's own step cap: 100,000 steps in memory, 1,000,000 in a file or Postgres store. Whole runs go, never single steps. */
@@ -152,16 +154,50 @@ function summaryOf(findings: FlightFinding[], c: CheckResult, notChecked: string
   return { promises: tally(c.promises), probes: tally(c.probes), open, notChecked: [...extra, ...notChecked] };
 }
 
-/** How long one poll of the health address may take. */
+/**
+ * How long one poll of the health address may take: 10 s, and at most half the pass's time limit. The poll runs
+ * beside the store work, inside that limit, so a server that does not answer is told as such, never as a store
+ * that does not answer.
+ */
 const HEALTH_TIMEOUT_MS = 10_000;
+const healthTimeoutOf =(checkTimeoutMs: number) => Math.max(1, Math.min(HEALTH_TIMEOUT_MS, Math.floor(checkTimeoutMs / 2)));
 
-/** The health address as a URL string, null when none is given, false when it is not an http or https URL. */
+/** How long stop() waits for the store to take the queued steps and the lock back, after the pass on its way. */
+const STOP_STORE_MS = 5_000;
+
+/** `p`, or undefined once `ms` have passed. The timer does not hold the process open. */
+function within<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+    (timer as any).unref?.();
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The ports fetch never connects to (the Fetch standard's "bad port" list): a health address on one of them could
+ * never answer, so it is refused at start.
+ */
+const BAD_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512,
+  513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679,
+  6697, 10080,
+]);
+
+/**
+ * The health address as a URL string, null when none is given, false when fetch could never poll it: not an http
+ * or https URL, one with a user or password (fetch refuses those), or a port fetch never connects to.
+ */
 function healthUrlOf(v: unknown): string | null | false {
   if (v === undefined) return null;
   if (typeof v !== 'string') return false;
   try {
     const u = new URL(v);
-    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : false;
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    if (u.username || u.password) return false;
+    if (u.port && BAD_PORTS.has(Number(u.port))) return false;
+    return u.href;
   } catch {
     return false;
   }
@@ -230,8 +266,8 @@ export function createFlight(env: Record<string, string | undefined> = process.e
      */
     written: Map<string, Written>;
   } | null = null;
-  /** Resolves when the last stop() has written queued steps and given the lock back. */
-  let closing: Promise<void> = Promise.resolve();
+  /** Resolves when the last stop() has written queued steps and given the lock back (true), or could not (false). */
+  let closing: Promise<boolean> = Promise.resolve(true);
   let checkEvery = 60_000;
   let checkTimeout = CHECK_TIMEOUT_MS;
   /** The lock's lease: a lock its checker stopped renewing is taken over after three periods (at least three minutes). */
@@ -447,7 +483,11 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     } catch {
       manifest = { ok: false, problems: [{ path: '(root)', message: 'could not be read' }] };
     }
-    if (opts.strict === true && manifest && !manifest.ok) {
+    let strict = false;
+    try {
+      strict = opts.strict === true;
+    } catch {}
+    if (strict && manifest && !manifest.ok) {
       throw new Error(`reins flight: the manifest is invalid: ${manifest.problems.map((p) => `${p.path} ${p.message}`).join('; ')}`);
     }
     return manifest;
@@ -554,7 +594,8 @@ export function createFlight(env: Record<string, string | undefined> = process.e
      * steps or requests, runs no probes and opens no port. Each period it also polls `healthUrl`, when given, and
      * keeps a basic finding open while the server does not answer it. It is the checker while it holds the store
      * lock, and the servers' checkers stand down; once stopped it gives the lock back, and a server checker takes
-     * over at its next pass (after a crash, within the lease: three periods, at least three minutes). Runs its
+     * over at its next pass (after a crash, or a store that does not take the lock back within 5 s of stop(), within
+     * the lease: three periods, at least three minutes). Runs its
      * first pass at once. `cwd` is where a manifest path, or `reins.flight.json`, is read from. Never throws, except
      * with `strict: true` and an invalid manifest. Returns false, starting nothing, without a store, on a bad
      * option or while this instance is started as a server; true while it watches.
@@ -563,12 +604,16 @@ export function createFlight(env: Record<string, string | undefined> = process.e
       if (run) return !rec;
       const opts: FlightOptions = o && typeof o === 'object' ? o : {};
       const manifest = manifestOf(opts, cwd);
-      if (!isStore(opts.store)) return false;
-      if (opts.instance !== undefined && !(typeof opts.instance === 'string' && INSTANCE.test(opts.instance))) return false;
-      const url = healthUrlOf(opts.healthUrl);
-      if (url === false) return false;
+      // An option that cannot be read (a getter that throws) is a bad option: what it threw is not passed on.
       try {
-        launch(opts, manifest, opts.store, opts.instance || `watch-${randomBytes(6).toString('hex')}`, null, url ? () => pollHealth(url, HEALTH_TIMEOUT_MS) : null);
+        const store = opts.store;
+        if (!isStore(store)) return false;
+        const instance = opts.instance;
+        if (instance !== undefined && !(typeof instance === 'string' && INSTANCE.test(instance))) return false;
+        const url = healthUrlOf(opts.healthUrl);
+        if (url === false) return false;
+        // The poll's own time limit, read when it runs: at most half the pass's limit, so it ends inside it.
+        launch(opts, manifest, store, instance || `watch-${randomBytes(6).toString('hex')}`, null, url ? () => pollHealth(url, healthTimeoutOf(checkTimeout)) : null);
         void pass();
         return true;
       } catch {
@@ -598,20 +643,30 @@ export function createFlight(env: Record<string, string | undefined> = process.e
           probes.stop();
         }
         const w = r.writer;
+        let given = false;
+        // The pass on its way ends within its own time limit; the store then has STOP_STORE_MS to take the queued
+        // steps and the lock back, so a store that hangs never holds stop() open (the lock's lease runs out instead).
+        const giveBack = async () => {
+          await w?.flush();
+          await r.store.unlock(r.owner);
+          given = true;
+        };
         closing = Promise.resolve(r.passing)
           .catch(() => null)
-          .then(() => w?.flush())
-          .then(() => r.store.unlock(r.owner))
+          .then(() => within(giveBack(), STOP_STORE_MS))
           .catch(() => {})
           .then(() => r.notifier.idle())
-          .catch(() => {});
+          .catch(() => {})
+          .then(() => given);
       } catch {}
     },
     /**
      * Resolves when the last `stop()` has let the pass on its way end, written the queued steps, given the store lock
-     * back and delivered (or failed) what was already being told. Never rejects.
+     * back and delivered (or failed) what was already being told: true when the store took the steps and the lock
+     * back, false when it refused or did not answer within 5 s (then the lock's lease runs out, and another
+     * checker takes over after it). Never rejects.
      */
-    closed: (): Promise<void> => closing,
+    closed: (): Promise<boolean> => closing,
     isStarted: () => !!rec,
     /**
      * Records that run `key` of `process` reached `step` (design C7). Returns at once with whether it was queued;

@@ -581,7 +581,8 @@ export const strictMethod = (m: unknown): string => {
 export function errorCode(e: unknown): string {
   try {
     const o: any = e;
-    for (const v of [o?.code, o?.cause?.code]) if (typeof v === 'string' && CODE.test(v)) return v;
+    // An AggregateError (a connection tried on several addresses) may carry its code only on the errors inside it.
+    for (const v of [o?.code, o?.cause?.code, o?.errors?.[0]?.code, o?.cause?.errors?.[0]?.code]) if (typeof v === 'string' && CODE.test(v)) return v;
     const name = o?.name;
     if (typeof name === 'string' && ERROR_NAMES.has(name)) return name;
   } catch {}

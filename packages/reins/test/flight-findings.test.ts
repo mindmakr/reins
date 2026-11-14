@@ -243,8 +243,10 @@ describe('B6: when findings open and resolve', () => {
     const three = await pass(store, m, NOW + 4 * MIN, two.findings, two.memory);
     expect(byKey(three, 'promise:payout:pending-settles')).toMatchObject({ state: 'resolved', resolvedAt: NOW + 4 * MIN });
     expect(three.changes.find((c) => c.finding.key === 'promise:payout:pending-settles')!.event).toBe('resolved');
-    // The runs that came late still show: the promise holds, but its slowest runs took longer than allowed.
-    expect(byKey(three, 'drifting:promise:payout:pending-settles')!.state).toBe('open');
+    // The promise holds again. Its slowest runs took longer than allowed, but 2 runs that finished are too few
+    // (driftMinRuns, 20) for a 95th percentile to say it is drifting.
+    expect(three.check.promises.find((c) => c.id === 'pending-settles')!.took!.runs).toBe(2);
+    expect(byKey(three, 'drifting:promise:payout:pending-settles')).toBeUndefined();
   });
 
   it('once stays open while a breaching run is inside the window, and says when the last breach was', async () => {
@@ -455,7 +457,7 @@ describe("round 3: the critics' findings on the rules", () => {
   });
 });
 
-describe('B9: a broken promise says when it first and last happened, in that order', () => {
+describe('B9: a broken promise says when it first and last happened, in that order; drift needs enough runs', () => {
   it('a within finding opened now over runs that became overdue earlier has firstAt at the first, lastAt at the last', async () => {
     // p2 became overdue at NOW - 2 h, p1 at NOW - 1 h; the finding opens at NOW.
     const store = await storeWith([im('a', back(1))], [['p1', 'bank.pending', NOW - 5 * H], ['p2', 'bank.pending', NOW - 6 * H]]);
@@ -469,6 +471,32 @@ describe('B9: a broken promise says when it first and last happened, in that ord
     const g = byKey(two, 'promise:payout:pending-settles')!;
     expect(g).toMatchObject({ state: 'open', firstAt: NOW - 2 * H, lastAt: NOW - H });
     expect(g.lastAt).toBeGreaterThanOrEqual(g.firstAt);
+  });
+
+  /** `n` runs of pending-settles that finished in the last day, the last 2 of them in 3.5 h (87.5% of the 4 h). */
+  const finished = (n: number) => {
+    const steps: Array<[string, string, number]> = [];
+    for (let i = 0; i < n; i++) steps.push([`p${i}`, 'bank.pending', NOW - 10 * H + i * MIN], [`p${i}`, 'bank.settled', NOW - 10 * H + i * MIN + (i < n - 2 ? H : 3.5 * H)]);
+    return steps;
+  };
+  const drift = 'drifting:promise:payout:pending-settles';
+
+  it('no drifting finding from the 95th percentile of fewer than 20 runs; one from 20', async () => {
+    expect(BASICS.driftMinRuns).toMatchObject({ value: 20, source: 'reins', chosen: true });
+    const nineteen = await pass(await storeWith([im('a', back(1))], finished(19)), manifest(), NOW);
+    const c19 = nineteen.check.promises.find((c) => c.id === 'pending-settles')!;
+    expect(c19.took).toMatchObject({ runs: 19, p95Ms: 3.5 * H });
+    expect(byKey(nineteen, drift)).toBeUndefined();
+    const twenty = await pass(await storeWith([im('a', back(1))], finished(20)), manifest(), NOW);
+    expect(byKey(twenty, drift)).toMatchObject({ kind: 'drifting', state: 'open', count: 20 });
+  });
+
+  it('the manifest basics may set the minimum runs for drifting, within its range', async () => {
+    const m = manifest({ basics: { driftMinRuns: 3 } });
+    expect(m.ok && m.manifest.basics).toEqual({ driftMinRuns: 3 });
+    expect(byKey(await pass(await storeWith([im('a', back(1))], finished(3)), m, NOW), drift)).toMatchObject({ state: 'open', count: 3 });
+    expect(byKey(await pass(await storeWith([im('a', back(1))], finished(2)), m, NOW), drift)).toBeUndefined();
+    for (const bad of [0, 1.5e6, '3']) expect(validateManifest(manifestData({ basics: { driftMinRuns: bad } })).ok, String(bad)).toBe(false);
   });
 
   it('a once finding over several breaches has firstAt at the first breach and lastAt at the last', async () => {
