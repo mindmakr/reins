@@ -216,7 +216,11 @@ describe('strict recording (flight)', () => {
 
     const rec = f.recorder()!;
     expect(rec.requests().map((r) => r.route)).toEqual(['/reset/:token', UNMATCHED]);
-    expect(rec.requests()[0].upstream).toHaveLength(4);
+    // A failed node:http call is recorded only where Node publishes its failure; elsewhere the report says so.
+    // httpFailures comes from notCheckedFacts, which the version-table test pins.
+    const httpFailures = !notCheckedFacts().some((l) => l.startsWith('Failed upstream calls through node:http'));
+    expect(rec.requests()[0].upstream).toHaveLength(httpFailures ? 4 : 3);
+    expect(f.notChecked()).toEqual(notCheckedFacts());
     const emitted = JSON.stringify([rec.requests(), rec.upstream(), rec.spans(), rec.summaries(), rec.stats(), rec.drain()]);
     for (const [where, secret] of Object.entries(S)) expect(emitted, where).not.toContain(secret);
   });
@@ -270,12 +274,12 @@ describe('strict recording (flight)', () => {
     expect(await httpGet(`${upstream}/top-level`)).toBe(201);
     expect(f.recorder()!.upstream()).toMatchObject([{ method: 'GET', host: '127.0.0.1', status: 201 }]);
 
-    expect(notCheckedFacts('18.20.4')[0]).toMatch(/node:http and node:https are not checked/);
-    expect(notCheckedFacts('20.18.0')[0]).toMatch(/Failed upstream calls/);
-    expect(notCheckedFacts('22.13.1')).toHaveLength(1);
-    expect(notCheckedFacts('22.14.0')).toEqual([]);
-    expect(notCheckedFacts('23.1.0')).toHaveLength(1);
-    expect(notCheckedFacts('24.0.0')).toEqual([]);
+    // Boundaries measured with each Node release's own diagnostics channels on Linux.
+    expect(notCheckedFacts('18.5.0')[0]).toMatch(/^Upstream calls through node:http and node:https are not checked/);
+    for (const v of ['18.6.0', '18.20.8', '20.0.0', '20.16.0', '21.7.3', '22.0.0', '22.5.0']) {
+      expect(notCheckedFacts(v), v).toEqual([expect.stringMatching(/^Failed upstream calls through node:http/)]);
+    }
+    for (const v of ['20.17.0', '20.20.2', '22.6.0', '22.13.1', '23.0.0', '24.0.0']) expect(notCheckedFacts(v), v).toEqual([]);
     expect(f.notChecked()).toEqual(notCheckedFacts());
   });
 
