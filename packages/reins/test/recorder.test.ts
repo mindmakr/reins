@@ -101,17 +101,35 @@ describe('strict recording (flight)', () => {
 
   it('reduces a path with no route pattern to a listed pattern, or counts it as unmatched', async () => {
     const f = started({ routes: ['/files/*', '/api/orders/:id/lines'] });
-    const base = await serve(f.wrapHandler((_q: IncomingMessage, res: ServerResponse) => res.end()));
-    await fetch(`${base}/files/a/b/c.txt`);
-    await fetch(`${base}/api/orders/9/lines/`);
-    await fetch(`${base}/somewhere/else/123`);
-    await settle();
-    const rec = f.recorder()!;
-    expect(rec.requests().map((r) => r.route)).toEqual(['/files/*', '/api/orders/:id/lines', UNMATCHED]);
-    expect(rec.stats().unmatched).toBe(1);
-    const [m] = rec.summaries();
-    expect(m.unmatched).toBe(1);
-    expect(m.requests.map((x) => x.route).sort()).toEqual([UNMATCHED, '/api/orders/:id/lines', '/files/*'].sort());
+    // Each response's own 'finish', heard after the recorder's (its listener is added first), says the request is
+    // recorded: no settle wait. The wall clock stands mid-minute, so the three fall in one minute summary (B7).
+    const finished: Array<Promise<void>> = [];
+    const base = await serve(
+      f.wrapHandler((_q: IncomingMessage, res: ServerResponse) => {
+        finished.push(new Promise<void>((r) => res.once('finish', () => r())));
+        res.end();
+      }),
+    );
+    const minute = Math.floor(Date.now() / 60_000) * 60_000 + 30_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(minute);
+    try {
+      await fetch(`${base}/files/a/b/c.txt`);
+      await fetch(`${base}/api/orders/9/lines/`);
+      await fetch(`${base}/somewhere/else/123`);
+      expect(finished).toHaveLength(3);
+      await Promise.all(finished);
+      const rec = f.recorder()!;
+      expect(rec.requests().map((r) => r.route)).toEqual(['/files/*', '/api/orders/:id/lines', UNMATCHED]);
+      expect(rec.stats().unmatched).toBe(1);
+      const summaries = rec.summaries();
+      expect(summaries).toHaveLength(1);
+      const [m] = summaries;
+      expect(m.minute).toBe(minute - 30_000);
+      expect(m.unmatched).toBe(1);
+      expect(m.requests.map((x) => x.route).sort()).toEqual([UNMATCHED, '/api/orders/:id/lines', '/files/*'].sort());
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('uses the route pattern an Express-style router gives', async () => {

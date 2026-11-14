@@ -24,9 +24,9 @@ async function main() {
   if (argv[0] === 'flight') {
     const code = await flightMain(argv.slice(1));
     process.exitCode = code;
-    // A report loads the app's config module, whose store (a database pool) may keep the process alive: exit
-    // once what was printed has been written.
-    if (argv[1] === 'report') process.stdout.write('', () => process.exit(code));
+    // A report or a watcher loads the app's config module, whose store (a database pool) may keep the process
+    // alive: exit once what was printed has been written.
+    if (argv[1] === 'report' || argv[1] === 'watch') process.stdout.write('', () => process.exit(code));
     return;
   }
   let args;

@@ -55,6 +55,8 @@ export type PromiseCheck = CheckBase &
         count: number;
         /** Up to MAX_KEYS of them, oldest breach first. Keys stay server-side (design C6). */
         keys: string[];
+        /** The earliest breach of these runs: when the first became overdue, or when its breaching step was recorded. */
+        firstBreachAt: number;
         /** The latest breach: when a run became overdue, or when the breaching step was recorded. */
         lastBreachAt: number;
         late: LateRun[];
@@ -75,6 +77,11 @@ export type BlindFact =
   | { kind: 'store-unreachable'; error: string }
   /** Taking the checker lock failed (say, the lock table is missing): this checker did not check or prune. */
   | { kind: 'lock-unavailable'; error: string }
+  /**
+   * The store answered the lock and the reads but refused the findings write, so what this pass found was not saved
+   * or told. Only a server's own way to the store gives it (B10), like the two above.
+   */
+  | { kind: 'findings-unsaved'; error: string }
   | { kind: 'steps-dropped'; process: string; count: number; since: number }
   /** Runs retention removed while they had reached no end step, so they may have been overdue (B7). */
   | { kind: 'overdue-pruned'; process: string; count: number; since: number }
@@ -250,7 +257,7 @@ function verdict(base: CheckBase, breaches: Breach[], late: LateRun[]): PromiseC
   const lates = { late: late.sort((a, b) => a.at - b.at).slice(-MAX_KEYS), lateCount: late.length };
   if (!breaches.length) return { ...base, state: 'held', ...lates };
   breaches.sort((a, b) => a.at - b.at);
-  return { ...base, state: 'broken', count: breaches.length, keys: breaches.slice(0, MAX_KEYS).map((b) => b.key), lastBreachAt: breaches[breaches.length - 1].at, ...lates };
+  return { ...base, state: 'broken', count: breaches.length, keys: breaches.slice(0, MAX_KEYS).map((b) => b.key), firstBreachAt: breaches[0].at, lastBreachAt: breaches[breaches.length - 1].at, ...lates };
 }
 
 /**

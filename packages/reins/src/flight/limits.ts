@@ -39,6 +39,7 @@ export const BASICS = {
   refusedFactor: { value: 3, min: 1, max: 1000, source: 'owasp-logging', chosen: true, means: 'how many times the time before a spike of refused responses must be' },
   refusedLookbackMs: { value: HOUR, min: 5 * MIN, max: DAY, source: 'owasp-logging', chosen: true, means: 'the time before the recent window that refused responses are compared with, in ms' },
   driftShare: { value: 0.8, min: 0.1, max: 1, source: 'reins', chosen: true, means: 'the share of a within or ends limit the 95th percentile may reach before a promise is drifting' },
+  driftMinRuns: { value: 20, min: 1, max: 1_000_000, source: 'reins', chosen: true, means: 'runs that finished in the window needed before the 95th percentile of a within or ends promise is judged for drift' },
   baselineFactor: { value: 3, min: 1.1, max: 1000, source: 'sre-monitoring', chosen: true, means: 'how many times its own baseline a 95th percentile time must be to be drifting' },
   baselineMinMs: { value: 100, min: 0, max: 600_000, source: 'reins', chosen: true, means: 'the 95th percentile time below which no baseline drift is reported, in ms' },
   silentFactor: { value: 10, min: 2, max: 1000, source: 'reins', chosen: true, means: 'how many of its usual gaps a declared step may be missing before it is silent' },

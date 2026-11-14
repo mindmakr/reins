@@ -5,7 +5,7 @@
 // Imports: Node built-ins and reins' shared modules only. Never import ./node.js, ./index.js or ./bridge here.
 import { randomBytes } from 'node:crypto';
 import { check, type CheckResult, endsOf, notCheckedResult } from './flight/checker.js';
-import { type Change, evaluate, type FindingsMemory, type FlightFinding, fromRecords, memoryFrom, memoryRecord, sortFindings, STORE_KEYS, toRecord } from './flight/findings.js';
+import { type Change, duration, evaluate, type FindingsMemory, type FlightFinding, fromRecords, HEALTH_KEY, memoryFrom, memoryRecord, type Observation, sortFindings, STORE_KEYS, toRecord } from './flight/findings.js';
 import { createNotifier, type FlightSink, type Notification, type Notifier, type NotifyOptions, type NotifyState, type SummaryFigures } from './flight/sinks.js';
 import { DEFAULT_WINDOW_MS, loadManifest, type ManifestResult, serviceOf } from './flight/manifest.js';
 import { createProbes, PROBE_TIMEOUT_MS } from './flight/probes.js';
@@ -13,6 +13,7 @@ import { createStepWriter, type StepWriter } from './flight/steps.js';
 import { type FindingRecord, type FlightStore, type InstanceMinute, isStore, memoryStore, type Retention, RETENTION_DEFAULTS } from './flight/store.js';
 import { basicsOf } from './flight/limits.js';
 import { collectReport, type FlightReport } from './flight/report.js';
+import { sourceLine } from './flight/sources.js';
 import {
   createStrictRecorder,
   type DevInstruments,
@@ -62,6 +63,14 @@ export interface FlightOptions extends StrictOptions {
   notify?: NotifyOptions;
   /** The service name in notifications. Default the manifest's `service`, else `server`. */
   service?: string;
+  /**
+   * The server's health address (`http:` or `https:`, with no user or password, as fetch refuses those), for
+   * `reins flight watch` only: the watcher polls it each period (within 10 s, and at most half of
+   * `checkTimeoutMs`) and opens a basic finding while it does not answer with a 2xx status. A server ignores it,
+   * and resolves that finding once no watcher polls the address. It comes from the environment, like the sinks,
+   * never from the manifest.
+   */
+  healthUrl?: string;
   /** What the store keeps. Default 7 days (or the widest promise window and a day, if longer), and the store's own step cap: 100,000 steps in memory, 1,000,000 in a file or Postgres store. Whole runs go, never single steps. */
   retention?: Retention;
 }
@@ -145,6 +154,74 @@ function summaryOf(findings: FlightFinding[], c: CheckResult, notChecked: string
   return { promises: tally(c.promises), probes: tally(c.probes), open, notChecked: [...extra, ...notChecked] };
 }
 
+/**
+ * How long one poll of the health address may take: 10 s, and at most half the pass's time limit. The poll runs
+ * beside the store work, inside that limit, so a server that does not answer is told as such, never as a store
+ * that does not answer.
+ */
+const HEALTH_TIMEOUT_MS = 10_000;
+const healthTimeoutOf =(checkTimeoutMs: number) => Math.max(1, Math.min(HEALTH_TIMEOUT_MS, Math.floor(checkTimeoutMs / 2)));
+
+/** How long stop() waits for the store to take the queued steps and the lock back, after the pass on its way. */
+const STOP_STORE_MS = 5_000;
+
+/** `p`, or undefined once `ms` have passed. The timer does not hold the process open. */
+function within<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+    (timer as any).unref?.();
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The ports fetch never connects to (the Fetch standard's "bad port" list): a health address on one of them could
+ * never answer, so it is refused at start.
+ */
+const BAD_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512,
+  513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679,
+  6697, 10080,
+]);
+
+/**
+ * The health address as a URL string, null when none is given, false when fetch could never poll it: not an http
+ * or https URL, one with a user or password (fetch refuses those), or a port fetch never connects to.
+ */
+function healthUrlOf(v: unknown): string | null | false {
+  if (v === undefined) return null;
+  if (typeof v !== 'string') return false;
+  try {
+    const u = new URL(v);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    if (u.username || u.password) return false;
+    if (u.port && BAD_PORTS.has(Number(u.port))) return false;
+    return u.href;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Polls the server's health address once, with GET, no redirects and a time limit: null when it answers with a 2xx
+ * status, else the basic finding that it does not. Report only: it reads the answer's status and nothing else, and
+ * calls nothing else. Never throws.
+ */
+async function pollHealth(url: string, timeoutMs: number): Promise<Observation | null> {
+  let why: string;
+  try {
+    const res = await fetch(url, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+    await res.body?.cancel().catch(() => {});
+    if (res.status >= 200 && res.status < 300) return null;
+    why = `it answered with status ${res.status}`;
+  } catch (e) {
+    const code = errorCode(e);
+    why = code === 'TimeoutError' || code === 'AbortError' ? `it did not answer within ${duration(timeoutMs)}` : `it did not answer (${code})`;
+  }
+  return { key: HEALTH_KEY, kind: 'basic', level: 'error', source: sourceLine('health'), text: `The server's health address failed: ${why}. The server may be down.` };
+}
+
 const nonNeg =(v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : d);
 
 /** Creates an instance. Apps use the `flight` singleton; this is for tests. */
@@ -153,7 +230,10 @@ export function createFlight(env: Record<string, string | undefined> = process.e
   const probes = createProbes();
   let run: {
     store: FlightStore;
-    writer: StepWriter;
+    /** The step writer of a server; null in a watcher, which records nothing. */
+    writer: StepWriter | null;
+    /** A watcher's poll of the server's health address (design section 5), or null. */
+    health: (() => Promise<Observation | null>) | null;
     manifest: ManifestResult | null;
     owner: string;
     retention: Retention;
@@ -186,6 +266,8 @@ export function createFlight(env: Record<string, string | undefined> = process.e
      */
     written: Map<string, Written>;
   } | null = null;
+  /** Resolves when the last stop() has written queued steps and given the lock back (true), or could not (false). */
+  let closing: Promise<boolean> = Promise.resolve(true);
   let checkEvery = 60_000;
   let checkTimeout = CHECK_TIMEOUT_MS;
   /** The lock's lease: a lock its checker stopped renewing is taken over after three periods (at least three minutes). */
@@ -245,7 +327,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
    * this server still holds the lock), but never after stop(). A step that cannot reach the store (or read its
    * findings) tells nothing about the app: only this server's own outage (`sight`). Never throws.
    */
-  async function conclude(r: NonNullable<typeof run>, result: CheckResult, minutes: InstanceMinute[] | null, useStore: boolean, isLive: () => boolean): Promise<void> {
+  async function conclude(r: NonNullable<typeof run>, result: CheckResult, minutes: InstanceMinute[] | null, useStore: boolean, isLive: () => boolean, health?: Observation | null): Promise<void> {
     try {
       const now = result.at;
       let down: CheckResult | null = !useStore || storeFact(result) ? result : null;
@@ -266,7 +348,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
       for (const [k, w] of r.written) if (now - w.at >= lease() || (storedAt.get(k) ?? -Infinity) > w.at) r.written.delete(k);
       const { findings: prior, won } = mergeWritten(records, r.written);
       const memory = memoryFrom(records);
-      const ev = evaluate({ check: result, minutes, manifest: r.manifest, prior, memory, now, extra: r.notifier.health() });
+      const ev = evaluate({ check: result, minutes, manifest: r.manifest, prior, memory, now, extra: r.notifier.health(), health });
       const facts = notCheckedFacts();
       const summary = () => ({ findings: ev.findings, checked: summaryOf(ev.findings, result, facts) });
       const changed = new Set(ev.changes.map((c) => c.finding.key));
@@ -283,7 +365,14 @@ export function createFlight(env: Record<string, string | undefined> = process.e
       // resolved one it only carries again.
       const told = (f: FlightFinding) => (won.has(f.key) && !changed.has(f.key) && f.state !== 'open' ? won.get(f.key)!.at : at);
       const list = ev.findings.filter((f) => f.state === 'open' || changed.has(f.key) || won.has(f.key));
-      await r.store.putFindings([...list.map((f) => toRecord(f, told(f))), memoryRecord(mem, at)]);
+      try {
+        await r.store.putFindings([...list.map((f) => toRecord(f, told(f))), memoryRecord(mem, at)]);
+      } catch (e) {
+        // The store answered the lock and the reads but refused the write (B10): nothing about the app is told,
+        // and this server tells its own sinks once that flight cannot save what it finds, as for an outage.
+        if (isLive()) sight(r, { at: now, manifest: result.manifest, promises: [], probes: [], blind: [{ kind: 'findings-unsaved', error: errorCode(e) }] }, now);
+        return;
+      }
       if (run === r) for (const f of list) r.written.set(f.key, { at: told(f), finding: f });
       // A pass that ran past its time limit while writing tells what it wrote only while this server still holds
       // the lock (another holder tells its own), and never after stop(). The time-out step told only this server's
@@ -325,6 +414,9 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     let over = false;
     const current = () => live() && !over;
     const work = (async (): Promise<CheckResult | null> => {
+      // A watcher polls the health address beside the lock and the check, within its own time limit, so a slow
+      // lock does not push the poll past the pass's limit; a server leaves it unjudged. The poll never throws.
+      const polled = r.health ? r.health() : undefined;
       let held: boolean;
       try {
         held = await r.store.lock(r.owner, lease());
@@ -339,9 +431,14 @@ export function createFlight(env: Record<string, string | undefined> = process.e
         if (current()) sight(r, null, Date.now());
         return null;
       }
+      if (run !== r) {
+        // Stopped while the lock was being taken: it is given back, so another checker takes over at once.
+        await r.store.unlock(r.owner).catch(() => {});
+        return null;
+      }
       let minutes: InstanceMinute[] | null = null;
-      const result = await check(r.store, r.manifest, { minutes: (m) => (minutes = m) });
-      await conclude(r, result, minutes, true, current);
+      const [result, health] = await Promise.all([check(r.store, r.manifest, { minutes: (m) => (minutes = m) }), polled]);
+      await conclude(r, result, minutes, true, current, health);
       if (live() && Date.now() - r.lastPrune >= PRUNE_EVERY_MS) {
         r.lastPrune = Date.now();
         await r.store.prune(r.retention, Date.now(), endsOf(r.manifest)).catch(() => {});
@@ -380,25 +477,79 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     return p;
   }
 
+  /** The manifest of the options, as start() and watch() read it. Throws only with `strict: true` and an invalid manifest. */
+  function manifestOf(opts: FlightOptions, cwd?: string): ManifestResult | null {
+    let manifest: ManifestResult | null = null;
+    try {
+      manifest = loadManifest(opts.manifest, cwd);
+    } catch {
+      manifest = { ok: false, problems: [{ path: '(root)', message: 'could not be read' }] };
+    }
+    let strict = false;
+    try {
+      strict = opts.strict === true;
+    } catch {}
+    if (strict && manifest && !manifest.ok) {
+      throw new Error(`reins flight: the manifest is invalid: ${manifest.problems.map((p) => `${p.path} ${p.message}`).join('; ')}`);
+    }
+    return manifest;
+  }
+
+  /**
+   * The checker of a server (with its step writer) or of a watcher (with its health poll and no writer): one and the
+   * same pass over the store, so both give the same findings from the same store (design section 8). Starts its timer.
+   */
+  function launch(opts: FlightOptions, manifest: ManifestResult | null, store: FlightStore, instance: string, writer: StepWriter | null, health: (() => Promise<Observation | null>) | null): void {
+    const m = manifest?.ok ? manifest.manifest : undefined;
+    const widest = Math.max(DEFAULT_WINDOW_MS, ...(m?.processes || []).flatMap((p) => p.promises.map((x) => x.windowMs)));
+    const keep: Retention = { maxAgeMs: Math.max(RETENTION_DEFAULTS.maxAgeMs, widest + 86_400_000), ...(opts.retention && typeof opts.retention === 'object' ? opts.retention : {}) };
+    const r: NonNullable<typeof run> = {
+      store,
+      writer,
+      health,
+      manifest,
+      owner: `${instance}-${randomBytes(4).toString('hex')}`,
+      retention: keep,
+      timer: null,
+      lastCheck: null,
+      lastPrune: 0,
+      passing: null,
+      token: null,
+      hung: null,
+      notifier: createNotifier(opts.sinks, opts.notify && typeof opts.notify === 'object' ? opts.notify : {}),
+      service: serviceOf(opts.service, manifest),
+      shared: [],
+      outage: null,
+      own: undefined,
+      written: new Map(),
+    };
+    run = r;
+    checkEvery = nonNeg(opts.checkEveryMs, 60_000);
+    checkTimeout = Math.min(nonNeg(opts.checkTimeoutMs, CHECK_TIMEOUT_MS) || CHECK_TIMEOUT_MS, 3 * Math.max(checkEvery, 60_000));
+    if (checkEvery > 0) {
+      r.timer = setInterval(() => void pass(), checkEvery);
+      (r.timer as any).unref?.();
+    }
+  }
+
+  /** Undoes launch() when a start fails after it. */
+  function drop(): void {
+    if (run?.timer) clearInterval(run.timer);
+    run = null;
+  }
+
   return {
     /**
      * Starts the strict recorder, the step writer, the probes and the checker. Never throws, except with
      * `strict: true` and an invalid manifest. On a bad option it starts nothing and returns false. Calling it
-     * again while started does nothing and returns true.
+     * again while started does nothing and returns true; while this instance watches, it returns false.
      */
     start(o: FlightOptions = {}): boolean {
-      if (rec) return true;
+      if (run) return !!rec;
       const opts: FlightOptions = o && typeof o === 'object' ? o : {};
-      let manifest: ManifestResult | null = null;
-      try {
-        manifest = loadManifest(opts.manifest);
-      } catch {
-        manifest = { ok: false, problems: [{ path: '(root)', message: 'could not be read' }] };
-      }
-      if (opts.strict === true && manifest && !manifest.ok) {
-        throw new Error(`reins flight: the manifest is invalid: ${manifest.problems.map((p) => `${p.path} ${p.message}`).join('; ')}`);
-      }
+      const manifest = manifestOf(opts);
       let r: StrictRecorder | null = null;
+      let writer: StepWriter | null = null;
       try {
         if (opts.store !== undefined && !isStore(opts.store)) return false;
         if (opts.instance !== undefined && !(typeof opts.instance === 'string' && INSTANCE.test(opts.instance))) return false;
@@ -410,7 +561,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
         r = createStrictRecorder(opts, [bs.slowRouteMs, bs.errorFactor * bs.slowRouteMs]);
         r.start();
         const rr = r;
-        const writer = createStepWriter({
+        const w = createStepWriter({
           store,
           instance,
           bufferSize: opts.stepBuffer,
@@ -422,53 +573,62 @@ export function createFlight(env: Record<string, string | undefined> = process.e
             return d.production && d.devModuleLoaded;
           },
         });
-        writer.start();
+        writer = w;
+        w.start();
         const m = manifest?.ok ? manifest.manifest : undefined;
-        const widest = Math.max(DEFAULT_WINDOW_MS, ...(m?.processes || []).flatMap((p) => p.promises.map((x) => x.windowMs)));
-        const keep: Retention = { maxAgeMs: Math.max(RETENTION_DEFAULTS.maxAgeMs, widest + 86_400_000), ...(opts.retention && typeof opts.retention === 'object' ? opts.retention : {}) };
-        const service = serviceOf(opts.service, manifest);
-        const notifier = createNotifier(opts.sinks, opts.notify && typeof opts.notify === 'object' ? opts.notify : {});
-        run = {
-          store,
-          writer,
-          manifest,
-          owner: `${instance}-${randomBytes(4).toString('hex')}`,
-          retention: keep,
-          timer: null,
-          lastCheck: null,
-          lastPrune: 0,
-          passing: null,
-          token: null,
-          hung: null,
-          notifier,
-          service,
-          shared: [],
-          outage: null,
-          own: undefined,
-          written: new Map(),
-        };
-        probes.start({ store, instance, declared: m?.probes || [], timeoutMs: nonNeg(opts.probeTimeoutMs, PROBE_TIMEOUT_MS) || PROBE_TIMEOUT_MS, onError: () => writer.storeError() });
-        checkEvery = nonNeg(opts.checkEveryMs, 60_000);
-        checkTimeout = Math.min(nonNeg(opts.checkTimeoutMs, CHECK_TIMEOUT_MS) || CHECK_TIMEOUT_MS, 3 * Math.max(checkEvery, 60_000));
-        if (checkEvery > 0) {
-          run.timer = setInterval(() => void pass(), checkEvery);
-          (run.timer as any).unref?.();
-        }
+        launch(opts, manifest, store, instance, w, null);
+        probes.start({ store, instance, declared: m?.probes || [], timeoutMs: nonNeg(opts.probeTimeoutMs, PROBE_TIMEOUT_MS) || PROBE_TIMEOUT_MS, onError: () => w.storeError() });
         rec = r;
         return true;
       } catch {
         try {
           r?.stop();
         } catch {}
-        run?.writer.stop();
+        drop();
+        writer?.stop();
         probes.stop();
-        run = null;
         return false;
       }
     },
     /**
+     * The watcher (design C5, sections 6 and 8; `npx reins flight watch`): runs the same checker as a server, on the
+     * store of the same options, beside the server instead of in it, and delivers to their sinks. It records no
+     * steps or requests, runs no probes and opens no port. Each period it also polls `healthUrl`, when given, and
+     * keeps a basic finding open while the server does not answer it. It is the checker while it holds the store
+     * lock, and the servers' checkers stand down; once stopped it gives the lock back, and a server checker takes
+     * over at its next pass (after a crash, or a store that does not take the lock back within 5 s of stop(), within
+     * the lease: three periods, at least three minutes). Runs its
+     * first pass at once. `cwd` is where a manifest path, or `reins.flight.json`, is read from. Never throws, except
+     * with `strict: true` and an invalid manifest. Returns false, starting nothing, without a store, on a bad
+     * option or while this instance is started as a server; true while it watches.
+     */
+    watch(o: FlightOptions = {}, cwd?: string): boolean {
+      if (run) return !rec;
+      const opts: FlightOptions = o && typeof o === 'object' ? o : {};
+      const manifest = manifestOf(opts, cwd);
+      // An option that cannot be read (a getter that throws) is a bad option: what it threw is not passed on.
+      try {
+        const store = opts.store;
+        if (!isStore(store)) return false;
+        const instance = opts.instance;
+        if (instance !== undefined && !(typeof instance === 'string' && INSTANCE.test(instance))) return false;
+        const url = healthUrlOf(opts.healthUrl);
+        if (url === false) return false;
+        // The poll's own time limit, read when it runs: at most half the pass's limit, so it ends inside it.
+        launch(opts, manifest, store, instance || `watch-${randomBytes(6).toString('hex')}`, null, url ? () => pollHealth(url, healthTimeoutOf(checkTimeout)) : null);
+        void pass();
+        return true;
+      } catch {
+        drop();
+        return false;
+      }
+    },
+    /** Whether this instance is watching (`watch()`), not started as a server. */
+    isWatching: () => !!run && !rec,
+    /**
      * Stops recording, writing, checking and telling: no notification starts after this, also not for what a pass
-     * still on its way writes to the store. Queued steps are written in the background; `flush()` first to wait.
+     * still on its way writes to the store. Queued steps are written in the background, after the pass on its way,
+     * and then the lock is given back; `closed()` resolves when that is done.
      */
     stop(): void {
       try {
@@ -480,11 +640,35 @@ export function createFlight(env: Record<string, string | undefined> = process.e
       if (!r) return;
       try {
         if (r.timer) clearInterval(r.timer);
-        r.writer.stop();
-        probes.stop();
-        void r.writer.flush().then(() => r.store.unlock(r.owner)).catch(() => {});
+        if (r.writer) {
+          r.writer.stop();
+          probes.stop();
+        }
+        const w = r.writer;
+        let given = false;
+        // The pass on its way ends within its own time limit; the store then has STOP_STORE_MS to take the queued
+        // steps and the lock back, so a store that hangs never holds stop() open (the lock's lease runs out instead).
+        const giveBack = async () => {
+          await w?.flush();
+          await r.store.unlock(r.owner);
+          given = true;
+        };
+        closing = Promise.resolve(r.passing)
+          .catch(() => null)
+          .then(() => within(giveBack(), STOP_STORE_MS))
+          .catch(() => {})
+          .then(() => r.notifier.idle())
+          .catch(() => {})
+          .then(() => given);
       } catch {}
     },
+    /**
+     * Resolves when the last `stop()` has let the pass on its way end, written the queued steps, given the store lock
+     * back and delivered (or failed) what was already being told: true when the store took the steps and the lock
+     * back, false when it refused or did not answer within 5 s (then the lock's lease runs out, and another
+     * checker takes over after it). Never rejects.
+     */
+    closed: (): Promise<boolean> => closing,
     isStarted: () => !!rec,
     /**
      * Records that run `key` of `process` reached `step` (design C7). Returns at once with whether it was queued;
@@ -492,7 +676,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
      */
     step: (process: string, key: string | number, step: string): boolean => {
       try {
-        return run ? run.writer.step(process, key, step) : false;
+        return run?.writer ? run.writer.step(process, key, step) : false;
       } catch {
         return false;
       }
@@ -504,7 +688,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     probe: (id: string, fn: () => unknown): boolean => probes.register(id, fn),
     /** Writes queued steps and this instance's minute now. Never rejects. */
     flush: async (): Promise<void> => {
-      await run?.writer.flush();
+      await run?.writer?.flush();
     },
     /** Runs a checker pass now, if this server holds the store lock; null when it does not or flight is off. */
     checkNow: (): Promise<CheckResult | null> => pass(),
@@ -542,7 +726,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     /** Internal: the manifest as read at start (null when none), for the findings layer. */
     manifest: (): ManifestResult | null => run?.manifest || null,
     /** Step counts of this instance: queued, written, dropped, invalid, store errors. */
-    stepStats: () => run?.writer.stats() || null,
+    stepStats: () => run?.writer?.stats() || null,
     /** Express/Connect middleware. The same hook as `reinsNode.middleware()`; install one of them, once. */
     middleware: () => middleware(),
     /** Wraps a plain `(req, res)` handler. */
