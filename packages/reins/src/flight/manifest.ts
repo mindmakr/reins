@@ -2,8 +2,8 @@
 // duration parser and the validator. The validator never throws: every problem comes back as
 // data, with its path in the document, so an invalid manifest can never crash a server (C8).
 // This module imports only Node built-ins and the limits table.
-import { readFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { basename, join as pathJoin, resolve } from 'node:path';
 import { BASICS, type BasicName } from './limits.js';
 
 /** The manifest schema this release understands. A higher number is refused with "update reins". */
@@ -447,4 +447,23 @@ export function readManifest(file: string): ManifestResult {
     return { ok: false, problems: [{ path: ROOT, message: `${basename(String(file))}: ${why}` }] };
   }
   return parseManifest(text);
+}
+
+/**
+ * Reads a manifest option: an object is validated, a string is a file (relative to `cwd`); none means the default
+ * file in `cwd`, if any, and null without one. What `flight.start()` and `reins flight report --config` both use.
+ */
+export function loadManifest(m: unknown, cwd: string = process.cwd()): ManifestResult | null {
+  if (m === undefined || m === null) {
+    const file = pathJoin(cwd, MANIFEST_FILE);
+    return existsSync(file) ? readManifest(file) : null;
+  }
+  return typeof m === 'string' ? readManifest(resolve(cwd, m)) : validateManifest(m);
+}
+
+const SERVICE = /^[\x20-\x7e]{1,64}$/;
+
+/** The service name: the `service` option when it is 1 to 64 printable ASCII characters, else the manifest's, else `server`. */
+export function serviceOf(option: unknown, manifest: ManifestResult | null): string {
+  return typeof option === 'string' && SERVICE.test(option) ? option : manifest?.ok ? manifest.manifest.service : 'server';
 }

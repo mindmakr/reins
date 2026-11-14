@@ -1,14 +1,19 @@
-// `reins flight <command>`. This version has `check`; `report` and `watch` come later.
+// `reins flight <command>`. This version has `check` and `report`; `watch` comes later.
 import { existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { MANIFEST_FILE, readManifest } from './manifest.js';
+import { flightReportMain } from './report-cli.js';
 
 export const FLIGHT_USAGE = `usage:
   reins flight check [file]
+  reins flight report --config <module> | <report.json> | --compare <before.json> <after.json> [--json]
 
 Checks a flight manifest (default: ${MANIFEST_FILE} in the current folder) and lists every
 problem with its path in the file. Needs no running server. Exits 0 when the manifest is valid,
-1 when it has problems, 2 on bad usage or a missing file.`;
+1 when it has problems, 2 on bad usage or a missing file.
+
+Prints the flight report from the app's config module or a saved report, or compares two saved
+reports (reins flight report --help).`;
 
 type Print = (s: string) => void;
 const stdout: Print = (s) => process.stdout.write(s + '\n');
@@ -50,10 +55,11 @@ export function flightCheckMain(argv: string[], cwd = process.cwd(), print: Prin
   return 0;
 }
 
-/** Runs `reins flight <command>`. Returns the exit code. */
-export function flightMain(argv: string[], cwd = process.cwd(), print: Print = stdout, err: Print = stderr): number {
+/** Runs `reins flight <command>`. Returns the exit code; `report` resolves to it. */
+export function flightMain(argv: string[], cwd = process.cwd(), print: Print = stdout, err: Print = stderr): number | Promise<number> {
   const [cmd, ...rest] = argv;
   if (cmd === 'check') return flightCheckMain(rest, cwd, print, err);
+  if (cmd === 'report') return flightReportMain(rest, cwd, print, err);
   if (cmd === undefined || cmd === '--help' || cmd === '-h' || cmd === 'help') {
     err(FLIGHT_USAGE);
     return cmd === undefined ? 2 : 0;

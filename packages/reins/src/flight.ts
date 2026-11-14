@@ -4,16 +4,15 @@
 // is the opt-in. It records through the strict recorder shared with @mindmakr/reins/node (design C13, C16).
 // Imports: Node built-ins and reins' shared modules only. Never import ./node.js, ./index.js or ./bridge here.
 import { randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { check, type CheckResult, endsOf, notCheckedResult } from './flight/checker.js';
-import { type Change, evaluate, type FindingsMemory, type FlightFinding, fromRecords, memoryFrom, memoryRecord, sortFindings, toRecord } from './flight/findings.js';
+import { type Change, evaluate, type FindingsMemory, type FlightFinding, fromRecords, memoryFrom, memoryRecord, sortFindings, STORE_KEYS, toRecord } from './flight/findings.js';
 import { createNotifier, type FlightSink, type Notification, type Notifier, type NotifyOptions, type NotifyState, type SummaryFigures } from './flight/sinks.js';
-import { DEFAULT_WINDOW_MS, MANIFEST_FILE, type ManifestResult, readManifest, validateManifest } from './flight/manifest.js';
+import { DEFAULT_WINDOW_MS, loadManifest, type ManifestResult, serviceOf } from './flight/manifest.js';
 import { createProbes, PROBE_TIMEOUT_MS } from './flight/probes.js';
 import { createStepWriter, type StepWriter } from './flight/steps.js';
 import { type FindingRecord, type FlightStore, type InstanceMinute, isStore, memoryStore, type Retention, RETENTION_DEFAULTS } from './flight/store.js';
 import { basicsOf } from './flight/limits.js';
+import { collectReport, type FlightReport } from './flight/report.js';
 import {
   createStrictRecorder,
   type DevInstruments,
@@ -82,23 +81,16 @@ export { MAX_LOCK_MS, MEMORY_MAX_STEPS, memoryStore, RETENTION_DEFAULTS } from '
 export { fileStore } from './flight/file-store.js';
 export { PG_TABLES, pgStore } from './flight/pg-store.js';
 export { check, endsOf } from './flight/checker.js';
+export type { BasicCheck, BasicsReport, DevReport, FigureRow, FlightReport, ProbeReport, ProcessReport, PromiseReport, StepTiming } from './flight/report.js';
+export { REPORT_FORMAT, REPORT_LEAD, REPORT_VERSION } from './flight/report.js';
+export type { FlightCompare } from './flight/render.js';
+export { compareFlightReports, findingMarkdown, parseFlightReport, renderFlightHtml, renderFlightMarkdown } from './flight/render.js';
 
 const INSTANCE = /^[A-Za-z0-9._-]{1,64}$/;
 /** How often the lock holder prunes the store. */
 const PRUNE_EVERY_MS = 3_600_000;
 /** How long a checker pass may take before it ends as store-unreachable (timeout). */
 const CHECK_TIMEOUT_MS = 30_000;
-
-/** Reads the manifest option: an object is validated, a string is a file; none means the default file, if any. */
-function loadManifest(m: unknown): ManifestResult | null {
-  if (m === undefined || m === null) {
-    const file = join(process.cwd(), MANIFEST_FILE);
-    return existsSync(file) ? readManifest(file) : null;
-  }
-  return typeof m === 'string' ? readManifest(m) : validateManifest(m);
-}
-
-const SERVICE = /^[\x20-\x7e]{1,64}$/;
 
 /** The last stamp given in this process: module-wide, so two flights in one process never give the same stamp. */
 let lastStamp = 0;
@@ -113,12 +105,6 @@ interface Written {
   at: number;
   finding: FlightFinding;
 }
-
-/**
- * The findings about this server's own way to the store. They live in this server only (B13): never written to the
- * store, never judged by another server, and told through this server's own counter.
- */
-const STORE_KEYS = new Set(['blind:store-unreachable', 'blind:lock-unavailable']);
 
 /** The store-unreachable or lock-unavailable fact of a result, if any: this server could not reach the store. */
 const storeFact = (c: CheckResult) => c.blind.find((f) => f.kind === 'store-unreachable' || f.kind === 'lock-unavailable');
@@ -440,7 +426,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
         const m = manifest?.ok ? manifest.manifest : undefined;
         const widest = Math.max(DEFAULT_WINDOW_MS, ...(m?.processes || []).flatMap((p) => p.promises.map((x) => x.windowMs)));
         const keep: Retention = { maxAgeMs: Math.max(RETENTION_DEFAULTS.maxAgeMs, widest + 86_400_000), ...(opts.retention && typeof opts.retention === 'object' ? opts.retention : {}) };
-        const service = typeof opts.service === 'string' && SERVICE.test(opts.service) ? opts.service : m?.service || 'server';
+        const service = serviceOf(opts.service, manifest);
         const notifier = createNotifier(opts.sinks, opts.notify && typeof opts.notify === 'object' ? opts.notify : {});
         run = {
           store,
@@ -526,6 +512,27 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     lastCheck: (): CheckResult | null => run?.lastCheck || null,
     /** The findings as of the last pass this server ran, open and resolved, with its own outage finding (B13), in report order (design section 5). */
     findings: (): FlightFinding[] => (run ? sortFindings([...run.shared, ...(run.outage ? [run.outage] : [])]).map((f) => ({ ...f })) : []),
+    /**
+     * The report (design section 6): the service, the time window (default the last 24 hours), the open findings in
+     * report order with the process keys behind them, the findings resolved in the window, each process with its
+     * counts and step timings, each promise and probe with its state, the basics, whether development instruments
+     * are off, what was checked and found fine, and what was not checked. Reads the store; writes nothing and tells
+     * no sink. Never rejects; null when flight is off. Render it with `renderFlightMarkdown` or `renderFlightHtml`.
+     */
+    report: async (o: { windowMs?: number } = {}): Promise<FlightReport | null> => {
+      const r = run;
+      if (!r) return null;
+      return collectReport({
+        store: r.store,
+        manifest: r.manifest,
+        service: r.service,
+        windowMs: o && typeof o === 'object' ? o.windowMs : undefined,
+        held: r.shared,
+        own: r.outage ? [r.outage] : [],
+        dev: devInstruments(env),
+        node: process.versions.node,
+      });
+    },
     /** Resolves when every notification started so far has been delivered or has failed. */
     sinksIdle: async (): Promise<void> => {
       await run?.notifier.idle();

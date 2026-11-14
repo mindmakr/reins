@@ -120,16 +120,16 @@ export function duration(ms: number): string {
   if (ms < 48 * HOUR) return `${Math.round((ms / HOUR) * 10) / 10} h`;
   return `${Math.round(ms / (24 * HOUR))} days`;
 }
-const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
+export const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
 /** `1 step`, `2 steps`: a count and its noun. */
 export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-const utc = (t: number) => new Date(t).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+export const utc = (t: number) => new Date(t).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
 /** A name from a record, made safe for a line of text and a key: no control characters, at most 120 characters. */
-const nm = (s: unknown) => storableText(String(s)).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120);
+export const nm = (s: unknown) => storableText(String(s)).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120);
 
 // ---- merging figures across instances and minutes ---------------------------------------------------------
 
-interface Merged {
+export interface Merged {
   count: number;
   errors: number;
   p95Ms: number;
@@ -205,10 +205,10 @@ function overCounts(m: Merged, limits: number[]): { total: number; over: Array<{
   return { total, over };
 }
 
-const live = (m: InstanceMinute) => m.instance !== PRUNE_INSTANCE;
+export const live = (m: InstanceMinute) => m.instance !== PRUNE_INSTANCE;
 
 /** Requests per `METHOD route`, and upstream calls per host, added over the minutes in [from, to). */
-function figuresIn(minutes: InstanceMinute[], from: number, to: number) {
+export function figuresIn(minutes: InstanceMinute[], from: number, to: number) {
   const routes = new Map<string, Merged>();
   const hosts = new Map<string, Merged>();
   const all = emptyMerged();
@@ -231,7 +231,7 @@ function figuresIn(minutes: InstanceMinute[], from: number, to: number) {
 
 // ---- the rules -------------------------------------------------------------------------------------------
 
-function blindObservation(f: BlindFact, b: Basics): Observation | undefined {
+export function blindObservation(f: BlindFact, b: Basics): Observation | undefined {
   switch (f.kind) {
     case 'manifest-invalid': {
       const first = f.problems[0];
@@ -620,6 +620,12 @@ function codeRules(minutes: InstanceMinute[], now: number, b: Basics, memory: Fi
 // ---- merging with the findings kept ------------------------------------------------------------------------
 
 const levelRank = (l: string) => (l === 'error' ? 0 : 1);
+
+/**
+ * The findings about one server's own way to the store. They live in that server only (B13): never written to the
+ * store, never judged by another server.
+ */
+export const STORE_KEYS: ReadonlySet<string> = new Set(['blind:store-unreachable', 'blind:lock-unavailable']);
 
 /** Blind keys every pass judges: the store, the lock and the manifest. */
 const STORE_BLIND = ['blind:store-unreachable', 'blind:lock-unavailable', 'blind:manifest-invalid'];
