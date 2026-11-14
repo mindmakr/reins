@@ -1,6 +1,7 @@
 import { relative } from 'node:path';
 import { findings, mergeServers, renderMarkdown, withTimeline } from '@mindmakr/reins/report';
 import type { Audit } from './audit.js';
+import { flightTool } from './flight.js';
 import type { Client, Hub } from './hub.js';
 import { gatherSession, serverReports, writeSession } from './session.js';
 import { snap } from './snap.js';
@@ -84,6 +85,17 @@ export const TOOLS: Tool[] = [
       save: { type: 'boolean', description: 'Write the files (default true)' },
     }),
   },
+  {
+    name: 'reins_flight',
+    description:
+      'Read only, needs no paired app: the flight report (findings, processes, promises, basics) from a saved report file (the JSON of flight.report() or npx reins flight report --json) or from the file store under the project (default .reins/flight, with reins.flight.json as the manifest). Loads no app code and never reaches a Postgres store; paths outside the project are refused. Returns the Markdown and the report data; process keys are left out unless keys is true.',
+    inputSchema: obj({
+      file: { type: 'string', description: 'A saved report file, relative to the project' },
+      store: { type: 'string', description: 'The file store folder, relative to the project (default .reins/flight)' },
+      manifest: { type: 'string', description: 'The manifest for a store, relative to the project (default reins.flight.json)' },
+      keys: { type: 'boolean', description: 'Include process keys (such as payout ids) in the data (default false)' },
+    }),
+  },
 ];
 
 const METHODS: Record<string, string> = {
@@ -150,7 +162,7 @@ export async function callTool(ctx: ToolContext, name: string, args: Record<stri
   const entry = {
     source: 'agent' as const,
     event: name,
-    name: args.name ?? args.id ?? args.panel ?? args.selector ?? args.title ?? args.route,
+    name: args.name ?? args.id ?? args.panel ?? args.selector ?? args.title ?? args.route ?? args.file ?? args.store,
     args: name === 'reins_run_action' ? args.input : undefined,
   };
   try {
@@ -170,6 +182,8 @@ export async function callTool(ctx: ToolContext, name: string, args: Record<stri
       result = await perfJoined(ctx.hub);
     } else if (name === 'reins_server') {
       result = await serverTool(ctx.hub, args);
+    } else if (name === 'reins_flight') {
+      result = await flightTool(ctx.dir, args);
     } else if (name === 'reins_report') {
       const session = await gatherSession(ctx, typeof args.title === 'string' ? args.title : undefined);
       const files = args.save === false ? null : writeSession(ctx.dir, session);
