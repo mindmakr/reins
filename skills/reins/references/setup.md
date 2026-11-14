@@ -205,3 +205,25 @@ Update the `"build"` script in `package.json` so every production build checks t
 - **Expo**: `"export:verify": "npx expo export && npx reins verify dist"`
 
 Run the production build and `npx reins verify <build-dir>` (or `npx reins-verify-bundle <build-dir>`) to confirm the check exits `0` (`reins-verify-bundle: clean`), and run the project's test suite.
+
+## Step 8: Trim the agent prompt prefix for this project (optional, ask first)
+
+Every agent turn re-sends a fixed prefix: tool definitions, the name and description of every enabled skill, agent types, MCP tool names and server instructions, plus project instructions and memory. One measured run put it near 72k tokens, about 15% of the run's cost, mostly plugins and skills the project never uses. Offer a per-project trim after the wiring works. Do it only for the app's project, never for the user level.
+
+**If the coordinator plugin ships the script, use it.** Find the plugin folder: `installPath` of the first `coordinator@coordinator` entry under `plugins` in `~/.claude/plugins/installed_plugins.json`. If `<installPath>/skills/coordinator/scripts/prefix.mjs` exists (older Coordinator versions do not have it), run it with `node`: `prefix.mjs report --project <dir>`, then `prefix.mjs draft --project <dir> --keep reins,<named>`, then, after the person approves the draft, `prefix.mjs write --project <dir> --keep reins,<named> --confirm`. Put `reins` and every plugin and skill the person named in `--keep`, on both `draft` and `write`. The script does the same measure, draft and write as the steps below: it trims user skills only (not plugin skills, which go with their plugin) and adds the exclude line itself. Compare its draft with step 2 before the person approves. If the plugin or the script is missing, do the manual steps below.
+
+1. **Measure.** List what loads here and how big it is:
+   - Enabled plugins: `claude plugin list`, or the `enabledPlugins` keys in `~/.claude/settings.json`, `.claude/settings.json` and `.claude/settings.local.json`.
+   - User skills: the folders under `~/.claude/skills`. Many are links (symlinks or junctions). Follow them (`statSync`, not `Dirent.isDirectory()`), skip names that start with `.` and the `synced` folder.
+   - MCP servers: the project `.mcp.json`, and the user config (`mcpServers` in `~/.claude.json`, and `projects["<project dir>"].mcpServers` in the same file), or run `claude mcp list`. Names only: never print their `env` or `headers`.
+   - Report the counts of plugins, skills and MCP servers, and the description characters of the skills. For the real number, ask the person to run `/context` and give the prefix tokens (the system prompt, tools, skills and MCP rows). If they cannot, say the tokens were not measured.
+2. **Decide keep and off.** Keep: **reins** (this plugin), every server in the project's own `.mcp.json`, every plugin named in the project's `.claude/settings.json`, and anything the person names (ask which plugins and skills they use, and repeat their list back in the draft). Propose off the rest that the project does not use. Say why for each group, in a line.
+3. **Draft, show, then write.** Draft `.claude/settings.local.json` in the project. Merge it into the file if one exists, and never drop a key that is there:
+   - `enabledPlugins`: `{ "<plugin>@<marketplace>": false }`
+   - `skillOverrides`: `{ "<skill>": "off" }` for a user or project skill, keyed by its bare name as the skill list shows it. `"name-only"` keeps the name and drops the description, a lighter cut for a skill the person might still call. Claude Code ignores `skillOverrides` for plugin skills, so a plugin's skills go only by turning the whole plugin off in `enabledPlugins`.
+   - Only if the person agrees: `syncClaudeAiSkills: false`, `syncClaudeAiPlugins: false`, `disableClaudeAiConnectors: true`.
+
+   Show the draft, and write it only after the person approves. Never turn off reins, a project `.mcp.json` server, or a plugin or skill the person names, and never edit the user-level `~/.claude/settings.json`.
+4. **Keep it out of git.** Append `.claude/settings.local.json` to `.git/info/exclude` (or to `.gitignore` if the person prefers), unless it is already there.
+5. **Tell the person.** Plugin changes load only in a new Claude process: `/clear` reloads skill overrides but keeps the old plugins. To undo, delete the keys, or delete `.claude/settings.local.json`.
+6. **Check after.** In the new process the skill list is short. Record the counts (or the `/context` figure) before and after in the run's notes.

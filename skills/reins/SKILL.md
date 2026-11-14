@@ -15,7 +15,7 @@ Call `/reins:<command>` (Claude Code plugin) or `/reins <command>` (skill). Read
 
 | Command | Use it to | Playbook |
 |---|---|---|
-| `setup` | Inspect a repo and wire `@mindmakr/reins` (frontend, optional `@mindmakr/reins/node` backend, optional `@mindmakr/reins/record`) | `references/setup.md` |
+| `setup` | Inspect a repo and wire `@mindmakr/reins` (frontend, optional `@mindmakr/reins/node` backend, optional `@mindmakr/reins/record`); Step 8 trims the agent prompt prefix | `references/setup.md` |
 | `drive` | Drive actions, check state/network/errors/perf/DOM/server, snap panels, and save session reports | `references/drive.md` |
 | `verify` | Run the production build and verify that `@mindmakr/reins` and `@mindmakr/reins/record` were swapped for 0-marker stubs | `references/setup.md` (Step 7) |
 | `companion` | Pair **reins** with **Coordinator** for Lucid Coding (builder + blind visual critic) | `references/companion.md` |
