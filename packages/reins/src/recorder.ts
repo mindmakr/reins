@@ -386,14 +386,16 @@ function subscribe() {
 
 /**
  * Facts about upstream calls this Node version cannot show, for every report to carry as "not checked".
- * Calls through node:http and node:https are seen through `http.client.*` diagnostics channels: requests and
- * responses from Node 20, failures from Node 22.14 and 23.2.
+ * fetch is seen through undici's channels on every supported Node. Calls through node:http and node:https are
+ * seen through `http.client.*` diagnostics channels: calls that got a response from Node 18.6, failures
+ * (`http.client.request.error`) from Node 20.17, 22.6 and 23.0. Measured on each release line: Node 18 and 21
+ * never publish failures.
  */
 export function notCheckedFacts(version: string = process.versions.node): string[] {
-  const [a, b] = version.split('.').map(Number);
-  if (a < 20) return [`Upstream calls through node:http and node:https are not checked on Node ${version}; Node 20 or newer records them.`];
-  if (a > 23 || (a === 23 && b >= 2) || (a === 22 && b >= 14)) return [];
-  return [`Failed upstream calls through node:http and node:https are not checked on Node ${version}; only calls that got a response are recorded. Node 22.14, 23.2 or newer records failures.`];
+  const [a, b = 0] = version.split('.').map(Number);
+  if (a < 18 || (a === 18 && b < 6)) return [`Upstream calls through node:http and node:https are not checked on Node ${version}; Node 18.6 or newer records them.`];
+  if (a >= 23 || (a === 22 && b >= 6) || (a === 20 && b >= 17)) return [];
+  return [`Failed upstream calls through node:http and node:https are not checked on Node ${version}; only calls that got a response are recorded. Node 20.17, 22.6, 23.0 or newer records failures.`];
 }
 
 // ---- runtime figures ----------------------------------------------------------------------------------

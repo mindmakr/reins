@@ -3,7 +3,8 @@
 // built entry after `npm run build`.
 import { execFileSync } from 'node:child_process';
 import { channel } from 'node:diagnostics_channel';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -211,16 +212,51 @@ describe('@mindmakr/reins/flight safety (design section 7)', () => {
     expectSafe(built, false);
   });
 
-  it.skipIf(!existsSync(built))('loads the built entry in a fresh process without loading development reins', () => {
+  /**
+   * Imports a module in a fresh process and says whether it added a global or left a resource (timer, handle,
+   * socket, file request) open. Node 18 and 20 close each module file the loader read after import() resolves
+   * (a `CloseReq` that any module, even an empty one, leaves for one turn), so both sides are measured once the
+   * loader's own I/O has settled.
+   */
+  function freshImport(file: string, report: string): Record<string, unknown> {
     const script = [
+      `const settle = () => new Promise((r) => setImmediate(r));`,
+      `await settle();`,
       `const before = Reflect.ownKeys(globalThis).length;`,
       `const res = process.getActiveResourcesInfo().join();`,
-      `const m = await import(${JSON.stringify(new URL(`file:///${built.replace(/\\/g, '/')}`).href)});`,
+      `const m = await import(${JSON.stringify(new URL(`file:///${file.replace(/\\/g, '/')}`).href)});`,
       `const after = Reflect.ownKeys(globalThis).length;`,
-      `console.log(JSON.stringify({ globals: after - before, resources: process.getActiveResourcesInfo().join() === res, dev: m.flight.devInstruments(), started: m.flight.isStarted() }));`,
+      `await settle();`,
+      `const left = process.getActiveResourcesInfo().join();`,
+      `console.log(JSON.stringify({ globals: after - before, resources: left === res, ${report} }));`,
     ].join('\n');
-    const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, NODE_ENV: 'production' } });
-    expect(JSON.parse(out)).toEqual({ globals: 0, resources: true, dev: { production: true, devModuleLoaded: false, devRecording: false }, started: false });
+    return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, NODE_ENV: 'production' } }));
+  }
+
+  it('has a fresh-process measure that sees a timer or a global left by an import', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'reins-flight-safety-'));
+    try {
+      const timer = join(dir, 'timer.mjs');
+      writeFileSync(timer, 'setTimeout(() => {}, 100);\nexport const x = 1;\n');
+      expect(freshImport(timer, 'x: m.x')).toEqual({ globals: 0, resources: false, x: 1 });
+      const global = join(dir, 'global.mjs');
+      writeFileSync(global, 'globalThis.__reinsSafetyProbe = 1;\nexport const x = 1;\n');
+      expect(freshImport(global, 'x: m.x')).toEqual({ globals: 1, resources: true, x: 1 });
+      const empty = join(dir, 'empty.mjs');
+      writeFileSync(empty, 'export const x = 1;\n');
+      expect(freshImport(empty, 'x: m.x')).toEqual({ globals: 0, resources: true, x: 1 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!existsSync(built))('loads the built entry in a fresh process without loading development reins', () => {
+    expect(freshImport(built, 'dev: m.flight.devInstruments(), started: m.flight.isStarted()')).toEqual({
+      globals: 0,
+      resources: true,
+      dev: { production: true, devModuleLoaded: false, devRecording: false },
+      started: false,
+    });
   });
 
   it('states when the development module is loaded in a production process, and when it records', async () => {

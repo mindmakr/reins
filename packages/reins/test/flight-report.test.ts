@@ -239,7 +239,10 @@ describe('B4: development instruments and what this Node version cannot record',
 
   it('carries a not-checked line when node:http calls cannot be recorded on this Node version', () => {
     const now = 100 * H;
-    expect(base(now, { node: '18.20.0' }).notChecked).toContain('Upstream calls through node:http and node:https are not checked on Node 18.20.0; Node 20 or newer records them.');
+    expect(base(now, { node: '18.5.0' }).notChecked).toContain('Upstream calls through node:http and node:https are not checked on Node 18.5.0; Node 18.6 or newer records them.');
+    expect(base(now, { node: '18.20.0' }).notChecked).toContain(
+      'Failed upstream calls through node:http and node:https are not checked on Node 18.20.0; only calls that got a response are recorded. Node 20.17, 22.6, 23.0 or newer records failures.',
+    );
     expect(base(now, { node: '22.14.0' }).notChecked.some((l) => /node:http/.test(l))).toBe(false);
     // From the CLI, the instances' own versions, as their minutes report them.
     const m = im('a', now - MIN);
