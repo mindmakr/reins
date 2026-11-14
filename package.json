@@ -1,7 +1,7 @@
 {
   "name": "reins-monorepo",
   "private": true,
-  "description": "Give coding agents the reins: a tiny dev-only library to drive, inspect and debug your web and Expo apps",
+  "description": "Give coding agents the reins: development tools to drive, inspect and debug web and Expo apps, and a report-only flight entry for Node servers. Production builds contain no development reins; @mindmakr/reins/flight is the only part meant for production.",
   "license": "MIT",
   "author": "mindmakr",
   "type": "module",

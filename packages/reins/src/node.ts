@@ -29,7 +29,7 @@ import {
 import { routeStats } from './report.js';
 import type { Action, ActionInfo, ServerOutbound, ServerReport, ServerRequest, ServerSpan } from './types.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 /** The header the browser core adds to same-origin calls while paired. */
 export const TRACE_HEADER = 'x-reins-trace';
 

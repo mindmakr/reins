@@ -217,6 +217,7 @@ describe('validateManifest', () => {
   it('words messages naturally: "an" before a vowel, and undefined without an article', () => {
     expect(problems((m) => (promise(m, 3).after = 'requested'))).toEqual([{ path: 'processes[0].promises[3].after', message: 'unknown field "after" in an "ends" promise' }]);
     expect(problems((m) => (promise(m, 0).step = 'requested'))[0].message).toBe('unknown field "step" in a "within" promise');
+    expect(problems((m) => (promise(m, 1).within = '4h'))[0].message).toBe('unknown field "within" in a "once" promise');
     expect(validateManifest(undefined).problems[0].message).toBe('the manifest must be a JSON object, not undefined');
   });
 

@@ -1,7 +1,7 @@
 {
   "name": "@mindmakr/reins",
-  "version": "0.1.0",
-  "description": "Give coding agents the reins: a tiny dev-only library to drive, inspect and debug your web and Expo apps",
+  "version": "0.2.0",
+  "description": "Give coding agents the reins: development tools to drive, inspect and debug web and Expo apps, and a report-only flight entry for Node servers. Production builds contain no development reins; @mindmakr/reins/flight is the only part meant for production.",
   "license": "MIT",
   "author": "mindmakr",
   "homepage": "https://mindmakr.github.io/reins/",

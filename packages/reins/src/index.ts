@@ -21,7 +21,7 @@ export * from './types.js';
 export { devEnabled, redactDeep };
 
 export const DEV_MARKER = '__REINS_DEV_ONLY__';
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 const NAME = /^[\w][\w.-]{0,63}$/;
 const fail = (s: string): never => {

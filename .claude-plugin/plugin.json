@@ -1,7 +1,7 @@
 {
   "name": "reins",
-  "description": "Give coding agents the reins: a tiny dev-only library and agent skill to set up, drive, inspect and debug your web and Expo apps.",
-  "version": "0.1.0",
+  "description": "Give coding agents the reins: a library and agent skill to set up, drive, inspect and debug your web and Expo apps in development, and to add report-only flight checks to a Node server in production.",
+  "version": "0.2.0",
   "author": { "name": "Asif Raja, by mindmakr", "url": "https://github.com/mindmakr" },
   "homepage": "https://mindmakr.github.io/reins/",
   "repository": "https://github.com/mindmakr/reins",

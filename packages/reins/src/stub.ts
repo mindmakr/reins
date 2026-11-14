@@ -6,7 +6,7 @@ const noop = () => {};
 const off = () => noop;
 const refuse = () => Promise.reject(new Error('reins is not in this build'));
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 export const devEnabled = () => false;
 
 export function createReins(_g?: unknown) {
