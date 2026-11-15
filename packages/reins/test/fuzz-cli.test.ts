@@ -278,12 +278,19 @@ describe('reins fuzz (property-based UI invariant fuzzer)', () => {
     const saved = JSON.parse(readFileSync(out1.artifact, 'utf8'));
     expect(saved.seed).toBe(out1.seed);
     expect(saved.trace).toHaveLength(out1.failedStep);
+    expect(saved.trace[saved.failedStep - 1].failures).toEqual(saved.failures);
+    expect(saved.scenario.steps).toHaveLength(out1.failedStep);
+    for (let i = 0; i < out1.failedStep; i++) {
+      expect(typeof saved.scenario.steps[i].input).toBe('object');
+      expect(saved.scenario.steps[i].input).toEqual(saved.trace[i].input);
+      expect(out1.scenario.steps[i].input).toEqual(out1.trace[i].input);
+    }
 
     // Replay on a fresh paired app using the emitted --seed.
     const h2 = await setupFuzzHarness({ clipOnArabic: true });
     const c2 = capture();
     const code2 = await fuzzMain(
-      ['--steps', '40', '--seed', out1.seed, '--panel', 'checkout', '--port', String(h2.hub.port), '--dir', h2.dir],
+      ['--steps', '100', '--seed', out1.seed, '--panel', 'checkout', '--port', String(h2.hub.port), '--dir', h2.dir],
       h2.dir,
       c2.out,
       c2.err,
@@ -436,6 +443,23 @@ describe('reins fuzz (property-based UI invariant fuzzer)', () => {
       expect(fineMult).toBeGreaterThanOrEqual(0.0001);
       expect(fineMult).toBeLessThanOrEqual(0.0005);
       expect(Math.round(fineMult / 0.0001) * 0.0001).toBeCloseTo(fineMult, 8);
+
+      const exZeroMult = generateValueForSchema(
+        { type: 'number', exclusiveMaximum: 0, multipleOf: 0.1 },
+        edgeRng,
+      ) as number;
+      expect(exZeroMult).toBeLessThan(0);
+      expect(Math.round(exZeroMult / 0.1) * 0.1).toBeCloseTo(exZeroMult, 8);
+
+      const intHalfMult = generateValueForSchema({ type: 'integer', multipleOf: 0.5 }, edgeRng) as number;
+      expect(Number.isInteger(intHalfMult)).toBe(true);
+
+      const intSesquiMult = generateValueForSchema(
+        { type: 'integer', minimum: 1, maximum: 7, multipleOf: 1.5 },
+        edgeRng,
+      ) as number;
+      expect(Number.isInteger(intSesquiMult)).toBe(true);
+      expect([3, 6]).toContain(intSesquiMult);
     }
   });
 
@@ -604,6 +628,45 @@ describe('reins fuzz (property-based UI invariant fuzzer)', () => {
     const issues = cDom.json().failures.map((f: any) => f.issue);
     expect(issues).toContain('vertical-clip');
     expect(issues).toContain('zero-size');
+
+    // Non-fatal console.error is ignored (exit 0), whereas window 'error' fails with uncaught-error (exit 2).
+    const errDir = makeProjectDir();
+    const errHub = await Hub.start({ dir: errDir, port: 0, log: () => {}, audit: fileAudit(errDir, () => {}), handshakeMs: 1000 });
+    cleanup.push(() => errHub.close());
+    const errListeners = new Map<string, Array<(e: any) => void>>();
+    let triggerWindowCrash = false;
+    const errG: any = {
+      console: { info() {}, log() {}, warn() {}, groupCollapsed() {}, groupEnd() {}, error() {} },
+      addEventListener: (t: string, fn: (e: any) => void) => errListeners.set(t, [...(errListeners.get(t) ?? []), fn]),
+      removeEventListener: () => {},
+    };
+    const errApp = createReins(errG);
+    errApp.action({
+      name: 'emit-log-or-crash',
+      description: 'Logs console.error or fires window error',
+      run: () => {
+        if (triggerWindowCrash) {
+          for (const fn of errListeners.get('error') ?? []) fn({ error: new Error('uncaught boom') });
+        } else {
+          errG.console.error('non-fatal console warning');
+        }
+        return { ok: true };
+      },
+    });
+    await errApp.connect({ url: `ws://127.0.0.1:${errHub.port}`, token: errHub.token, WebSocket: WebSocket as any, reconnect: false, lazy: false });
+    cleanup.push(() => errApp.disconnect());
+
+    const cConsole = capture();
+    expect(await fuzzMain(['--steps', '3', '--seed', 'con', '--port', String(errHub.port), '--dir', errDir], errDir, cConsole.out, cConsole.err)).toBe(0);
+    expect(cConsole.json().failures).toEqual([]);
+
+    triggerWindowCrash = true;
+    const cUncaught = capture();
+    expect(await fuzzMain(['--steps', '3', '--seed', 'unc', '--port', String(errHub.port), '--dir', errDir], errDir, cUncaught.out, cUncaught.err)).toBe(2);
+    const outUnc = cUncaught.json();
+    expect(outUnc.failures.some((f: any) => f.type === 'uncaught-error')).toBe(true);
+    const savedUnc = JSON.parse(readFileSync(outUnc.artifact, 'utf8'));
+    expect(savedUnc.trace[savedUnc.failedStep - 1].failures).toEqual(savedUnc.failures);
   });
 
   const cliPath = fileURLToPath(new URL('../dist/cli.js', import.meta.url));

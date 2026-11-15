@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { redactDeep } from '@mindmakr/reins';
+import { outside } from './flight.js';
 import { writeJsonAtomic } from './map-cli.js';
 import { type BridgeClient, diffNewErrors, openBridgeClient, parseFlags, type Printer } from './oneshot-cli.js';
 import { reinsDir } from './token.js';
@@ -122,23 +123,45 @@ function decimalPlaces(step: number): number {
   return Math.min(12, (m?.[1]?.length ?? 0) + Number(m?.[2] ?? 0));
 }
 
+function gcd(a: number, b: number): number {
+  let x = Math.abs(Math.trunc(a));
+  let y = Math.abs(Math.trunc(b));
+  while (y !== 0) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x || 1;
+}
+
+function integerStride(step: number): number {
+  if (Number.isInteger(step)) return step;
+  const places = Math.min(6, decimalPlaces(step));
+  const scale = 10 ** places;
+  const scaled = Math.round(step * scale);
+  if (!scaled) return 1;
+  return Math.max(1, Math.round(scaled / gcd(scaled, scale)));
+}
+
 function generateNumberValue(schema: Record<string, unknown>, rng: () => number, isInt: boolean): number {
   const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
   const hasMin = finite(schema.minimum) || finite(schema.exclusiveMinimum);
   const hasMax = finite(schema.maximum) || finite(schema.exclusiveMaximum);
+  const minStrict = !finite(schema.minimum) && finite(schema.exclusiveMinimum) ? schema.exclusiveMinimum : undefined;
+  const maxStrict = !finite(schema.maximum) && finite(schema.exclusiveMaximum) ? schema.exclusiveMaximum : undefined;
 
   let lo: number;
   let hi: number;
   if (isInt) {
     const intLo = finite(schema.minimum)
       ? Math.ceil(schema.minimum)
-      : finite(schema.exclusiveMinimum)
-        ? Math.floor(schema.exclusiveMinimum) + 1
+      : minStrict !== undefined
+        ? Math.floor(minStrict) + 1
         : undefined;
     const intHi = finite(schema.maximum)
       ? Math.floor(schema.maximum)
-      : finite(schema.exclusiveMaximum)
-        ? Math.ceil(schema.exclusiveMaximum) - 1
+      : maxStrict !== undefined
+        ? Math.ceil(maxStrict) - 1
         : undefined;
     if (intLo !== undefined && intHi !== undefined) {
       lo = Math.min(intLo, intHi);
@@ -154,20 +177,21 @@ function generateNumberValue(schema: Record<string, unknown>, rng: () => number,
       hi = 100;
     }
   } else {
-    const rawMinBase = finite(schema.minimum) ? schema.minimum : finite(schema.exclusiveMinimum) ? schema.exclusiveMinimum : 0;
+    const rawMinBase = finite(schema.minimum) ? schema.minimum : minStrict ?? 0;
     const rawMaxBase = finite(schema.maximum)
       ? schema.maximum
-      : finite(schema.exclusiveMaximum)
-        ? schema.exclusiveMaximum
+      : maxStrict !== undefined
+        ? maxStrict
         : hasMin
           ? Math.max(rawMinBase + 100, 100)
           : 100;
-    const baseLo = hasMin ? rawMinBase : rawMaxBase < 0 ? rawMaxBase - 100 : 0;
+    const negMax = rawMaxBase < 0 || (rawMaxBase === 0 && maxStrict !== undefined);
+    const baseLo = hasMin ? rawMinBase : negMax ? rawMaxBase - 100 : 0;
     const baseHi = hasMax ? rawMaxBase : Math.max(baseLo + 100, 100);
     const rawSpan = Math.max(0, baseHi - baseLo);
     const eps = rawSpan > 0 ? Math.min(0.01, rawSpan * 0.1) : 1e-6;
-    const adjLo = finite(schema.exclusiveMinimum) && !finite(schema.minimum) ? baseLo + eps : baseLo;
-    const adjHi = finite(schema.exclusiveMaximum) && !finite(schema.maximum) ? baseHi - eps : baseHi;
+    const adjLo = minStrict !== undefined ? baseLo + eps : baseLo;
+    const adjHi = maxStrict !== undefined ? baseHi - eps : baseHi;
     lo = Math.min(adjLo, adjHi);
     hi = Math.max(adjLo, adjHi);
   }
@@ -175,9 +199,12 @@ function generateNumberValue(schema: Record<string, unknown>, rng: () => number,
   const span = hi - lo;
   let value = span > 0 ? lo + rng() * span : lo;
   if (finite(schema.multipleOf) && schema.multipleOf > 0) {
-    const step = schema.multipleOf;
-    const kMin = Math.ceil(lo / step - 1e-12);
-    const kMax = Math.floor(hi / step + 1e-12);
+    const rawStep = schema.multipleOf;
+    const step = isInt ? integerStride(rawStep) : rawStep;
+    let kMin = Math.ceil(lo / step - 1e-12);
+    let kMax = Math.floor(hi / step + 1e-12);
+    if (minStrict !== undefined && kMin * step <= minStrict + 1e-12) kMin++;
+    if (maxStrict !== undefined && kMax * step >= maxStrict - 1e-12) kMax--;
     if (kMin <= kMax) {
       const k = kMin + Math.floor(rng() * (kMax - kMin + 1));
       value = k * step;
@@ -185,15 +212,15 @@ function generateNumberValue(schema: Record<string, unknown>, rng: () => number,
       value = lo;
     }
     const decimals = decimalPlaces(step);
-    return decimals > 0 ? Number(value.toFixed(decimals)) : Math.round(value);
+    return isInt ? Math.round(value) : decimals > 0 ? Number(value.toFixed(decimals)) : Math.round(value);
   }
   if (isInt) {
     const rounded = Math.round(value);
     return Math.min(hi, Math.max(lo, rounded));
   }
   const rounded3 = Math.round(value * 1000) / 1000;
-  const okMin = finite(schema.exclusiveMinimum) ? rounded3 > schema.exclusiveMinimum : rounded3 >= lo;
-  const okMax = finite(schema.exclusiveMaximum) ? rounded3 < schema.exclusiveMaximum : rounded3 <= hi;
+  const okMin = minStrict !== undefined ? rounded3 > minStrict : rounded3 >= lo;
+  const okMax = maxStrict !== undefined ? rounded3 < maxStrict : rounded3 <= hi;
   if (okMin && okMax) return rounded3;
   return Number(value.toPrecision(12));
 }
@@ -370,11 +397,6 @@ function safeSeedSlug(seed: string): string {
   return seed.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 32) || 'seed';
 }
 
-function outside(base: string, target: string): boolean {
-  const rel = relative(base, target);
-  return rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
-}
-
 function assertExistingPathInsideRoot(rootReal: string, candidate: string): string {
   if (!existsSync(candidate)) {
     try {
@@ -397,6 +419,15 @@ function writeFuzzTraceArtifact(projectDir: string, seed: string, report: Record
   const rootReal = realpathSync.native(resolve(projectDir));
   const dotReinsReal = assertExistingPathInsideRoot(rootReal, join(rootReal, '.reins'));
   assertExistingPathInsideRoot(rootReal, join(dotReinsReal, 'sessions'));
+  const gitignorePath = join(dotReinsReal, '.gitignore');
+  assertExistingPathInsideRoot(rootReal, gitignorePath);
+  try {
+    if (lstatSync(gitignorePath).isSymbolicLink()) {
+      throw new Error('refusing to write through symlinked .reins/.gitignore');
+    }
+  } catch (e: any) {
+    if (e?.code !== 'ENOENT') throw e;
+  }
 
   const sessionsCandidate = join(reinsDir(rootReal), 'sessions');
   mkdirSync(sessionsCandidate, { recursive: true });
@@ -407,7 +438,7 @@ function writeFuzzTraceArtifact(projectDir: string, seed: string, report: Record
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const suffix = randomBytes(3).toString('hex');
   const filePath = join(sessionsReal, `fuzz-${safeSeedSlug(seed)}-${stamp}-${suffix}.json`);
-  writeJsonAtomic(filePath, JSON.stringify(redactDeep(report), null, 2) + '\n');
+  writeJsonAtomic(filePath, JSON.stringify(redactDeep(structuredClone(report)), null, 2) + '\n');
   return filePath;
 }
 
@@ -564,14 +595,14 @@ export async function fuzzMain(
       failedStep,
       skippedConsequential,
       panelsChecked: panelsToCheck,
-      failures: failingReasons,
+      failures: structuredClone(failingReasons),
       trace,
       scenario: {
         ...(panelFilter ? { panel: panelFilter } : {}),
         steps: trace.map((t) => ({
           target: t.target,
           action: t.action,
-          input: t.input,
+          input: structuredClone(t.input),
           ...(allowConsequential ? { confirm: true } : {}),
         })),
       },
@@ -580,12 +611,12 @@ export async function fuzzMain(
     if (failedStep !== null) {
       const artifactPath = writeFuzzTraceArtifact(common.dir, seed, baseReport);
       const out = { ...baseReport, artifact: artifactPath };
-      print(JSON.stringify(redactDeep(out), null, 2));
+      print(JSON.stringify(redactDeep(structuredClone(out)), null, 2));
       err(`reins fuzz: invariant failed at step ${failedStep} (${failingReasons.map((f) => f.type).join(', ')}); trace saved to ${artifactPath}`);
       return 2;
     }
 
-    print(JSON.stringify(redactDeep(baseReport), null, 2));
+    print(JSON.stringify(redactDeep(structuredClone(baseReport)), null, 2));
     return 0;
   } catch (e: any) {
     err(`reins fuzz: ${e?.message ? String(e.message) : String(e)}`);

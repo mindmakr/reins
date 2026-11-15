@@ -76,7 +76,7 @@ export function projectPath(root: string, p: unknown, what: string): string {
   return real;
 }
 
-function outside(base: string, target: string): boolean {
+export function outside(base: string, target: string): boolean {
   const rel = relative(base, target);
   return rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
 }
