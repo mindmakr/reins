@@ -159,6 +159,12 @@ describe('reins map (feature-map.json export)', () => {
         panels: ['checkout', 'summary'],
         routes: ['/health'],
         screens: ['/login'],
+        // Stale static entries for live actions must never overwrite live schemas or consequential flags.
+        actions: [
+          { name: 'wipe-cache', description: 'stale static copy', consequential: false },
+          { name: 'reseed-dev', target: 'server', server: 'billing-api', description: 'stale server copy', consequential: false },
+          { name: 'static-only', description: 'Offline route action', consequential: false },
+        ],
       }),
     );
 
@@ -169,6 +175,9 @@ describe('reins map (feature-map.json export)', () => {
     expect(merged.source).toBe('merged');
     expect(merged.panels).toEqual(['checkout', 'summary']);
     expect(merged.actions.map((a: any) => a.name)).toContain('submit-login');
+    expect(merged.actions.find((a: any) => a.name === 'wipe-cache')).toMatchObject({ consequential: true, target: 'app' });
+    expect(merged.actions.find((a: any) => a.name === 'reseed-dev')).toMatchObject({ consequential: true, target: 'server', server: 'billing-api' });
+    expect(merged.actions.find((a: any) => a.name === 'static-only')).toMatchObject({ description: 'Offline route action', target: 'app' });
     expect(merged.routes).toEqual([
       { method: 'GET', path: '/api/invoices', file: 'src/routes/invoices.ts', line: 12, id: 'route:GET /api/invoices a.ts' },
       { path: '/health' },
@@ -235,6 +244,56 @@ describe('reins map (feature-map.json export)', () => {
     const cNoToken = capture();
     expect(await mapMain(['--dir', dir], dir, cNoToken.out, cNoToken.err)).toBe(2);
     expect(cNoToken.stderr.join('\n')).toMatch(/missing bridge token/);
+
+    // Empty flag values, --host, missing static file, non-object static JSON, and forged tokens are rejected.
+    const cEmptyOut = capture();
+    expect(await mapMain(['--out', ''], dir, cEmptyOut.out, cEmptyOut.err)).toBe(2);
+    expect(cEmptyOut.stderr.join('\n')).toMatch(/--out needs a value/);
+
+    const cEmptyStatic = capture();
+    expect(await mapMain(['--static', '', '--offline'], dir, cEmptyStatic.out, cEmptyStatic.err)).toBe(2);
+    expect(cEmptyStatic.stderr.join('\n')).toMatch(/--static needs a value/);
+
+    const cHost = capture();
+    expect(await mapMain(['--host', '0.0.0.0'], dir, cHost.out, cHost.err)).toBe(2);
+    expect(cHost.stderr.join('\n')).toMatch(/unknown option --host/);
+
+    const cMissingStatic = capture();
+    expect(await mapMain(['--static', join(dir, 'nope.json'), '--offline'], dir, cMissingStatic.out, cMissingStatic.err)).toBe(2);
+    expect(cMissingStatic.stderr.join('\n')).toMatch(/cannot read static map/);
+
+    const arrStatic = join(dir, 'arr.json');
+    writeFileSync(arrStatic, '[]');
+    const cArrStatic = capture();
+    expect(await mapMain(['--static', arrStatic, '--offline'], dir, cArrStatic.out, cArrStatic.err)).toBe(2);
+    expect(cArrStatic.stderr.join('\n')).toMatch(/must be a JSON object/);
+
+    const { dir: liveDir, hub } = await setupBridgeWithAppAndServer();
+    writeFileSync(join(liveDir, '.reins', 'token'), 'forged-token\n');
+    const cBadToken = capture();
+    expect(await mapMain(['--port', String(hub.port), '--dir', liveDir], liveDir, cBadToken.out, cBadToken.err)).toBe(2);
+    expect(cBadToken.stderr.join('\n')).toMatch(/bad or missing token/);
+  });
+
+  it('handles relative cwd without doubling paths and falls back to server title when meta.name is empty', async () => {
+    const built = buildFeatureMap({
+      actions: [],
+      states: [],
+      panels: [],
+      servers: [{ client: 1, title: 'worker-proc', meta: { name: '' }, actions: [{ name: 'ping', consequential: false }] }],
+    });
+    expect(built.actions[0]).toMatchObject({ name: 'ping', target: 'server', server: 'worker-proc' });
+
+    const relParent = mkdtempSync(join(tmpdir(), 'reins-map-rel-'));
+    cleanup.push(() => rmSync(relParent, { recursive: true, force: true }));
+    writeFileSync(join(relParent, 'static.json'), JSON.stringify({ panels: ['main'] }));
+    const origCwd = process.cwd();
+    const child = mkdtempSync(join(process.cwd(), '.reins-rel-tmp-'));
+    cleanup.push(() => rmSync(child, { recursive: true, force: true }));
+    const relChild = child.slice(origCwd.length + 1);
+    const c = capture();
+    expect(await mapMain(['--static', join(relParent, 'static.json'), '--offline'], relChild, c.out, c.err)).toBe(0);
+    expect(existsSync(join(child, 'feature-map.json'))).toBe(true);
   });
 
   const cliPath = fileURLToPath(new URL('../dist/cli.js', import.meta.url));

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { redactDeep } from '@mindmakr/reins';
@@ -166,6 +167,9 @@ export function buildFeatureMap(live: unknown | null, staticInput: unknown | nul
     actionMap.set(`${a.target}:${a.server ?? ''}:${a.name}`, a);
   };
 
+  // Seed static actions first so live bridge contracts (schemas, consequential, descriptions) always win on collision.
+  for (const a of staticPart.actions) addAction(a);
+
   if (Array.isArray(liveObj.actions)) {
     for (const raw of liveObj.actions) addAction(normalizeAction(raw, 'app'));
   }
@@ -175,7 +179,7 @@ export function buildFeatureMap(live: unknown | null, staticInput: unknown | nul
     for (const srv of liveObj.servers) {
       if (!isObj(srv)) continue;
       const redactedMeta = srv.meta !== undefined ? redactDeep(srv.meta) : undefined;
-      const metaName = isObj(srv.meta) && typeof srv.meta.name === 'string' ? srv.meta.name : undefined;
+      const metaName = isObj(srv.meta) && typeof srv.meta.name === 'string' && srv.meta.name ? srv.meta.name : undefined;
       const srvName = metaName ?? (typeof srv.title === 'string' && srv.title ? srv.title : undefined);
       const srvActions: FeatureMapAction[] = [];
       if (Array.isArray(srv.actions)) {
@@ -195,8 +199,6 @@ export function buildFeatureMap(live: unknown | null, staticInput: unknown | nul
       });
     }
   }
-
-  for (const a of staticPart.actions) addAction(a);
 
   const states = [...new Set([...stringList(liveObj.states), ...staticPart.states])].sort();
   const panels = [...new Set([...stringList(liveObj.panels), ...staticPart.panels])].sort();
@@ -240,9 +242,9 @@ export function buildFeatureMap(live: unknown | null, staticInput: unknown | nul
 
 function writeJsonAtomic(filePath: string, content: string): void {
   mkdirSync(dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  const tmp = `${filePath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
   try {
-    writeFileSync(tmp, content, 'utf8');
+    writeFileSync(tmp, content, { encoding: 'utf8', flag: 'wx' });
     renameSync(tmp, filePath);
   } catch (err) {
     try {
@@ -312,7 +314,7 @@ export async function mapMain(
     const map = buildFeatureMap(live, staticData);
     const json = JSON.stringify(map, null, 2);
     const writeFile = !stdout || values['--out'] !== undefined;
-    const outPath = resolve(values['--out'] !== undefined ? cwd : common.dir, values['--out'] ?? join(common.dir, 'feature-map.json'));
+    const outPath = values['--out'] !== undefined ? resolve(cwd, values['--out']) : join(common.dir, 'feature-map.json');
 
     if (writeFile) {
       writeJsonAtomic(outPath, json + '\n');

@@ -188,7 +188,7 @@ export interface CommonCliFlags {
 
 function takeValue(args: string[], flag: string): string {
   const v = args.shift();
-  if (v === undefined || v.startsWith('--')) throw new Error(`${flag} needs a value`);
+  if (!v || v.startsWith('--')) throw new Error(`${flag} needs a value`);
   return v;
 }
 
@@ -202,7 +202,7 @@ export function parseFlags(argv: string[], cwd: string, valueFlags: Set<string>,
   const bools = new Set<string>();
   const positional: string[] = [];
   let port = DEFAULT_PORT;
-  let dir = cwd;
+  let dir = resolve(cwd);
   let timeoutMs = 15_000;
   let help = false;
 

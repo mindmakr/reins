@@ -211,7 +211,7 @@ While the dev app is running and paired with the bridge, export the canonical UI
 ```sh
 npx reins map
 # or merge static routes/screens from Coordinator's map snapshot:
-npx reins map --static .coordinator/runs/<run>/map/snap.json --out feature-map.json
+npx reins map --static .coordinator/runs/<run>/map/map.json --out feature-map.json
 ```
 
 `feature-map.json` contains no `__REINS_DEV_ONLY__` marker, so `reins verify` continues to exit `0`.
