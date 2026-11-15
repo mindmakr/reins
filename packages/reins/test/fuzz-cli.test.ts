@@ -121,9 +121,9 @@ async function setupFuzzHarness(opts: TestHarnessOptions = {}) {
       type: 'object',
       properties: {
         locale: { type: 'string', enum: ['en', 'fr', 'ar'] },
-        password: { type: 'string' },
+        password: { type: 'string', minLength: 4 },
       },
-      required: ['locale'],
+      required: ['locale', 'password'],
     },
     run: (input: any) => {
       stepCounter++;
@@ -145,8 +145,9 @@ async function setupFuzzHarness(opts: TestHarnessOptions = {}) {
         query: { type: 'string', minLength: 2, maxLength: 10 },
         limit: { type: 'integer', minimum: 1, maximum: 20 },
         strict: { type: 'boolean' },
+        token: { type: 'string', minLength: 4 },
       },
-      required: ['query', 'limit'],
+      required: ['query', 'limit', 'token'],
     },
     run: async (input: any) => {
       stepCounter++;
@@ -244,13 +245,15 @@ describe('reins fuzz (property-based UI invariant fuzzer)', () => {
     expect(invoked).toHaveLength(40);
     expect(invoked.some((i) => i.name === 'delete-account' || i.name === 'drop-fixtures')).toBe(false);
 
-    // Password keys generated from schemas are redacted in stdout trace.
-    const serialized = JSON.stringify(out.trace);
-    const hasPasswordKey = serialized.includes('"password"');
-    if (hasPasswordKey) {
-      for (const t of out.trace) {
-        if ('password' in t.input) expect(t.input.password).toBe('[redacted]');
-      }
+    // Every trace step carries a required sensitive key (`password` or `token`) and is unconditionally redacted.
+    expect(out.trace).toHaveLength(40);
+    for (let i = 0; i < out.trace.length; i++) {
+      const t = out.trace[i];
+      const rawInput = invoked[i].input as Record<string, unknown>;
+      const key = Object.hasOwn(t.input, 'password') ? 'password' : 'token';
+      expect(typeof rawInput[key]).toBe('string');
+      expect(rawInput[key]).not.toBe('[redacted]');
+      expect(t.input[key]).toBe('[redacted]');
     }
     expect(existsSync(join(dir, '.reins', 'sessions'))).toBe(false);
   });
@@ -259,7 +262,7 @@ describe('reins fuzz (property-based UI invariant fuzzer)', () => {
     const h1 = await setupFuzzHarness({ clipOnArabic: true });
     const c1 = capture();
 
-    const code1 = await fuzzMain(['--steps', '40', '--panel', 'checkout', '--port', String(h1.hub.port), '--dir', h1.dir], h1.dir, c1.out, c1.err);
+    const code1 = await fuzzMain(['--steps', '100', '--panel', 'checkout', '--port', String(h1.hub.port), '--dir', h1.dir], h1.dir, c1.out, c1.err);
     expect(code1).toBe(2);
 
     const out1 = c1.json();
@@ -409,6 +412,31 @@ describe('reins fuzz (property-based UI invariant fuzzer)', () => {
       leaf: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4/),
     });
     expect(generateValueForSchema({ anyOf: [{ type: 'null' }, { type: 'string', format: 'date' }] }, edgeRng)).toBe('2026-01-15');
+
+    for (let i = 0; i < 20; i++) {
+      const negInt = generateValueForSchema({ type: 'integer', maximum: -5 }, edgeRng) as number;
+      expect(Number.isInteger(negInt)).toBe(true);
+      expect(negInt).toBeLessThanOrEqual(-5);
+
+      const negNum = generateValueForSchema({ type: 'number', maximum: -1.5 }, edgeRng) as number;
+      expect(negNum).toBeLessThanOrEqual(-1.5);
+
+      const tightNum = generateValueForSchema({ type: 'number', minimum: 0.0001, maximum: 0.0002 }, edgeRng) as number;
+      expect(tightNum).toBeGreaterThanOrEqual(0.0001);
+      expect(tightNum).toBeLessThanOrEqual(0.0002);
+
+      const exNum = generateValueForSchema({ type: 'number', exclusiveMinimum: 0.001, exclusiveMaximum: 0.002 }, edgeRng) as number;
+      expect(exNum).toBeGreaterThan(0.001);
+      expect(exNum).toBeLessThan(0.002);
+
+      const fineMult = generateValueForSchema(
+        { type: 'number', minimum: 0.0001, maximum: 0.0005, multipleOf: 0.0001 },
+        edgeRng,
+      ) as number;
+      expect(fineMult).toBeGreaterThanOrEqual(0.0001);
+      expect(fineMult).toBeLessThanOrEqual(0.0005);
+      expect(Math.round(fineMult / 0.0001) * 0.0001).toBeCloseTo(fineMult, 8);
+    }
   });
 
   it('validates flags, handles safe server/empty actions, catches uncaught errors + DOM vertical-clip/zero-size, and skips fuzz artifacts in latestSession', async () => {
@@ -449,8 +477,15 @@ describe('reins fuzz (property-based UI invariant fuzzer)', () => {
     const savedRaw = readFileSync(outSec.artifact, 'utf8');
     expect(savedRaw).toContain('"schemaVersion": "1.0.0"');
     const savedJson = JSON.parse(savedRaw);
-    for (const st of savedJson.trace) {
-      if ('password' in st.input) expect(st.input.password).toBe('[redacted]');
+    expect(savedJson.trace.length).toBeGreaterThan(0);
+    for (let i = 0; i < savedJson.trace.length; i++) {
+      const st = savedJson.trace[i];
+      const rawInput = h.invoked[i].input as Record<string, unknown>;
+      const key = Object.hasOwn(st.input, 'password') ? 'password' : 'token';
+      expect(typeof rawInput[key]).toBe('string');
+      expect(rawInput[key]).not.toBe('[redacted]');
+      expect(st.input[key]).toBe('[redacted]');
+      expect(savedRaw).not.toContain(String(rawInput[key]));
     }
     // latestSession must skip fuzz-*.json so `reins report` keeps working.
     expect(latestSession(h.dir)).toBeUndefined();
@@ -463,7 +498,7 @@ describe('reins fuzz (property-based UI invariant fuzzer)', () => {
     expect(await fuzzMain(['--steps', '2', '--port', String(h.hub.port), '--dir', h.dir], h.dir, cBadTok.out, cBadTok.err)).toBe(2);
     expect(cBadTok.stderr.join('\n')).toMatch(/bad or missing token/);
 
-    // Symlink/junction escape on .reins/sessions is refused.
+    // Pre-mutation symlink containment: neither .reins/sessions nor .reins pointing outside projectDir mutates target.
     const symDir = makeProjectDir();
     const outsideDir = makeProjectDir();
     const symAudit = fileAudit(symDir, () => {});
@@ -491,6 +526,19 @@ describe('reins fuzz (property-based UI invariant fuzzer)', () => {
     const cSym = capture();
     expect(await fuzzMain(['--steps', '2', '--seed', 'sym', '--port', String(symHub.port), '--dir', symDir], symDir, cSym.out, cSym.err)).toBe(2);
     expect(cSym.stderr.join('\n')).toMatch(/outside project root/);
+    expect(readdirSync(outsideDir)).toEqual([]);
+
+    // Also block when .reins itself is a symlink/junction pointing outside projectDir before touching .gitignore.
+    const symParentDir = makeProjectDir();
+    const outsideDotReins = makeProjectDir();
+    writeFileSync(join(outsideDotReins, 'token'), `${symHub.token}\n`);
+    symlinkSync(outsideDotReins, join(symParentDir, '.reins'), process.platform === 'win32' ? 'junction' : 'dir');
+    const cSymRoot = capture();
+    expect(
+      await fuzzMain(['--steps', '2', '--seed', 'symroot', '--port', String(symHub.port), '--dir', symParentDir], symParentDir, cSymRoot.out, cSymRoot.err),
+    ).toBe(2);
+    expect(cSymRoot.stderr.join('\n')).toMatch(/outside project root/);
+    expect(readdirSync(outsideDotReins)).toEqual(['token']);
 
     // Safe non-consequential server actions, consequential-only app returning 0, vertical-clip & zero-size detection.
     const srvDir = makeProjectDir();

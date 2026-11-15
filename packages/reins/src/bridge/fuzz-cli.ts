@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, realpathSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { redactDeep } from '@mindmakr/reins';
 import { writeJsonAtomic } from './map-cli.js';
 import { type BridgeClient, diffNewErrors, openBridgeClient, parseFlags, type Printer } from './oneshot-cli.js';
@@ -117,20 +117,61 @@ function generateStringValue(schema: Record<string, unknown>, rng: () => number)
   return clampStringLength(randomAlphaNum(rng, len), minLen, maxLen, rng);
 }
 
+function decimalPlaces(step: number): number {
+  const m = String(step).match(/(?:\.(\d+))?(?:[eE]-(\d+))?$/);
+  return Math.min(12, (m?.[1]?.length ?? 0) + Number(m?.[2] ?? 0));
+}
+
 function generateNumberValue(schema: Record<string, unknown>, rng: () => number, isInt: boolean): number {
   const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
-  const rawMin = finite(schema.minimum)
-    ? schema.minimum
-    : finite(schema.exclusiveMinimum)
-      ? schema.exclusiveMinimum + (isInt ? 1 : 0.01)
-      : 0;
-  const rawMax = finite(schema.maximum)
-    ? schema.maximum
-    : finite(schema.exclusiveMaximum)
-      ? schema.exclusiveMaximum - (isInt ? 1 : 0.01)
-      : Math.max(rawMin + 100, 100);
-  const lo = Math.min(rawMin, rawMax);
-  const hi = Math.max(rawMin, rawMax);
+  const hasMin = finite(schema.minimum) || finite(schema.exclusiveMinimum);
+  const hasMax = finite(schema.maximum) || finite(schema.exclusiveMaximum);
+
+  let lo: number;
+  let hi: number;
+  if (isInt) {
+    const intLo = finite(schema.minimum)
+      ? Math.ceil(schema.minimum)
+      : finite(schema.exclusiveMinimum)
+        ? Math.floor(schema.exclusiveMinimum) + 1
+        : undefined;
+    const intHi = finite(schema.maximum)
+      ? Math.floor(schema.maximum)
+      : finite(schema.exclusiveMaximum)
+        ? Math.ceil(schema.exclusiveMaximum) - 1
+        : undefined;
+    if (intLo !== undefined && intHi !== undefined) {
+      lo = Math.min(intLo, intHi);
+      hi = Math.max(intLo, intHi);
+    } else if (intLo !== undefined) {
+      lo = intLo;
+      hi = Math.max(lo + 100, 100);
+    } else if (intHi !== undefined) {
+      hi = intHi;
+      lo = hi < 0 ? hi - 100 : 0;
+    } else {
+      lo = 0;
+      hi = 100;
+    }
+  } else {
+    const rawMinBase = finite(schema.minimum) ? schema.minimum : finite(schema.exclusiveMinimum) ? schema.exclusiveMinimum : 0;
+    const rawMaxBase = finite(schema.maximum)
+      ? schema.maximum
+      : finite(schema.exclusiveMaximum)
+        ? schema.exclusiveMaximum
+        : hasMin
+          ? Math.max(rawMinBase + 100, 100)
+          : 100;
+    const baseLo = hasMin ? rawMinBase : rawMaxBase < 0 ? rawMaxBase - 100 : 0;
+    const baseHi = hasMax ? rawMaxBase : Math.max(baseLo + 100, 100);
+    const rawSpan = Math.max(0, baseHi - baseLo);
+    const eps = rawSpan > 0 ? Math.min(0.01, rawSpan * 0.1) : 1e-6;
+    const adjLo = finite(schema.exclusiveMinimum) && !finite(schema.minimum) ? baseLo + eps : baseLo;
+    const adjHi = finite(schema.exclusiveMaximum) && !finite(schema.maximum) ? baseHi - eps : baseHi;
+    lo = Math.min(adjLo, adjHi);
+    hi = Math.max(adjLo, adjHi);
+  }
+
   const span = hi - lo;
   let value = span > 0 ? lo + rng() * span : lo;
   if (finite(schema.multipleOf) && schema.multipleOf > 0) {
@@ -143,11 +184,18 @@ function generateNumberValue(schema: Record<string, unknown>, rng: () => number,
     } else {
       value = lo;
     }
-    const stepStr = String(step);
-    const decimals = stepStr.includes('.') ? stepStr.split('.')[1].length : 0;
-    if (decimals > 0) value = Number(value.toFixed(decimals));
+    const decimals = decimalPlaces(step);
+    return decimals > 0 ? Number(value.toFixed(decimals)) : Math.round(value);
   }
-  return isInt ? Math.round(value) : Math.round(value * 1000) / 1000;
+  if (isInt) {
+    const rounded = Math.round(value);
+    return Math.min(hi, Math.max(lo, rounded));
+  }
+  const rounded3 = Math.round(value * 1000) / 1000;
+  const okMin = finite(schema.exclusiveMinimum) ? rounded3 > schema.exclusiveMinimum : rounded3 >= lo;
+  const okMax = finite(schema.exclusiveMaximum) ? rounded3 < schema.exclusiveMaximum : rounded3 <= hi;
+  if (okMin && okMax) return rounded3;
+  return Number(value.toPrecision(12));
 }
 
 /** Generates a deterministic schema-valid JSON value from a JSON Schema fragment. */
@@ -185,7 +233,7 @@ export function generateValueForSchema(
       if (include) obj[k] = generateValueForSchema(props[k], rng, depth + 1);
     }
     for (const reqKey of required) {
-      if (!(reqKey in obj)) obj[reqKey] = generateValueForSchema({ type: 'string' }, rng, depth + 1);
+      if (!Object.hasOwn(obj, reqKey)) obj[reqKey] = generateValueForSchema({ type: 'string' }, rng, depth + 1);
     }
     return obj;
   }
@@ -322,17 +370,43 @@ function safeSeedSlug(seed: string): string {
   return seed.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 32) || 'seed';
 }
 
+function outside(base: string, target: string): boolean {
+  const rel = relative(base, target);
+  return rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
+}
+
+function assertExistingPathInsideRoot(rootReal: string, candidate: string): string {
+  if (!existsSync(candidate)) {
+    try {
+      if (lstatSync(candidate).isSymbolicLink()) {
+        throw new Error('refusing to write fuzz trace outside project root');
+      }
+    } catch (e: any) {
+      if (e?.code !== 'ENOENT') throw e;
+    }
+    return candidate;
+  }
+  const real = realpathSync.native(candidate);
+  if (outside(rootReal, real)) {
+    throw new Error('refusing to write fuzz trace outside project root');
+  }
+  return real;
+}
+
 function writeFuzzTraceArtifact(projectDir: string, seed: string, report: Record<string, unknown>): string {
-  const rootReal = realpathSync(resolve(projectDir));
-  const sessionsDir = join(reinsDir(projectDir), 'sessions');
-  mkdirSync(sessionsDir, { recursive: true });
-  const sessionsReal = realpathSync(sessionsDir);
-  if (sessionsReal !== rootReal && !sessionsReal.startsWith(rootReal + sep)) {
+  const rootReal = realpathSync.native(resolve(projectDir));
+  const dotReinsReal = assertExistingPathInsideRoot(rootReal, join(rootReal, '.reins'));
+  assertExistingPathInsideRoot(rootReal, join(dotReinsReal, 'sessions'));
+
+  const sessionsCandidate = join(reinsDir(rootReal), 'sessions');
+  mkdirSync(sessionsCandidate, { recursive: true });
+  const sessionsReal = realpathSync.native(sessionsCandidate);
+  if (outside(rootReal, sessionsReal)) {
     throw new Error('refusing to write fuzz trace outside project root');
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const suffix = randomBytes(3).toString('hex');
-  const filePath = join(sessionsDir, `fuzz-${safeSeedSlug(seed)}-${stamp}-${suffix}.json`);
+  const filePath = join(sessionsReal, `fuzz-${safeSeedSlug(seed)}-${stamp}-${suffix}.json`);
   writeJsonAtomic(filePath, JSON.stringify(redactDeep(report), null, 2) + '\n');
   return filePath;
 }
