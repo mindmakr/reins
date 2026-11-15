@@ -4,6 +4,7 @@ import { parseArgs, portInUse, USAGE } from './bridge/args.js';
 import { fileAudit } from './bridge/audit.js';
 import { DEFAULT_PORT, Hub } from './bridge/hub.js';
 import { startMcp } from './bridge/mcp.js';
+import { execMain, packetMain, scenarioMain } from './bridge/oneshot-cli.js';
 import { reportMain } from './bridge/report-cli.js';
 import { flightMain } from './flight/check-cli.js';
 import { tokenPath } from './bridge/token.js';
@@ -19,6 +20,18 @@ async function main() {
   }
   if (argv[0] === 'report') {
     process.exitCode = reportMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'exec') {
+    process.exitCode = await execMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'scenario') {
+    process.exitCode = await scenarioMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'packet') {
+    process.exitCode = await packetMain(argv.slice(1));
     return;
   }
   if (argv[0] === 'flight') {
@@ -45,7 +58,7 @@ async function main() {
   const audit = fileAudit(dir);
   let hub: Hub;
   try {
-    hub = await Hub.start({ dir, port: args.port, origins: args.origins, rotate: args.rotate, allowNoOrigin: args.allowNoOrigin, audit });
+    hub = await Hub.start({ dir, port: args.port, cdp: args.cdp, origins: args.origins, rotate: args.rotate, allowNoOrigin: args.allowNoOrigin, audit });
   } catch (e: any) {
     if (e && e.code === 'EADDRINUSE') {
       err(portInUse(args.port ?? DEFAULT_PORT));

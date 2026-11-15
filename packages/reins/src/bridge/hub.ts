@@ -4,6 +4,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { Audit } from './audit.js';
 import { isOriginAllowed } from './origin.js';
 import { newToken, removeToken, tokensMatch, writeToken } from './token.js';
+import { callTool } from './tools.js';
 
 export const DEFAULT_PORT = 7357;
 /** The bridge listens on loopback only. There is no option to change this. */
@@ -14,6 +15,8 @@ export interface HubOptions {
   dir: string;
   /** Default 7357. Use 0 for a free port (tests). */
   port?: number;
+  /** Chrome DevTools endpoint for `reins_snap`. */
+  cdp?: string;
   /** Extra allowed origins, matched exactly. Localhost origins are always allowed. */
   origins?: string[];
   /** Allow clients that send no Origin (React Native). Default true; the token is still required. */
@@ -95,6 +98,7 @@ export class Hub {
 
   private accept(socket: WebSocket) {
     let client: Client | null = null;
+    let isCli = false;
     const timer = setTimeout(() => socket.close(4401, 'no handshake'), this.opts.handshakeMs ?? 5000);
     socket.on('message', (data) => {
       let m: any;
@@ -105,26 +109,58 @@ export class Hub {
       }
       // JSON such as `null` or `1` parses fine; reading `.type` off it would throw inside this listener and stop the bridge.
       if (!m || typeof m !== 'object') {
-        if (!client) {
+        if (!client && !isCli) {
           clearTimeout(timer);
           socket.close(4401, 'bad handshake');
         }
         return;
       }
-      if (!client) {
+      if (!client && !isCli) {
         clearTimeout(timer);
-        if (m.type === 'hello' && tokensMatch(m.token, this.token)) {
+        if (m.type === 'cli') {
+          if (!tokensMatch(m.token, this.token)) {
+            this.audit({ source: 'bridge', event: 'refused', ok: false, error: 'bad or missing token', via: 'cli' });
+            socket.send(JSON.stringify({ type: 'refused', reason: 'bad or missing token' }));
+            socket.close(4401, 'bad token');
+            return;
+          }
+          isCli = true;
+        } else if (m.type === 'hello' && tokensMatch(m.token, this.token)) {
           client = { id: this.nextClient++, url: m.url, title: m.title, meta: m.meta, socket };
           this.clients.push(client);
           socket.send(JSON.stringify({ type: 'welcome', client: client.id }));
           this.audit({ source: 'bridge', event: 'paired', name: client.url, ok: true });
           this.log(`[reins] paired with ${client.url ?? 'an app'} (client ${client.id})`);
           if (this.opts.rotate !== false) this.issueToken();
+          return;
         } else {
           this.audit({ source: 'bridge', event: 'refused', ok: false, error: 'bad or missing token' });
           socket.send(JSON.stringify({ type: 'refused', reason: 'bad or missing token' }));
           socket.close(4401, 'bad token');
+          return;
         }
+      }
+      if (isCli) {
+        if (m.type !== 'cli') return;
+        if (m.token !== undefined && !tokensMatch(m.token, this.token)) {
+          this.audit({ source: 'bridge', event: 'refused', ok: false, error: 'bad or missing token', via: 'cli' });
+          socket.send(JSON.stringify({ type: 'refused', reason: 'bad or missing token' }));
+          socket.close(4401, 'bad token');
+          return;
+        }
+        const toolArgs = m.args && typeof m.args === 'object' ? (m.args as Record<string, unknown>) : {};
+        Promise.resolve()
+          .then(() => callTool({ hub: this, dir: this.opts.dir, cdp: this.opts.cdp, audit: this.opts.audit }, String(m.name ?? ''), toolArgs))
+          .then(
+            (result) => {
+              if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ type: 'cli-result', id: m.id, ok: true, result }));
+            },
+            (err: any) => {
+              if (socket.readyState === socket.OPEN) {
+                socket.send(JSON.stringify({ type: 'cli-result', id: m.id, ok: false, error: err?.message ? String(err.message) : String(err) }));
+              }
+            },
+          );
         return;
       }
       if (m.type === 'result') {
