@@ -43,7 +43,7 @@ export interface ScenarioFile {
   assertNoErrors?: boolean;
 }
 
-type Printer = (line: string) => void;
+export type Printer = (line: string) => void;
 
 export function readBridgeToken(projectDir: string): string {
   const file = tokenPath(resolve(projectDir));
@@ -263,7 +263,7 @@ function isPlainObj(v: unknown): v is Record<string, unknown> {
   return Boolean(v && typeof v === 'object' && !Array.isArray(v));
 }
 
-function diffNewErrors(prev: unknown[], curr: unknown[]): unknown[] {
+export function diffNewErrors(prev: unknown[], curr: unknown[]): unknown[] {
   if (!curr.length) return [];
   if (!prev.length) return curr;
   const prevKeys = prev.map((e) => JSON.stringify(e));
@@ -283,7 +283,7 @@ function diffNewErrors(prev: unknown[], curr: unknown[]): unknown[] {
   return curr;
 }
 
-function redactStateMap(state: unknown): unknown {
+export function redactStateMap(state: unknown): unknown {
   if (!isPlainObj(state)) return redactDeep(state);
   return Object.fromEntries(Object.entries(state).map(([k, v]) => [k, redactDeep(v)]));
 }
