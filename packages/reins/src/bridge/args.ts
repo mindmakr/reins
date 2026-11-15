@@ -13,7 +13,7 @@ export const USAGE = `usage:
   reins bridge [options]
   reins exec <tool_or_action> [--input '<json>'] [--confirm] [--target app|server] [--port <n>] [--dir <path>] [--timeout <ms>]
   reins scenario <file.json> [--confirm] [--panel <id>] [--port <n>] [--dir <path>] [--timeout <ms>]
-  reins packet [--panel <id>] [--snap] [--port <n>] [--dir <path>] [--timeout <ms>]
+  reins packet [--panel <id>] [--snap] [--text] [--port <n>] [--dir <path>] [--timeout <ms>]
   reins fuzz [--steps <n>] [--seed <seed>] [--panel <id>] [--allow-consequential --confirm] [--port <n>] [--dir <path>] [--timeout <ms>]
   reins map [--out <file>] [--static <file>] [--offline] [--stdout] [--port <n>] [--dir <path>] [--timeout <ms>]
   reins verify <dir> [<dir>...]
