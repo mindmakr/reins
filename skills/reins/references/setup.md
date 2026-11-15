@@ -206,6 +206,16 @@ Update the `"build"` script in `package.json` so every production build checks t
 
 Run the production build and `npx reins verify <build-dir>` (or `npx reins-verify-bundle <build-dir>`) to confirm the check exits `0` (`reins-verify-bundle: clean`), and run the project's test suite.
 
+While the dev app is running and paired with the bridge, export the canonical UI/server action, state, and `<ReinsPanel>` contract into `feature-map.json` (and optionally merge a static Coordinator map):
+
+```sh
+npx reins map
+# or merge static routes/screens from Coordinator's map snapshot:
+npx reins map --static .coordinator/runs/<run>/map/map.json --out feature-map.json
+```
+
+`feature-map.json` contains no `__REINS_DEV_ONLY__` marker, so `reins verify` continues to exit `0`.
+
 ## Step 8: Trim the agent prompt prefix for this project (optional, ask first)
 
 Every agent turn re-sends a fixed prefix: tool definitions, the name and description of every enabled skill, agent types, MCP tool names and server instructions, plus project instructions and memory. One measured run put it near 72k tokens, about 15% of the run's cost, mostly plugins and skills the project never uses. Offer a per-project trim after the wiring works. Do it only for the app's project, never for the user level.
