@@ -115,6 +115,6 @@ export function readSession(file: string): SessionData {
 export function latestSession(projectDir: string): string | undefined {
   const folder = join(projectDir, '.reins', 'sessions');
   if (!existsSync(folder)) return undefined;
-  const files = readdirSync(folder).filter((f) => f.endsWith('.json')).sort();
+  const files = readdirSync(folder).filter((f) => f.endsWith('.json') && !f.startsWith('fuzz-')).sort();
   return files.length ? join(folder, files[files.length - 1]) : undefined;
 }

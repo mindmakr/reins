@@ -240,7 +240,7 @@ export function buildFeatureMap(live: unknown | null, staticInput: unknown | nul
   };
 }
 
-function writeJsonAtomic(filePath: string, content: string): void {
+export function writeJsonAtomic(filePath: string, content: string): void {
   mkdirSync(dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
   try {
