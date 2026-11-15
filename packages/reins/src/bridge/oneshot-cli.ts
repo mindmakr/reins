@@ -566,6 +566,7 @@ export function buildCausalTraces(network: unknown, server: unknown, perf: unkno
       g.totalMs += Number(s.ms ?? s.durationMs ?? 0);
       dbGroups.set(s.name, g);
     }
+    const route = String(req.route || req.url || '').split(/[?#]/)[0];
     const perReqDupes: Array<{ name: string; count: number; totalMs: number; nPlusOne: boolean }> = [];
     for (const [name, g] of dbGroups.entries()) {
       if (g.count >= 2) {
@@ -574,7 +575,7 @@ export function buildCausalTraces(network: unknown, server: unknown, perf: unkno
         duplicateDbSpans.push({
           traceId,
           method: String(req.method || 'GET'),
-          route: String(req.route || req.url || ''),
+          route,
           ...entry,
         });
       }
@@ -582,7 +583,7 @@ export function buildCausalTraces(network: unknown, server: unknown, perf: unkno
     traces.push({
       traceId,
       method: String(req.method || 'GET'),
-      route: String(req.route || req.url || ''),
+      route,
       url: String(req.url || ''),
       status: Number(req.status ?? 0),
       clientMs: netMatch && typeof netMatch.ms === 'number' ? netMatch.ms : null,
@@ -644,8 +645,9 @@ export function buildLayoutMetrics(panelBoxes: Record<string, any>, domTrees: Re
     const rawBox = panelBoxes?.[panelId];
     const boxObj = rawBox && typeof rawBox === 'object' ? (rawBox.box ?? rawBox) : null;
     const domRoot = domTrees?.[panelId] ?? null;
-    const dpr = Number(boxObj?.devicePixelRatio ?? boxObj?.dpr ?? 1);
-    if (firstDpr === null && Number.isFinite(dpr)) firstDpr = dpr;
+    const rawDpr = boxObj ? Number(boxObj.devicePixelRatio ?? boxObj.dpr) : NaN;
+    const dpr = Number.isFinite(rawDpr) && rawDpr > 0 ? rawDpr : 1;
+    if (firstDpr === null && Number.isFinite(rawDpr) && rawDpr > 0) firstDpr = rawDpr;
 
     const issues: LayoutIssueMetric[] = [];
     const flagSet = new Set<string>();
@@ -659,20 +661,37 @@ export function buildLayoutMetrics(panelBoxes: Record<string, any>, domTrees: Re
           typeof node.selector === 'string'
             ? node.selector
             : `${node.tag || 'div'}${node.id ? `#${node.id}` : ''}${node.panel ? `[data-reins="${node.panel}"]` : ''}`;
+        const rawNodeBox = node.box ?? node.rect ?? null;
         for (const issue of node.issues) {
           if (typeof issue !== 'string') continue;
           flagSet.add(issue);
-          const item: LayoutIssueMetric = {
+          const cloneBox = () =>
+            rawNodeBox && typeof rawNodeBox === 'object'
+              ? {
+                  x: Number(rawNodeBox.x ?? 0),
+                  y: Number(rawNodeBox.y ?? 0),
+                  width: Number(rawNodeBox.width ?? 0),
+                  height: Number(rawNodeBox.height ?? 0),
+                }
+              : null;
+          issues.push({
             panel: panelId,
             issue,
             selector,
             tag: typeof node.tag === 'string' ? node.tag : null,
             text: typeof node.text === 'string' ? node.text : null,
-            box: node.box ?? node.rect ?? null,
+            box: cloneBox(),
             styles: node.styles ? pickStyles(node.styles) : null,
-          };
-          issues.push(item);
-          allIssues.push({ ...item, ...(item.box ? { box: { ...item.box } } : {}), ...(item.styles ? { styles: { ...item.styles } } : {}) });
+          });
+          allIssues.push({
+            panel: panelId,
+            issue,
+            selector,
+            tag: typeof node.tag === 'string' ? node.tag : null,
+            text: typeof node.text === 'string' ? node.text : null,
+            box: cloneBox(),
+            styles: node.styles ? pickStyles(node.styles) : null,
+          });
         }
       }
       if (Array.isArray(node.children)) for (const ch of node.children) walk(ch);
@@ -737,14 +756,17 @@ export function formatPacketText(pkt: Record<string, any>): string {
       );
     }
     for (const c of ct.components || []) {
-      lines.push(`component ${c.id}: renders=${c.renders} mountedAt=${c.mountedAtMs}ms lastRender=${c.lastRenderMs}ms`);
+      if (!c || typeof c !== 'object') continue;
+      lines.push(`component ${c.id ?? '-'}: renders=${c.renders ?? 0} mountedAt=${c.mountedAtMs ?? '-'}ms lastRender=${c.lastRenderMs ?? '-'}ms`);
     }
     for (const t of ct.traces || []) {
+      if (!t || typeof t !== 'object') continue;
       lines.push(
         `trace ${t.traceId ?? '-'}: ${t.method} ${t.route} status=${t.status} client=${t.clientMs ?? '-'}ms server=${t.serverMs}ms db=${t.dbMs}ms spans=${t.spanCount}`,
       );
     }
     for (const d of ct.duplicateDbSpans || []) {
+      if (!d || typeof d !== 'object') continue;
       lines.push(
         `duplicate db span (${d.traceId ?? '-'}): ${d.name} x${d.count} (${d.totalMs}ms)${d.nPlusOne ? ' [N+1]' : ''}`,
       );
@@ -753,16 +775,30 @@ export function formatPacketText(pkt: Record<string, any>): string {
   const lm = pkt.layoutMetrics;
   if (lm) {
     for (const p of lm.panels || []) {
-      const b = p.box ?? { x: 0, y: 0, width: 0, height: 0 };
+      if (!p || typeof p !== 'object') continue;
+      const boxText = p.box ? `(${p.box.x},${p.box.y},${p.box.width}x${p.box.height})` : 'none';
+      const dprText = p.box?.devicePixelRatio ?? lm.devicePixelRatio ?? 1;
       lines.push(
-        `panel ${p.id}: box=(${b.x},${b.y},${b.width}x${b.height}) dpr=${b.devicePixelRatio ?? lm.devicePixelRatio ?? 1} direction: ${p.direction} display=${p.styles?.display ?? '-'} flexDirection=${p.styles?.flexDirection ?? '-'} overflowX=${p.styles?.overflowX ?? '-'} flags=[${(p.flags || []).join(', ')}]`,
+        `panel ${p.id}: box=${boxText} dpr=${dprText} direction: ${p.direction} display=${p.styles?.display ?? '-'} flexDirection=${p.styles?.flexDirection ?? '-'} overflowX=${p.styles?.overflowX ?? '-'} flags=[${(p.flags || []).join(', ')}]`,
       );
       for (const i of p.issues || []) {
-        lines.push(`layout issue [${p.id}]: ${i.issue} at ${i.selector} (direction: ${p.direction})`);
+        if (!i || typeof i !== 'object') continue;
+        lines.push(`layout issue [${p.id}]: ${i.issue} at ${i.selector} (direction: ${i.styles?.direction ?? p.direction})`);
       }
     }
   }
   return lines.join('\n');
+}
+
+function redactActionsMeta(actions: Record<string, any>) {
+  const copy = structuredClone(actions);
+  if (copy?.app && typeof copy.app === 'object' && 'meta' in copy.app) {
+    copy.app.meta = redactDeep(copy.app.meta);
+  }
+  if (Array.isArray(copy?.servers)) {
+    copy.servers = copy.servers.map((s: any) => (s && typeof s === 'object' && 'meta' in s ? { ...s, meta: redactDeep(s.meta) } : s));
+  }
+  return copy;
 }
 
 export async function packetMain(
@@ -789,7 +825,7 @@ export async function packetMain(
     const panelIds: string[] = values['--panel']
       ? [values['--panel']]
       : Array.isArray(actions?.panels)
-        ? actions.panels.slice(0, 20)
+        ? [...new Set(actions.panels.filter((p: unknown): p is string => typeof p === 'string' && p.length > 0))].slice(0, 20)
         : [];
 
     const [state, network, errors, perf, server] = await Promise.all([
@@ -802,18 +838,28 @@ export async function packetMain(
 
     const panelBoxes: Record<string, any> = {};
     const domTrees: Record<string, any> = {};
+    const domFetched = new Set<string>();
     await Promise.all(
       panelIds.map(async (pid) => {
         const [boxRes, domRes] = await Promise.all([
           client!.call('reins_panel_box', { id: pid }).catch(() => null),
-          client!.call('reins_dom', { panel: pid }).catch(() => null),
+          client!.call('reins_dom', { panel: pid })
+            .then((r) => {
+              domFetched.add(pid);
+              return r;
+            })
+            .catch(() => null),
         ]);
         if (boxRes) panelBoxes[pid] = boxRes;
-        if (domRes) domTrees[pid] = domRes;
+        domTrees[pid] = domRes;
       }),
     );
 
-    const dom = primaryPanel ? (domTrees[primaryPanel] ?? (await client.call('reins_dom', { panel: primaryPanel }))) : undefined;
+    const dom = primaryPanel
+      ? domFetched.has(primaryPanel)
+        ? domTrees[primaryPanel]
+        : await client.call('reins_dom', { panel: primaryPanel })
+      : undefined;
     const snap = bools.has('--snap') && primaryPanel ? await client.call('reins_snap', { id: primaryPanel }) : undefined;
 
     const causalTraces = buildCausalTraces(network, server, perf);
@@ -822,7 +868,7 @@ export async function packetMain(
     const payload = {
       schemaVersion: '1.0.0',
       generatedAt: new Date().toISOString(),
-      actions: structuredClone(actions),
+      actions: redactActionsMeta(actions),
       state: redactStateMap(structuredClone(state)),
       network: redactDeep(structuredClone(network)),
       errors: redactDeep(structuredClone(errors)),

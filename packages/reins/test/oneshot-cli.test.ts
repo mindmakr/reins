@@ -411,19 +411,13 @@ describe('one-shot CLI (exec, scenario, packet)', () => {
     expect(c.json()).toEqual({ pong: 'hi' });
   });
 
-  it('reins packet captures causal x-reins-trace N+1 db.* spans and event-loop lag (p50/p99/max)', async () => {
-    const { dir, hub } = await setupPairedApp();
-    const rn = createReinsNode({ NODE_ENV: 'development' });
-    const paired = await rn.connect({
-      url: `ws://127.0.0.1:${hub.port}`,
-      token: hub.token,
-      WebSocket: WebSocket as any,
-      reconnect: false,
-      meta: { name: 'orders-api' },
-    });
-    expect(paired).toBe(true);
-    cleanup.push(() => rn.disconnect());
+  it('reins packet joins frontend x-reins-trace N+1 db.* spans, timings, components, and event-loop lag while redacting secrets', async () => {
+    const dir = makeProjectDir();
+    const audit = fileAudit(dir);
+    const hub = await Hub.start({ dir, port: 0, log: () => {}, audit, handshakeMs: 1000 });
+    cleanup.push(() => hub.close());
 
+    const rn = createReinsNode({ NODE_ENV: 'development' });
     const srv = createServer(
       rn.wrapHandler(async (_req: any, res: any) => {
         for (let i = 0; i < 3; i++) {
@@ -436,11 +430,53 @@ describe('one-shot CLI (exec, scenario, packet)', () => {
       }),
     );
     await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
-    cleanup.push(() => new Promise<void>((resolve) => srv.close(() => resolve())));
+    cleanup.push(() => new Promise<void>((resolve) => { srv.closeAllConnections?.(); srv.close(() => resolve()); }));
     const addr = srv.address() as { port: number };
+    const origin = `http://127.0.0.1:${addr.port}`;
 
-    const res = await fetch(`http://127.0.0.1:${addr.port}/api/orders?token=secret-token`, {
-      headers: { 'x-reins-trace': 'trace-n1', authorization: 'Bearer super-secret-jwt' },
+    const g: any = {
+      console: makeFakeConsole(),
+      fetch,
+      Headers,
+      location: { href: `${origin}/orders`, origin },
+      performance: {
+        now: () => 50,
+        getEntriesByType: (type: string) =>
+          type === 'navigation'
+            ? [{ responseStart: 18, loadEventEnd: 120, domInteractive: 60, domContentLoadedEventEnd: 90 }]
+            : type === 'paint'
+              ? [{ name: 'first-contentful-paint', startTime: 42 }]
+              : [],
+      },
+    };
+    const app = createReins(g);
+    app.markComponent('OrdersList', 'mount');
+    app.markComponent('OrdersList', 'render');
+    expect(
+      await app.connect({
+        url: `ws://127.0.0.1:${hub.port}`,
+        token: hub.token,
+        WebSocket: WebSocket as any,
+        reconnect: false,
+        lazy: false,
+        meta: { appSecret: 'client-meta-secret' },
+      }),
+    ).toBe(true);
+    cleanup.push(() => app.disconnect());
+
+    expect(
+      await rn.connect({
+        url: `ws://127.0.0.1:${hub.port}`,
+        token: hub.token,
+        WebSocket: WebSocket as any,
+        reconnect: false,
+        meta: { name: 'orders-api', apiKey: 'node-meta-secret' },
+      }),
+    ).toBe(true);
+    cleanup.push(() => rn.disconnect());
+
+    const res = await g.fetch(`${origin}/api/orders?token=secret-token`, {
+      headers: { authorization: 'Bearer super-secret-jwt' },
     });
     expect(res.status).toBe(200);
 
@@ -449,19 +485,35 @@ describe('one-shot CLI (exec, scenario, packet)', () => {
     const rawOut = c.stdout.join('\n');
     expect(rawOut).not.toContain('[cycle]');
     expect(rawOut).not.toContain('super-secret-jwt');
+    expect(rawOut).not.toContain('secret-token');
+    expect(rawOut).not.toContain('client-meta-secret');
+    expect(rawOut).not.toContain('node-meta-secret');
 
     const pkt = c.json();
-    expect(pkt.causalTraces).toBeDefined();
+    expect(pkt.actions.app.meta.appSecret).toBe('[redacted]');
+    expect(pkt.actions.servers[0].meta.apiKey).toBe('[redacted]');
     expect(typeof pkt.causalTraces.eventLoop.p50Ms).toBe('number');
     expect(typeof pkt.causalTraces.eventLoop.p99Ms).toBe('number');
     expect(typeof pkt.causalTraces.eventLoop.maxMs).toBe('number');
     expect(pkt.causalTraces.eventLoop.p50).toBe(pkt.causalTraces.eventLoop.p50Ms);
     expect(pkt.causalTraces.eventLoop.p99).toBe(pkt.causalTraces.eventLoop.p99Ms);
     expect(pkt.causalTraces.eventLoop.max).toBe(pkt.causalTraces.eventLoop.maxMs);
+    expect(pkt.causalTraces.timings).toMatchObject({ ttfbMs: 18, firstContentfulPaintMs: 42 });
+    expect(pkt.causalTraces.components).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'OrdersList', renders: 2 })]),
+    );
+    expect(pkt.causalTraces.traces).toHaveLength(1);
+    const joinedTrace = pkt.causalTraces.traces[0];
+    expect(joinedTrace.traceId).toMatch(/^[\w-]+$/);
+    expect(typeof joinedTrace.clientMs).toBe('number');
+    expect(joinedTrace.route).toBe('/api/orders');
+    expect(joinedTrace.duplicateDbSpans).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'db.select', count: 3, nPlusOne: true })]),
+    );
     expect(pkt.causalTraces.duplicateDbSpans).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          traceId: 'trace-n1',
+          traceId: joinedTrace.traceId,
           method: 'GET',
           route: '/api/orders',
           name: 'db.select',
@@ -474,13 +526,17 @@ describe('one-shot CLI (exec, scenario, packet)', () => {
     const cText = capture();
     expect(await packetMain(['--text', '--port', String(hub.port), '--dir', dir], dir, cText.out, cText.err)).toBe(0);
     const txt = cText.stdout.join('\n');
+    expect(txt).not.toContain('secret-token');
+    expect(txt).not.toContain('super-secret-jwt');
     expect(txt).toContain('event-loop lag:');
-    expect(txt).toContain('trace trace-n1: GET /api/orders');
+    expect(txt).toContain('timings: ttfb=18ms fcp=42ms');
+    expect(txt).toContain('component OrdersList: renders=2');
+    expect(txt).toContain(`trace ${joinedTrace.traceId}: GET /api/orders`);
     expect(txt).toContain('db.select x3');
     expect(txt).toContain('[N+1]');
   });
 
-  it('reins packet detects Arabic RTL horizontal-clip and panel coordinates without --snap PNG', async () => {
+  it('reins packet detects Arabic RTL multi-issue clip without [cycle], registerPanel boxes, and skips duplicate RPCs', async () => {
     const dir = makeProjectDir();
     const audit = fileAudit(dir);
     const hub = await Hub.start({ dir, port: 0, log: () => {}, audit, handshakeMs: 1000 });
@@ -494,7 +550,7 @@ describe('one-shot CLI (exec, scenario, packet)', () => {
       getBoundingClientRect: () => ({ left: 16, top: 32, width: 320, height: 140 }),
       scrollWidth: 460,
       clientWidth: 320,
-      scrollHeight: 140,
+      scrollHeight: 280,
       clientHeight: 140,
       childNodes: [{ nodeType: 3, textContent: 'ملخص الدفع' }],
       children: [],
@@ -509,7 +565,7 @@ describe('one-shot CLI (exec, scenario, packet)', () => {
         display: 'flex',
         flexDirection: 'row-reverse',
         overflowX: 'hidden',
-        overflowY: 'visible',
+        overflowY: 'hidden',
       }),
       document: {
         title: 'Arabic App',
@@ -521,7 +577,7 @@ describe('one-shot CLI (exec, scenario, packet)', () => {
       },
     };
     const app = createReins(g);
-    app.panel('rtl-summary', () => ({
+    app.registerPanel('rtl-summary', () => ({
       id: 'rtl-summary',
       x: 16,
       y: 32,
@@ -531,6 +587,17 @@ describe('one-shot CLI (exec, scenario, packet)', () => {
       viewportWidth: 375,
       viewportHeight: 812,
     }));
+    app.registerPanel('rn-box-only', () => ({
+      id: 'rn-box-only',
+      x: 0,
+      y: 0,
+      width: 200,
+      height: 80,
+      devicePixelRatio: 2,
+    }));
+    for (let i = 1; i <= 22; i++) {
+      app.registerPanel(`extra-${i}`, () => ({ id: `extra-${i}`, x: 0, y: 0, width: 10, height: 10, devicePixelRatio: 2 }));
+    }
     const paired = await app.connect({
       url: `ws://127.0.0.1:${hub.port}`,
       token: hub.token,
@@ -543,39 +610,43 @@ describe('one-shot CLI (exec, scenario, packet)', () => {
 
     const c = capture();
     expect(await packetMain(['--port', String(hub.port), '--dir', dir], dir, c.out, c.err)).toBe(0);
+    expect(c.stdout.join('\n')).not.toContain('[cycle]');
     const pkt = c.json();
     expect(pkt.snap).toBeUndefined();
+    expect(pkt.server).toBeUndefined();
     expect(pkt.layoutMetrics.devicePixelRatio).toBe(2);
-    expect(pkt.layoutMetrics.panels).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'rtl-summary',
-          direction: 'rtl',
-          box: expect.objectContaining({ x: 16, y: 32, width: 320, height: 140, devicePixelRatio: 2 }),
-          styles: expect.objectContaining({
-            direction: 'rtl',
-            display: 'flex',
-            flexDirection: 'row-reverse',
-            overflowX: 'hidden',
-          }),
-          flags: expect.arrayContaining(['horizontal-clip']),
-        }),
-      ]),
-    );
-    expect(pkt.layoutMetrics.issues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          panel: 'rtl-summary',
-          issue: 'horizontal-clip',
-        }),
-      ]),
-    );
+    expect(pkt.layoutMetrics.panels).toHaveLength(20);
+    const rtl = pkt.layoutMetrics.panels.find((p: any) => p.id === 'rtl-summary');
+    expect(rtl).toMatchObject({
+      id: 'rtl-summary',
+      direction: 'rtl',
+      box: { x: 16, y: 32, width: 320, height: 140, devicePixelRatio: 2 },
+      styles: { direction: 'rtl', display: 'flex', flexDirection: 'row-reverse', overflowX: 'hidden', overflowY: 'hidden' },
+    });
+    expect(rtl.flags).toEqual(expect.arrayContaining(['horizontal-clip', 'vertical-clip']));
+    expect(rtl.issues).toHaveLength(2);
+    expect(rtl.issues[0].box).toEqual({ x: 16, y: 32, width: 320, height: 140 });
+    expect(rtl.issues[1].box).toEqual({ x: 16, y: 32, width: 320, height: 140 });
+    expect(pkt.layoutMetrics.issues).toHaveLength(2);
+    const rnBox = pkt.layoutMetrics.panels.find((p: any) => p.id === 'rn-box-only');
+    expect(rnBox).toMatchObject({ id: 'rn-box-only', box: { x: 0, y: 0, width: 200, height: 80, devicePixelRatio: 2 } });
+
+    const cSingle = capture();
+    expect(await packetMain(['--panel', 'rn-box-only', '--port', String(hub.port), '--dir', dir], dir, cSingle.out, cSingle.err)).toBe(0);
+    const auditEntries = readFileSync(join(dir, '.reins', 'audit.log'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(auditEntries.some((e) => e.event === 'reins_server')).toBe(false);
+    const rnDomCalls = auditEntries.filter((e) => e.event === 'reins_dom' && e.name === 'rn-box-only');
+    expect(rnDomCalls).toHaveLength(2); // once in full packet above, once in --panel rn-box-only (never twice per packet)
 
     const cText = capture();
     expect(await packetMain(['--text', '--port', String(hub.port), '--dir', dir], dir, cText.out, cText.err)).toBe(0);
     const txt = cText.stdout.join('\n');
     expect(txt).toContain('panel rtl-summary: box=(16,32,320x140) dpr=2 direction: rtl');
     expect(txt).toContain('horizontal-clip');
+    expect(txt).toContain('vertical-clip');
   });
 
   const cliPath = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
