@@ -61,13 +61,20 @@ export function openBridgeClient(opts: { port?: number; dir?: string; timeoutMs?
   const port = opts.port ?? DEFAULT_PORT;
   const dir = opts.dir ?? process.cwd();
   const timeoutMs = opts.timeoutMs ?? 15_000;
-  const token = readBridgeToken(dir);
   // Loopback only: HOST is constant 127.0.0.1 with no remote override.
   const url = `ws://${HOST}:${port}`;
   return new Promise((resolveClient, rejectClient) => {
+    let token: string;
+    try {
+      token = readBridgeToken(dir);
+    } catch (err) {
+      rejectClient(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
     const ws = new WebSocket(url);
     let nextId = 1;
     let settled = false;
+    let sentToken = false;
     const inflight = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
     const failAll = (err: Error) => {
@@ -138,7 +145,9 @@ export function openBridgeClient(opts: { port?: number; dir?: string; timeoutMs?
               rej(new Error(`tool "${name}" timed out after ${timeoutMs} ms`));
             }, timeoutMs);
             inflight.set(id, { resolve: res, reject: rej, timer });
-            ws.send(JSON.stringify({ type: 'cli', id, token, name, args }));
+            const frame = sentToken ? { type: 'cli', id, name, args } : { type: 'cli', id, token, name, args };
+            sentToken = true;
+            ws.send(JSON.stringify(frame));
           });
         },
         close() {
@@ -174,7 +183,6 @@ interface CommonCliFlags {
   dir: string;
   timeoutMs: number;
   help: boolean;
-  rest: string[];
   positional: string[];
 }
 
@@ -185,7 +193,7 @@ function takeValue(args: string[], flag: string): string {
 }
 
 function parseFlags(argv: string[], cwd: string, valueFlags: Set<string>, boolFlags: Set<string>): {
-  common: Omit<CommonCliFlags, 'rest'>;
+  common: CommonCliFlags;
   values: Record<string, string>;
   bools: Set<string>;
 } {
@@ -251,13 +259,42 @@ function isActionFailure(result: unknown): boolean {
   return Boolean(result && typeof result === 'object' && !Array.isArray(result) && (result as Record<string, unknown>).ok === false);
 }
 
-function redactStateMap(state: unknown): unknown {
-  if (!state || typeof state !== 'object' || Array.isArray(state)) return redactDeep(state);
-  return Object.fromEntries(Object.entries(state as Record<string, unknown>).map(([k, v]) => [k, redactDeep(v)]));
+function isPlainObj(v: unknown): v is Record<string, unknown> {
+  return Boolean(v && typeof v === 'object' && !Array.isArray(v));
 }
 
-const formatOut = (value: unknown, toolName?: string) =>
-  JSON.stringify(toolName === 'reins_state' ? redactStateMap(value) : redactDeep(value), null, 2);
+function diffNewErrors(prev: unknown[], curr: unknown[]): unknown[] {
+  if (!curr.length) return [];
+  if (!prev.length) return curr;
+  const prevKeys = prev.map((e) => JSON.stringify(e));
+  const currKeys = curr.map((e) => JSON.stringify(e));
+  const maxOverlap = Math.min(prevKeys.length, currKeys.length);
+  for (let k = maxOverlap; k >= 1; k--) {
+    let matched = true;
+    const startPrev = prevKeys.length - k;
+    for (let i = 0; i < k; i++) {
+      if (prevKeys[startPrev + i] !== currKeys[i]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return curr.slice(k);
+  }
+  return curr;
+}
+
+function redactStateMap(state: unknown): unknown {
+  if (!isPlainObj(state)) return redactDeep(state);
+  return Object.fromEntries(Object.entries(state).map(([k, v]) => [k, redactDeep(v)]));
+}
+
+function redactResult(value: unknown, toolName?: string): unknown {
+  if (toolName === 'reins_state') return redactStateMap(value);
+  if (toolName === 'reins_list_actions') return value;
+  return redactDeep(value);
+}
+
+const formatOut = (value: unknown, toolName?: string) => JSON.stringify(redactResult(value, toolName), null, 2);
 
 /** Runs `reins exec <tool_or_action>` once against the local bridge. Returns 0 on success, 2 on error/refusal. */
 export async function execMain(
@@ -353,37 +390,52 @@ export async function scenarioMain(
     const panel = values['--panel'] ?? scenario.panel;
     client = await openBridgeClient({ port: common.port, dir: common.dir, timeoutMs: common.timeoutMs });
 
-    const baselineErrors = (await client.call('reins_errors', {})) as unknown[];
-    let seenErrorsCount = Array.isArray(baselineErrors) ? baselineErrors.length : 0;
+    const baselineErrors = await client.call('reins_errors', {});
+    let seenErrors: unknown[] = Array.isArray(baselineErrors) ? baselineErrors : [];
     const stepResults: Array<Record<string, unknown>> = [];
     let ok = true;
     let failureReason: string | undefined;
 
     for (let i = 0; i < scenario.steps.length; i++) {
-      const step = scenario.steps[i];
-      const toolName = step.tool ?? (step.action ? 'reins_run_action' : '');
+      const rawStep = scenario.steps[i];
+      if (!isPlainObj(rawStep)) {
+        ok = false;
+        failureReason = `step ${i + 1}: step must be an object`;
+        stepResults.push({ step: i + 1, ok: false, error: failureReason });
+        break;
+      }
+      const step = rawStep as ScenarioStep;
+      const toolName = typeof step.tool === 'string' && step.tool
+        ? step.tool
+        : (typeof step.action === 'string' && step.action ? 'reins_run_action' : '');
       if (!toolName) {
         ok = false;
         failureReason = `step ${i + 1}: missing action or tool`;
         stepResults.push({ step: i + 1, ok: false, error: failureReason });
         break;
       }
-      const confirm = step.confirm === true || defaultConfirm;
-      const toolArgs: Record<string, unknown> = step.tool
-        ? { ...(step.args ?? step.input ?? {}), ...(step.confirm !== undefined || defaultConfirm ? { confirm } : {}) }
-        : {
-            name: step.action,
-            ...(step.input !== undefined ? { input: step.input } : {}),
-            ...(step.confirm !== undefined || defaultConfirm ? { confirm } : {}),
-            ...(step.target ? { target: step.target } : {}),
-          };
-
+      const stepName = step.action ?? step.tool;
       try {
+        const rawInput = step.tool ? (step.args ?? step.input) : step.input;
+        if (rawInput !== undefined && !isPlainObj(rawInput)) {
+          throw new Error('args/input must be an object');
+        }
+        const confirm = step.confirm ?? defaultConfirm;
+        const toolArgs: Record<string, unknown> = step.tool
+          ? { ...(rawInput ?? {}), ...(step.confirm !== undefined || defaultConfirm ? { confirm } : {}) }
+          : {
+              name: step.action,
+              ...(rawInput !== undefined ? { input: rawInput } : {}),
+              ...(step.confirm !== undefined || defaultConfirm ? { confirm } : {}),
+              ...(step.target ? { target: step.target } : {}),
+            };
+
         const result = await client.call(toolName, toolArgs);
+        const safeResult = redactResult(result, toolName);
         if (isActionFailure(result)) {
           ok = false;
-          failureReason = `step ${i + 1} (${step.action ?? step.tool}): returned ok: false`;
-          stepResults.push({ step: i + 1, name: step.action ?? step.tool, ok: false, result, error: failureReason });
+          failureReason = `step ${i + 1} (${stepName}): returned ok: false`;
+          stepResults.push({ step: i + 1, name: stepName, ok: false, result: safeResult, error: failureReason });
           break;
         }
         if (step.assertState !== undefined) {
@@ -392,26 +444,25 @@ export async function scenarioMain(
           if (mismatch) {
             ok = false;
             failureReason = `step ${i + 1} assertState failed: ${mismatch}`;
-            stepResults.push({ step: i + 1, name: step.action ?? step.tool, ok: false, result, error: failureReason });
+            stepResults.push({ step: i + 1, name: stepName, ok: false, result: safeResult, error: failureReason });
             break;
           }
         }
+        const currentErrors = await client.call('reins_errors', {});
+        const newErrors = Array.isArray(currentErrors) ? diffNewErrors(seenErrors, currentErrors) : [];
+        if (Array.isArray(currentErrors)) seenErrors = currentErrors;
         const checkErrors = step.assertNoErrors ?? (scenario.assertNoErrors !== false && step.allowErrors !== true);
-        if (checkErrors) {
-          const currentErrors = (await client.call('reins_errors', {})) as unknown[];
-          if (Array.isArray(currentErrors) && currentErrors.length > seenErrorsCount) {
-            ok = false;
-            failureReason = `step ${i + 1} triggered ${currentErrors.length - seenErrorsCount} uncaught runtime error(s)`;
-            stepResults.push({ step: i + 1, name: step.action ?? step.tool, ok: false, result, error: failureReason });
-            break;
-          }
-          if (Array.isArray(currentErrors)) seenErrorsCount = currentErrors.length;
+        if (checkErrors && newErrors.length > 0) {
+          ok = false;
+          failureReason = `step ${i + 1} triggered ${newErrors.length} uncaught runtime error(s)`;
+          stepResults.push({ step: i + 1, name: stepName, ok: false, result: safeResult, error: failureReason });
+          break;
         }
-        stepResults.push({ step: i + 1, name: step.action ?? step.tool, ok: true, result });
+        stepResults.push({ step: i + 1, name: stepName, ok: true, result: safeResult });
       } catch (stepErr: any) {
         ok = false;
-        failureReason = `step ${i + 1} (${step.action ?? step.tool}): ${stepErr?.message ? String(stepErr.message) : String(stepErr)}`;
-        stepResults.push({ step: i + 1, name: step.action ?? step.tool, ok: false, error: failureReason });
+        failureReason = `step ${i + 1} (${stepName}): ${stepErr?.message ? String(stepErr.message) : String(stepErr)}`;
+        stepResults.push({ step: i + 1, name: stepName, ok: false, error: failureReason });
         break;
       }
     }
@@ -427,7 +478,7 @@ export async function scenarioMain(
     print(JSON.stringify({
       ok,
       ...(failureReason ? { error: failureReason } : {}),
-      steps: redactDeep(stepResults),
+      steps: stepResults,
       state: redactStateMap(state),
       network: redactDeep(network),
       errors: redactDeep(errors),
@@ -475,7 +526,7 @@ export async function packetMain(
     print(JSON.stringify({
       schemaVersion: '1.0.0',
       generatedAt: new Date().toISOString(),
-      actions: redactDeep(actions),
+      actions,
       state: redactStateMap(state),
       network: redactDeep(network),
       errors: redactDeep(errors),

@@ -49,6 +49,7 @@ interface Pending {
 export class Hub {
   token = '';
   readonly clients: Client[] = [];
+  readonly snaps: string[] = [];
   /** When the bridge started; a session report covers the audit log from here on. */
   readonly startedAt = Date.now();
   private server!: WebSocketServer;
@@ -142,15 +143,9 @@ export class Hub {
       }
       if (isCli) {
         if (m.type !== 'cli') return;
-        if (m.token !== undefined && !tokensMatch(m.token, this.token)) {
-          this.audit({ source: 'bridge', event: 'refused', ok: false, error: 'bad or missing token', via: 'cli' });
-          socket.send(JSON.stringify({ type: 'refused', reason: 'bad or missing token' }));
-          socket.close(4401, 'bad token');
-          return;
-        }
         const toolArgs = m.args && typeof m.args === 'object' ? (m.args as Record<string, unknown>) : {};
         Promise.resolve()
-          .then(() => callTool({ hub: this, dir: this.opts.dir, cdp: this.opts.cdp, audit: this.opts.audit }, String(m.name ?? ''), toolArgs))
+          .then(() => callTool({ hub: this, dir: this.opts.dir, cdp: this.opts.cdp, snaps: this.snaps, audit: this.opts.audit }, String(m.name ?? ''), toolArgs))
           .then(
             (result) => {
               if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ type: 'cli-result', id: m.id, ok: true, result }));

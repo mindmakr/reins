@@ -11,9 +11,9 @@ export interface BridgeArgs {
 
 export const USAGE = `usage:
   reins bridge [options]
-  reins exec <tool_or_action> [--input '<json>'] [--confirm] [--target app|server] [--port <n>] [--dir <path>]
-  reins scenario <file.json> [--confirm] [--panel <id>] [--port <n>] [--dir <path>]
-  reins packet [--panel <id>] [--snap] [--port <n>] [--dir <path>]
+  reins exec <tool_or_action> [--input '<json>'] [--confirm] [--target app|server] [--port <n>] [--dir <path>] [--timeout <ms>]
+  reins scenario <file.json> [--confirm] [--panel <id>] [--port <n>] [--dir <path>] [--timeout <ms>]
+  reins packet [--panel <id>] [--snap] [--port <n>] [--dir <path>] [--timeout <ms>]
   reins verify <dir> [<dir>...]
   reins report [--from <session.json>] [--compare <before.json> <after.json>] [--out <dir|file.md>]
   reins flight check [file]
