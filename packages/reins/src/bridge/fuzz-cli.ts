@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { redactDeep } from '@mindmakr/reins';
 import { writeJsonAtomic } from './map-cli.js';
 import { type BridgeClient, diffNewErrors, openBridgeClient, parseFlags, type Printer } from './oneshot-cli.js';
@@ -94,8 +94,12 @@ function clampStringLength(raw: string, minLen: number, maxLen: number, rng: () 
 }
 
 function generateStringValue(schema: Record<string, unknown>, rng: () => number): string {
-  const minLen = typeof schema.minLength === 'number' && schema.minLength >= 0 ? Math.trunc(schema.minLength) : 1;
-  const maxLen = typeof schema.maxLength === 'number' && schema.maxLength >= minLen ? Math.trunc(schema.maxLength) : Math.max(minLen, 48);
+  const hasMax = typeof schema.maxLength === 'number' && Number.isFinite(schema.maxLength) && schema.maxLength >= 0;
+  const rawMax = hasMax ? Math.trunc(schema.maxLength as number) : undefined;
+  const hasMin = typeof schema.minLength === 'number' && Number.isFinite(schema.minLength) && schema.minLength >= 0;
+  const minLen = hasMin ? Math.min(Math.trunc(schema.minLength as number), 4096) : rawMax === 0 ? 0 : 1;
+  const maxLen = rawMax !== undefined ? Math.max(minLen, Math.min(rawMax, 4096)) : Math.max(minLen, 48);
+  if (maxLen === 0) return '';
   const fmt = typeof schema.format === 'string' ? schema.format : '';
   if (fmt === 'email') return clampStringLength(`user${pickIndex(rng, 100)}@example.com`, minLen, maxLen, rng);
   if (fmt === 'uri' || fmt === 'url') return clampStringLength(`https://example.com/${randomAlphaNum(rng, 6)}`, minLen, maxLen, rng);
@@ -114,25 +118,34 @@ function generateStringValue(schema: Record<string, unknown>, rng: () => number)
 }
 
 function generateNumberValue(schema: Record<string, unknown>, rng: () => number, isInt: boolean): number {
-  const rawMin = typeof schema.minimum === 'number'
+  const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  const rawMin = finite(schema.minimum)
     ? schema.minimum
-    : typeof schema.exclusiveMinimum === 'number'
+    : finite(schema.exclusiveMinimum)
       ? schema.exclusiveMinimum + (isInt ? 1 : 0.01)
       : 0;
-  const rawMax = typeof schema.maximum === 'number'
+  const rawMax = finite(schema.maximum)
     ? schema.maximum
-    : typeof schema.exclusiveMaximum === 'number'
+    : finite(schema.exclusiveMaximum)
       ? schema.exclusiveMaximum - (isInt ? 1 : 0.01)
       : Math.max(rawMin + 100, 100);
   const lo = Math.min(rawMin, rawMax);
   const hi = Math.max(rawMin, rawMax);
   const span = hi - lo;
-  let value = lo + rng() * (span > 0 ? span : 1);
-  if (typeof schema.multipleOf === 'number' && schema.multipleOf > 0) {
+  let value = span > 0 ? lo + rng() * span : lo;
+  if (finite(schema.multipleOf) && schema.multipleOf > 0) {
     const step = schema.multipleOf;
-    value = Math.round((value - lo) / step) * step + lo;
-    if (value > hi) value = hi;
-    if (value < lo) value = lo;
+    const kMin = Math.ceil(lo / step - 1e-12);
+    const kMax = Math.floor(hi / step + 1e-12);
+    if (kMin <= kMax) {
+      const k = kMin + Math.floor(rng() * (kMax - kMin + 1));
+      value = k * step;
+    } else {
+      value = lo;
+    }
+    const stepStr = String(step);
+    const decimals = stepStr.includes('.') ? stepStr.split('.')[1].length : 0;
+    if (decimals > 0) value = Number(value.toFixed(decimals));
   }
   return isInt ? Math.round(value) : Math.round(value * 1000) / 1000;
 }
@@ -143,13 +156,13 @@ export function generateValueForSchema(
   rng: () => number,
   depth = 0,
 ): unknown {
-  if (!schema || typeof schema !== 'object' || depth > 4) return {};
+  if (!schema || typeof schema !== 'object') return {};
   if ('const' in schema) return schema.const;
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
     return schema.enum[pickIndex(rng, schema.enum.length)];
   }
   const unions = Array.isArray(schema.oneOf) ? schema.oneOf : Array.isArray(schema.anyOf) ? schema.anyOf : null;
-  if (unions && unions.length > 0) {
+  if (unions && unions.length > 0 && depth < 5) {
     const nonNull = unions.filter((b: any) => b && typeof b === 'object' && b.type !== 'null');
     const pool = nonNull.length ? nonNull : unions;
     const chosen = pool[pickIndex(rng, pool.length)];
@@ -160,6 +173,7 @@ export function generateValueForSchema(
     : schema.type ?? (schema.properties ? 'object' : 'object');
 
   if (typeVal === 'object') {
+    if (depth >= 5) return {};
     const props = schema.properties && typeof schema.properties === 'object'
       ? (schema.properties as Record<string, Record<string, unknown>>)
       : {};
@@ -176,8 +190,15 @@ export function generateValueForSchema(
     return obj;
   }
   if (typeVal === 'array') {
-    const minItems = typeof schema.minItems === 'number' && schema.minItems >= 0 ? Math.trunc(schema.minItems) : 0;
-    const maxItems = typeof schema.maxItems === 'number' && schema.maxItems >= minItems ? Math.min(8, Math.trunc(schema.maxItems)) : Math.max(minItems, 3);
+    if (depth >= 5) return [];
+    const rawMin = typeof schema.minItems === 'number' && Number.isFinite(schema.minItems) && schema.minItems >= 0
+      ? Math.trunc(schema.minItems)
+      : 0;
+    const minItems = Math.min(rawMin, 64);
+    const rawMax = typeof schema.maxItems === 'number' && Number.isFinite(schema.maxItems) && schema.maxItems >= minItems
+      ? Math.trunc(schema.maxItems)
+      : minItems + 3;
+    const maxItems = Math.max(minItems, Math.min(minItems + 8, rawMax));
     const count = minItems + Math.floor(rng() * (maxItems - minItems + 1));
     const itemSchema = schema.items && typeof schema.items === 'object' ? (schema.items as Record<string, unknown>) : {};
     return Array.from({ length: count }, () => generateValueForSchema(itemSchema, rng, depth + 1));
@@ -258,9 +279,11 @@ export function collectFuzzTargets(listed: Record<string, any>, allowConsequenti
     }
   }
 
-  all.sort((a, b) =>
-    `${a.target}:${a.server ?? ''}:${a.name}`.localeCompare(`${b.target}:${b.server ?? ''}:${b.name}`),
-  );
+  all.sort((a, b) => {
+    const ak = `${a.target}:${a.server ?? ''}:${a.name}`;
+    const bk = `${b.target}:${b.server ?? ''}:${b.name}`;
+    return ak < bk ? -1 : ak > bk ? 1 : 0;
+  });
   const skippedConsequential = allowConsequential ? [] : all.filter((a) => a.consequential).map((a) => a.name);
   const eligible = allowConsequential ? all : all.filter((a) => !a.consequential);
   const panels = Array.isArray(listed?.panels)
@@ -300,12 +323,22 @@ function safeSeedSlug(seed: string): string {
 }
 
 function writeFuzzTraceArtifact(projectDir: string, seed: string, report: Record<string, unknown>): string {
+  const rootReal = realpathSync(resolve(projectDir));
   const sessionsDir = join(reinsDir(projectDir), 'sessions');
   mkdirSync(sessionsDir, { recursive: true });
+  const sessionsReal = realpathSync(sessionsDir);
+  if (sessionsReal !== rootReal && !sessionsReal.startsWith(rootReal + sep)) {
+    throw new Error('refusing to write fuzz trace outside project root');
+  }
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filePath = join(sessionsDir, `fuzz-${safeSeedSlug(seed)}-${stamp}.json`);
+  const suffix = randomBytes(3).toString('hex');
+  const filePath = join(sessionsDir, `fuzz-${safeSeedSlug(seed)}-${stamp}-${suffix}.json`);
   writeJsonAtomic(filePath, JSON.stringify(redactDeep(report), null, 2) + '\n');
   return filePath;
+}
+
+function quoteCliArg(v: string): string {
+  return /^[A-Za-z0-9_.:-]+$/.test(v) ? v : JSON.stringify(v);
 }
 
 function parseStepsCount(raw: string | undefined): number {
@@ -416,11 +449,11 @@ export async function fuzzMain(
       const domFailures: FuzzFailure[] = [];
       if (panelsToCheck.length) {
         for (const p of panelsToCheck) {
-          const domRoot = await client.call('reins_dom', { panel: p });
+          const domRoot = await client.call('reins_dom', { panel: p, depth: 8, maxNodes: 400 });
           domFailures.push(...collectDomIssues(domRoot, p));
         }
       } else {
-        const domRoot = await client.call('reins_dom', {});
+        const domRoot = await client.call('reins_dom', { depth: 8, maxNodes: 400 });
         domFailures.push(...collectDomIssues(domRoot));
       }
 
@@ -451,7 +484,7 @@ export async function fuzzMain(
       schemaVersion: '1.0.0',
       ok: failedStep === null,
       seed,
-      command: `npx reins fuzz --steps ${trace.length || stepsRequested} --seed ${seed}${panelFilter ? ` --panel ${panelFilter}` : ''}${allowConsequential ? ' --allow-consequential --confirm' : ''}`,
+      command: `npx reins fuzz --steps ${trace.length || stepsRequested} --seed ${quoteCliArg(seed)}${panelFilter ? ` --panel ${quoteCliArg(panelFilter)}` : ''}${allowConsequential ? ' --allow-consequential --confirm' : ''}`,
       stepsRequested,
       stepsRun: trace.length,
       failedStep,

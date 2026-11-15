@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,7 @@ import WebSocket from 'ws';
 import { fileAudit } from '../src/bridge/audit.js';
 import { createRng, fuzzMain, generateValueForSchema } from '../src/bridge/fuzz-cli.js';
 import { Hub } from '../src/bridge/hub.js';
+import { latestSession } from '../src/bridge/session.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -353,6 +354,208 @@ describe('reins fuzz (property-based UI invariant fuzzer)', () => {
     expect(v1.count).toBeGreaterThanOrEqual(5);
     expect(v1.count).toBeLessThanOrEqual(10);
     expect(typeof v1.extraRequired).toBe('string');
+
+    // Schema generator edge cases: fixed min=max, multipleOf, maxLength=0, minItems>8, depth>=5 primitives.
+    const edgeRng = createRng('edge-cases');
+    for (let i = 0; i < 20; i++) {
+      expect(generateValueForSchema({ type: 'integer', minimum: 5, maximum: 5 }, edgeRng)).toBe(5);
+      expect(generateValueForSchema({ type: 'number', minimum: 0, maximum: 0 }, edgeRng)).toBe(0);
+      const mult = generateValueForSchema({ type: 'integer', minimum: 1, maximum: 10, multipleOf: 5 }, edgeRng) as number;
+      expect([5, 10]).toContain(mult);
+      const decMult = generateValueForSchema({ type: 'number', minimum: 0.2, maximum: 1.0, multipleOf: 0.25 }, edgeRng) as number;
+      expect([0.25, 0.5, 0.75, 1]).toContain(decMult);
+      expect(generateValueForSchema({ type: 'string', maxLength: 0 }, edgeRng)).toBe('');
+      const longArr = generateValueForSchema(
+        { type: 'array', minItems: 10, maxItems: 12, items: { type: 'boolean' } },
+        edgeRng,
+      ) as unknown[];
+      expect(longArr.length).toBeGreaterThanOrEqual(10);
+      expect(longArr.length).toBeLessThanOrEqual(12);
+    }
+    const deep = generateValueForSchema(
+      {
+        type: 'object',
+        required: ['a'],
+        properties: {
+          a: {
+            type: 'object',
+            required: ['b'],
+            properties: {
+              b: {
+                type: 'object',
+                required: ['c'],
+                properties: {
+                  c: {
+                    type: 'object',
+                    required: ['d'],
+                    properties: {
+                      d: {
+                        type: 'object',
+                        required: ['leaf'],
+                        properties: { leaf: { type: 'string', const: 'ok' } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      edgeRng,
+    ) as any;
+    expect(deep.a.b.c.d.leaf).toBe('ok');
+    expect(generateValueForSchema({ type: 'object', required: ['leaf'], properties: { leaf: { type: 'string', format: 'uuid' } } }, edgeRng, 4)).toMatchObject({
+      leaf: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4/),
+    });
+    expect(generateValueForSchema({ anyOf: [{ type: 'null' }, { type: 'string', format: 'date' }] }, edgeRng)).toBe('2026-01-15');
+  });
+
+  it('validates flags, handles safe server/empty actions, catches uncaught errors + DOM vertical-clip/zero-size, and skips fuzz artifacts in latestSession', async () => {
+    const h = await setupFuzzHarness({ triggerUnhandledRejectionAtCount: 1 });
+    const cHelp = capture();
+    expect(await fuzzMain(['--help'], h.dir, cHelp.out, cHelp.err)).toBe(0);
+    expect(cHelp.stdout.join('\n')).toMatch(/usage:/);
+
+    for (const badArgs of [
+      ['--steps', '0'],
+      ['--steps', '-1'],
+      ['--steps', '1.5'],
+      ['--steps', 'abc'],
+      ['--steps', '10001'],
+      ['--seed', ''],
+      ['--host', '0.0.0.0'],
+      ['unexpected'],
+    ]) {
+      const cb = capture();
+      expect(await fuzzMain(badArgs, h.dir, cb.out, cb.err)).toBe(2);
+    }
+
+    // Security checks: token unrotated, bad token rejected, path traversal slugged, saved trace redacted, symlink blocked.
+    const tokenBefore = h.hub.token;
+    const cSec = capture();
+    expect(
+      await fuzzMain(
+        ['--steps', '3', '--seed', '../../etc/passwd', '--port', String(h.hub.port), '--dir', h.dir],
+        h.dir,
+        cSec.out,
+        cSec.err,
+      ),
+    ).toBe(2);
+    expect(h.hub.token).toBe(tokenBefore);
+    const outSec = cSec.json();
+    expect(outSec.artifact).toContain(join(h.dir, '.reins', 'sessions'));
+    expect(outSec.artifact).not.toContain('etc/passwd');
+    const savedRaw = readFileSync(outSec.artifact, 'utf8');
+    expect(savedRaw).toContain('"schemaVersion": "1.0.0"');
+    const savedJson = JSON.parse(savedRaw);
+    for (const st of savedJson.trace) {
+      if ('password' in st.input) expect(st.input.password).toBe('[redacted]');
+    }
+    // latestSession must skip fuzz-*.json so `reins report` keeps working.
+    expect(latestSession(h.dir)).toBeUndefined();
+    const realReportPath = join(h.dir, '.reins', 'sessions', '2026-11-15T10-00-00-000Z-demo.json');
+    writeFileSync(realReportPath, JSON.stringify({ schemaVersion: 1 }));
+    expect(latestSession(h.dir)).toBe(realReportPath);
+
+    writeFileSync(join(h.dir, '.reins', 'token'), 'forged-token\n');
+    const cBadTok = capture();
+    expect(await fuzzMain(['--steps', '2', '--port', String(h.hub.port), '--dir', h.dir], h.dir, cBadTok.out, cBadTok.err)).toBe(2);
+    expect(cBadTok.stderr.join('\n')).toMatch(/bad or missing token/);
+
+    // Symlink/junction escape on .reins/sessions is refused.
+    const symDir = makeProjectDir();
+    const outsideDir = makeProjectDir();
+    const symAudit = fileAudit(symDir, () => {});
+    const symHub = await Hub.start({ dir: symDir, port: 0, log: () => {}, audit: symAudit, handshakeMs: 1000 });
+    cleanup.push(() => symHub.close());
+    const symListeners = new Map<string, Array<(e: any) => void>>();
+    const symG: any = {
+      console: { info() {}, log() {}, warn() {}, groupCollapsed() {}, groupEnd() {}, error() {} },
+      addEventListener: (t: string, fn: (e: any) => void) => symListeners.set(t, [...(symListeners.get(t) ?? []), fn]),
+      removeEventListener: () => {},
+    };
+    const symApp = createReins(symG);
+    symApp.action({
+      name: 'crash-window',
+      description: 'Triggers window error',
+      run: () => {
+        for (const fn of symListeners.get('error') ?? []) fn({ error: new Error('window crash') });
+        return { ok: true };
+      },
+    });
+    await symApp.connect({ url: `ws://127.0.0.1:${symHub.port}`, token: symHub.token, WebSocket: WebSocket as any, reconnect: false, lazy: false });
+    cleanup.push(() => symApp.disconnect());
+    mkdirSync(join(symDir, '.reins'), { recursive: true });
+    symlinkSync(outsideDir, join(symDir, '.reins', 'sessions'), process.platform === 'win32' ? 'junction' : 'dir');
+    const cSym = capture();
+    expect(await fuzzMain(['--steps', '2', '--seed', 'sym', '--port', String(symHub.port), '--dir', symDir], symDir, cSym.out, cSym.err)).toBe(2);
+    expect(cSym.stderr.join('\n')).toMatch(/outside project root/);
+
+    // Safe non-consequential server actions, consequential-only app returning 0, vertical-clip & zero-size detection.
+    const srvDir = makeProjectDir();
+    const srvHub = await Hub.start({ dir: srvDir, port: 0, log: () => {}, audit: fileAudit(srvDir, () => {}), handshakeMs: 1000 });
+    cleanup.push(() => srvHub.close());
+    const srvOnly = createReinsNode({ NODE_ENV: 'development' });
+    srvOnly.action({ name: 'only-danger', description: 'Danger', consequential: true, run: () => ({}) });
+    await srvOnly.connect({ url: `ws://127.0.0.1:${srvHub.port}`, token: srvHub.token, WebSocket: WebSocket as any, reconnect: false, meta: { name: 'srv' } });
+    cleanup.push(() => srvOnly.disconnect());
+    const cEmpty = capture();
+    expect(await fuzzMain(['--steps', '5', '--seed', 's', '--port', String(srvHub.port), '--dir', srvDir], srvDir, cEmpty.out, cEmpty.err)).toBe(0);
+    expect(cEmpty.json().stepsRun).toBe(0);
+
+    let zeroSize = false;
+    const domDir = makeProjectDir();
+    const domHub = await Hub.start({ dir: domDir, port: 0, log: () => {}, audit: fileAudit(domDir, () => {}), handshakeMs: 1000 });
+    cleanup.push(() => domHub.close());
+    const childZero: any = {
+      tagName: 'SPAN',
+      id: 'empty-badge',
+      className: '',
+      getAttribute: () => undefined,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: zeroSize ? 0 : 20, height: 10 }),
+      scrollWidth: 20,
+      clientWidth: 20,
+      scrollHeight: 10,
+      clientHeight: 10,
+      childNodes: [],
+      children: [],
+    };
+    const rootPanel: any = {
+      tagName: 'SECTION',
+      id: 'main',
+      className: '',
+      getAttribute: (k: string) => (k === 'data-reins' ? 'main' : undefined),
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 200, height: 100 }),
+      scrollWidth: 200,
+      clientWidth: 200,
+      get scrollHeight() {
+        return zeroSize ? 180 : 100;
+      },
+      clientHeight: 100,
+      childNodes: [],
+      children: [childZero],
+    };
+    const domApp = createReins({
+      console: { info() {}, log() {}, warn() {}, groupCollapsed() {}, groupEnd() {}, error() {} },
+      innerWidth: 1280,
+      innerHeight: 800,
+      devicePixelRatio: 1,
+      getComputedStyle: () => ({ display: 'block', overflowX: 'visible', overflowY: 'hidden', direction: 'ltr' }),
+      document: { title: 'DOM Clip', readyState: 'complete', body: rootPanel, querySelector: () => rootPanel },
+    } as any);
+    domApp.registerPanel('main', () => ({ id: 'main', x: 0, y: 0, width: 200, height: 100, scrollX: 0, scrollY: 0, devicePixelRatio: 1, viewportWidth: 1280, viewportHeight: 800 }));
+    await domApp.connect({ url: `ws://127.0.0.1:${domHub.port}`, token: domHub.token, WebSocket: WebSocket as any, reconnect: false, lazy: false });
+    cleanup.push(() => domApp.disconnect());
+    const domSrv = createReinsNode({ NODE_ENV: 'development' });
+    domSrv.action({ name: 'trigger-clip', description: 'Triggers vertical clip and zero size', run: () => ((zeroSize = true), { ok: true }) });
+    await domSrv.connect({ url: `ws://127.0.0.1:${domHub.port}`, token: domHub.token, WebSocket: WebSocket as any, reconnect: false, meta: { name: 'dom-srv' } });
+    cleanup.push(() => domSrv.disconnect());
+    const cDom = capture();
+    expect(await fuzzMain(['--steps', '3', '--seed', 'dom', '--port', String(domHub.port), '--dir', domDir], domDir, cDom.out, cDom.err)).toBe(2);
+    const issues = cDom.json().failures.map((f: any) => f.issue);
+    expect(issues).toContain('vertical-clip');
+    expect(issues).toContain('zero-size');
   });
 
   const cliPath = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
