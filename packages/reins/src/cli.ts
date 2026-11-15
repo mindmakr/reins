@@ -4,6 +4,7 @@ import { parseArgs, portInUse, USAGE } from './bridge/args.js';
 import { fileAudit } from './bridge/audit.js';
 import { DEFAULT_PORT, Hub } from './bridge/hub.js';
 import { startMcp } from './bridge/mcp.js';
+import { mapMain } from './bridge/map-cli.js';
 import { execMain, packetMain, scenarioMain } from './bridge/oneshot-cli.js';
 import { reportMain } from './bridge/report-cli.js';
 import { flightMain } from './flight/check-cli.js';
@@ -32,6 +33,10 @@ async function main() {
   }
   if (argv[0] === 'packet') {
     process.exitCode = await packetMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'map') {
+    process.exitCode = await mapMain(argv.slice(1));
     return;
   }
   if (argv[0] === 'flight') {

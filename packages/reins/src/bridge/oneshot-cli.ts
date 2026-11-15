@@ -178,7 +178,7 @@ export async function callBridge(opts: BridgeCallOptions): Promise<unknown> {
   }
 }
 
-interface CommonCliFlags {
+export interface CommonCliFlags {
   port: number;
   dir: string;
   timeoutMs: number;
@@ -192,7 +192,7 @@ function takeValue(args: string[], flag: string): string {
   return v;
 }
 
-function parseFlags(argv: string[], cwd: string, valueFlags: Set<string>, boolFlags: Set<string>): {
+export function parseFlags(argv: string[], cwd: string, valueFlags: Set<string>, boolFlags: Set<string>): {
   common: CommonCliFlags;
   values: Record<string, string>;
   bools: Set<string>;
