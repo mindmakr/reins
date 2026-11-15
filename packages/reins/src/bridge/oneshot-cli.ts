@@ -5,10 +5,12 @@ import WebSocket from 'ws';
 import { DEFAULT_PORT, HOST } from './hub.js';
 import { tokenPath } from './token.js';
 
+import { LIMITS, summarizeDom } from '../report.js';
+
 export const ONESHOT_USAGE = `usage:
   reins exec <tool_or_action> [--input '<json>'] [--confirm] [--target app|server] [--port <n>] [--dir <path>] [--timeout <ms>]
   reins scenario <file.json> [--confirm] [--panel <id>] [--port <n>] [--dir <path>] [--timeout <ms>]
-  reins packet [--panel <id>] [--snap] [--port <n>] [--dir <path>] [--timeout <ms>]
+  reins packet [--panel <id>] [--snap] [--text] [--port <n>] [--dir <path>] [--timeout <ms>]
 
 Connects to the running local reins bridge on 127.0.0.1 using the token in <dir>/.reins/token, runs the check, and prints redacted JSON.`;
 
@@ -495,6 +497,274 @@ export async function scenarioMain(
 }
 
 /** Collects one compact redacted evidence packet from the live bridge. */
+const round1 = (n: number): number => Math.round(n * 10) / 10;
+
+export interface DuplicateDbSpan {
+  traceId: string | null;
+  method: string;
+  route: string;
+  name: string;
+  count: number;
+  totalMs: number;
+  nPlusOne: boolean;
+}
+
+export interface CausalTraceEntry {
+  traceId: string | null;
+  method: string;
+  route: string;
+  url: string;
+  status: number;
+  clientMs: number | null;
+  serverMs: number;
+  dbMs: number;
+  spanCount: number;
+  duplicateDbSpans: Array<{ name: string; count: number; totalMs: number; nPlusOne: boolean }>;
+}
+
+/**
+ * Joins frontend network entries and `x-reins-trace` server requests into compact causal traces,
+ * flagging repeated `db.*` spans (N+1 queries) and exposing Node event-loop lag percentiles and frontend timings.
+ */
+export function buildCausalTraces(network: unknown, server: unknown, perf: unknown) {
+  const netList: any[] = Array.isArray((network as any)?.requests)
+    ? (network as any).requests
+    : Array.isArray(network)
+      ? (network as any[])
+      : [];
+  const serverReqs: any[] = Array.isArray((server as any)?.requests) ? (server as any).requests : [];
+  const netByTrace = new Map<string, any>();
+  for (const n of netList) {
+    if (n && typeof n.traceId === 'string' && n.traceId) netByTrace.set(n.traceId, n);
+  }
+
+  const rawLoop = (server as any)?.runtime?.eventLoop ?? (perf as any)?.server?.runtime?.eventLoop ?? null;
+  const eventLoop = rawLoop
+    ? {
+        p50Ms: Number(rawLoop.p50Ms ?? rawLoop.p50 ?? 0),
+        p99Ms: Number(rawLoop.p99Ms ?? rawLoop.p99 ?? 0),
+        maxMs: Number(rawLoop.maxMs ?? rawLoop.max ?? 0),
+        p50: Number(rawLoop.p50Ms ?? rawLoop.p50 ?? 0),
+        p99: Number(rawLoop.p99Ms ?? rawLoop.p99 ?? 0),
+        max: Number(rawLoop.maxMs ?? rawLoop.max ?? 0),
+      }
+    : null;
+
+  const traces: CausalTraceEntry[] = [];
+  const duplicateDbSpans: DuplicateDbSpan[] = [];
+
+  for (const req of serverReqs) {
+    if (!req || typeof req !== 'object') continue;
+    const traceId = typeof req.traceId === 'string' && req.traceId ? req.traceId : null;
+    const netMatch = traceId ? netByTrace.get(traceId) : undefined;
+    const spanList: any[] = Array.isArray(req.spans) ? req.spans : [];
+    const dbGroups = new Map<string, { count: number; totalMs: number }>();
+    for (const s of spanList) {
+      if (!s || typeof s.name !== 'string' || !s.name.startsWith('db.')) continue;
+      const g = dbGroups.get(s.name) ?? { count: 0, totalMs: 0 };
+      g.count += 1;
+      g.totalMs += Number(s.ms ?? s.durationMs ?? 0);
+      dbGroups.set(s.name, g);
+    }
+    const perReqDupes: Array<{ name: string; count: number; totalMs: number; nPlusOne: boolean }> = [];
+    for (const [name, g] of dbGroups.entries()) {
+      if (g.count >= 2) {
+        const entry = { name, count: g.count, totalMs: round1(g.totalMs), nPlusOne: g.count >= LIMITS.nPlusOne };
+        perReqDupes.push(entry);
+        duplicateDbSpans.push({
+          traceId,
+          method: String(req.method || 'GET'),
+          route: String(req.route || req.url || ''),
+          ...entry,
+        });
+      }
+    }
+    traces.push({
+      traceId,
+      method: String(req.method || 'GET'),
+      route: String(req.route || req.url || ''),
+      url: String(req.url || ''),
+      status: Number(req.status ?? 0),
+      clientMs: netMatch && typeof netMatch.ms === 'number' ? netMatch.ms : null,
+      serverMs: Number(req.ms ?? 0),
+      dbMs: Number(req.dbMs ?? 0),
+      spanCount: spanList.length,
+      duplicateDbSpans: perReqDupes,
+    });
+  }
+
+  const lifecycle = (perf as any)?.lifecycle ?? null;
+  const components = Array.isArray((perf as any)?.components) ? (perf as any).components : [];
+
+  return {
+    eventLoop,
+    timings: lifecycle
+      ? {
+          ttfbMs: lifecycle.ttfbMs ?? null,
+          firstContentfulPaintMs: lifecycle.firstContentfulPaintMs ?? null,
+          loadMs: lifecycle.loadMs ?? null,
+          domNodes: lifecycle.domNodes ?? null,
+        }
+      : null,
+    components,
+    traces,
+    duplicateDbSpans,
+  };
+}
+
+export interface LayoutIssueMetric {
+  panel: string;
+  issue: string;
+  selector: string;
+  tag: string | null;
+  text: string | null;
+  box: { x: number; y: number; width: number; height: number } | null;
+  styles: Record<string, unknown> | null;
+}
+
+/**
+ * Serializes panel bounding boxes, `devicePixelRatio`, computed CSS metrics (`direction`, `display`,
+ * `flexDirection`, `overflowX`), and `reins_dom` layout clipping flags for text-only verifiers.
+ */
+export function buildLayoutMetrics(panelBoxes: Record<string, any>, domTrees: Record<string, any>) {
+  const panelIds = [...new Set([...Object.keys(panelBoxes || {}), ...Object.keys(domTrees || {})])];
+  const panels: Array<Record<string, any>> = [];
+  const allIssues: LayoutIssueMetric[] = [];
+  let firstDpr: number | null = null;
+
+  const pickStyles = (s: any) => ({
+    direction: s?.direction ?? null,
+    display: s?.display ?? null,
+    flexDirection: s?.flexDirection ?? null,
+    overflowX: s?.overflowX ?? null,
+    overflowY: s?.overflowY ?? null,
+  });
+
+  for (const panelId of panelIds) {
+    const rawBox = panelBoxes?.[panelId];
+    const boxObj = rawBox && typeof rawBox === 'object' ? (rawBox.box ?? rawBox) : null;
+    const domRoot = domTrees?.[panelId] ?? null;
+    const dpr = Number(boxObj?.devicePixelRatio ?? boxObj?.dpr ?? 1);
+    if (firstDpr === null && Number.isFinite(dpr)) firstDpr = dpr;
+
+    const issues: LayoutIssueMetric[] = [];
+    const flagSet = new Set<string>();
+    let hasRtlDescendant = false;
+
+    const walk = (node: any) => {
+      if (!node || typeof node !== 'object') return;
+      if (node.styles?.direction === 'rtl') hasRtlDescendant = true;
+      if (Array.isArray(node.issues) && node.issues.length) {
+        const selector =
+          typeof node.selector === 'string'
+            ? node.selector
+            : `${node.tag || 'div'}${node.id ? `#${node.id}` : ''}${node.panel ? `[data-reins="${node.panel}"]` : ''}`;
+        for (const issue of node.issues) {
+          if (typeof issue !== 'string') continue;
+          flagSet.add(issue);
+          const item: LayoutIssueMetric = {
+            panel: panelId,
+            issue,
+            selector,
+            tag: typeof node.tag === 'string' ? node.tag : null,
+            text: typeof node.text === 'string' ? node.text : null,
+            box: node.box ?? node.rect ?? null,
+            styles: node.styles ? pickStyles(node.styles) : null,
+          };
+          issues.push(item);
+          allIssues.push({ ...item, ...(item.box ? { box: { ...item.box } } : {}), ...(item.styles ? { styles: { ...item.styles } } : {}) });
+        }
+      }
+      if (Array.isArray(node.children)) for (const ch of node.children) walk(ch);
+    };
+    if (domRoot) walk(domRoot);
+
+    const rootStyles = domRoot?.styles ?? {};
+    const direction =
+      typeof rootStyles.direction === 'string' && rootStyles.direction
+        ? rootStyles.direction
+        : hasRtlDescendant
+          ? 'rtl'
+          : 'ltr';
+
+    const resolvedBox = boxObj
+      ? {
+          x: Number(boxObj.x ?? 0),
+          y: Number(boxObj.y ?? 0),
+          width: Number(boxObj.width ?? 0),
+          height: Number(boxObj.height ?? 0),
+          devicePixelRatio: dpr,
+          ...(boxObj.viewportWidth !== undefined ? { viewportWidth: boxObj.viewportWidth } : {}),
+          ...(boxObj.viewportHeight !== undefined ? { viewportHeight: boxObj.viewportHeight } : {}),
+        }
+      : domRoot?.box
+        ? { ...domRoot.box, devicePixelRatio: dpr }
+        : null;
+
+    panels.push({
+      id: panelId,
+      box: resolvedBox,
+      direction,
+      styles: {
+        direction,
+        display: rootStyles.display ?? null,
+        flexDirection: rootStyles.flexDirection ?? null,
+        overflowX: rootStyles.overflowX ?? null,
+        overflowY: rootStyles.overflowY ?? null,
+      },
+      flags: [...flagSet],
+      issues,
+      summary: domRoot ? summarizeDom(panelId, domRoot) : null,
+    });
+  }
+
+  return { devicePixelRatio: firstDpr ?? 1, panels, issues: allIssues };
+}
+
+/** Formats a redacted packet as a compact deterministic text table for text-only verifiers. */
+export function formatPacketText(pkt: Record<string, any>): string {
+  const lines: string[] = [`reins packet v${pkt.schemaVersion ?? '1.0.0'} (${pkt.generatedAt ?? ''})`];
+  const ct = pkt.causalTraces;
+  if (ct) {
+    if (ct.eventLoop) {
+      lines.push(
+        `event-loop lag: p50=${ct.eventLoop.p50Ms}ms p99=${ct.eventLoop.p99Ms}ms max=${ct.eventLoop.maxMs}ms`,
+      );
+    }
+    if (ct.timings) {
+      lines.push(
+        `timings: ttfb=${ct.timings.ttfbMs ?? '-'}ms fcp=${ct.timings.firstContentfulPaintMs ?? '-'}ms load=${ct.timings.loadMs ?? '-'}ms domNodes=${ct.timings.domNodes ?? '-'}`,
+      );
+    }
+    for (const c of ct.components || []) {
+      lines.push(`component ${c.id}: renders=${c.renders} mountedAt=${c.mountedAtMs}ms lastRender=${c.lastRenderMs}ms`);
+    }
+    for (const t of ct.traces || []) {
+      lines.push(
+        `trace ${t.traceId ?? '-'}: ${t.method} ${t.route} status=${t.status} client=${t.clientMs ?? '-'}ms server=${t.serverMs}ms db=${t.dbMs}ms spans=${t.spanCount}`,
+      );
+    }
+    for (const d of ct.duplicateDbSpans || []) {
+      lines.push(
+        `duplicate db span (${d.traceId ?? '-'}): ${d.name} x${d.count} (${d.totalMs}ms)${d.nPlusOne ? ' [N+1]' : ''}`,
+      );
+    }
+  }
+  const lm = pkt.layoutMetrics;
+  if (lm) {
+    for (const p of lm.panels || []) {
+      const b = p.box ?? { x: 0, y: 0, width: 0, height: 0 };
+      lines.push(
+        `panel ${p.id}: box=(${b.x},${b.y},${b.width}x${b.height}) dpr=${b.devicePixelRatio ?? lm.devicePixelRatio ?? 1} direction: ${p.direction} display=${p.styles?.display ?? '-'} flexDirection=${p.styles?.flexDirection ?? '-'} overflowX=${p.styles?.overflowX ?? '-'} flags=[${(p.flags || []).join(', ')}]`,
+      );
+      for (const i of p.issues || []) {
+        lines.push(`layout issue [${p.id}]: ${i.issue} at ${i.selector} (direction: ${p.direction})`);
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
 export async function packetMain(
   argv: string[],
   cwd = process.cwd(),
@@ -503,7 +773,7 @@ export async function packetMain(
 ): Promise<number> {
   let client: BridgeClient | null = null;
   try {
-    const { common, values, bools } = parseFlags(argv, cwd, new Set(['--panel']), new Set(['--snap']));
+    const { common, values, bools } = parseFlags(argv, cwd, new Set(['--panel']), new Set(['--snap', '--text']));
     if (common.help) {
       print(ONESHOT_USAGE);
       return 0;
@@ -514,26 +784,56 @@ export async function packetMain(
     }
     client = await openBridgeClient({ port: common.port, dir: common.dir, timeoutMs: common.timeoutMs });
     const actions = (await client.call('reins_list_actions', {})) as Record<string, any>;
-    const panel = values['--panel'] ?? (bools.has('--snap') ? actions?.panels?.[0] : undefined);
-    const [state, network, errors, perf] = await Promise.all([
+    const hasServer = Array.isArray(actions?.servers) && actions.servers.length > 0;
+    const primaryPanel = values['--panel'] ?? (bools.has('--snap') ? actions?.panels?.[0] : undefined);
+    const panelIds: string[] = values['--panel']
+      ? [values['--panel']]
+      : Array.isArray(actions?.panels)
+        ? actions.panels.slice(0, 20)
+        : [];
+
+    const [state, network, errors, perf, server] = await Promise.all([
       client.call('reins_state', {}),
       client.call('reins_network', {}),
       client.call('reins_errors', {}),
       client.call('reins_perf', {}),
+      hasServer ? client.call('reins_server', {}).catch(() => undefined) : Promise.resolve(undefined),
     ]);
-    const dom = panel ? await client.call('reins_dom', { panel }) : undefined;
-    const snap = bools.has('--snap') && panel ? await client.call('reins_snap', { id: panel }) : undefined;
-    print(JSON.stringify({
+
+    const panelBoxes: Record<string, any> = {};
+    const domTrees: Record<string, any> = {};
+    await Promise.all(
+      panelIds.map(async (pid) => {
+        const [boxRes, domRes] = await Promise.all([
+          client!.call('reins_panel_box', { id: pid }).catch(() => null),
+          client!.call('reins_dom', { panel: pid }).catch(() => null),
+        ]);
+        if (boxRes) panelBoxes[pid] = boxRes;
+        if (domRes) domTrees[pid] = domRes;
+      }),
+    );
+
+    const dom = primaryPanel ? (domTrees[primaryPanel] ?? (await client.call('reins_dom', { panel: primaryPanel }))) : undefined;
+    const snap = bools.has('--snap') && primaryPanel ? await client.call('reins_snap', { id: primaryPanel }) : undefined;
+
+    const causalTraces = buildCausalTraces(network, server, perf);
+    const layoutMetrics = buildLayoutMetrics(panelBoxes, domTrees);
+
+    const payload = {
       schemaVersion: '1.0.0',
       generatedAt: new Date().toISOString(),
-      actions,
-      state: redactStateMap(state),
-      network: redactDeep(network),
-      errors: redactDeep(errors),
-      perf: redactDeep(perf),
-      ...(dom !== undefined ? { dom: redactDeep(dom) } : {}),
-      ...(snap !== undefined ? { snap: redactDeep(snap) } : {}),
-    }, null, 2));
+      actions: structuredClone(actions),
+      state: redactStateMap(structuredClone(state)),
+      network: redactDeep(structuredClone(network)),
+      errors: redactDeep(structuredClone(errors)),
+      perf: redactDeep(structuredClone(perf)),
+      causalTraces: redactDeep(structuredClone(causalTraces)),
+      layoutMetrics: redactDeep(structuredClone(layoutMetrics)),
+      ...(server !== undefined ? { server: redactDeep(structuredClone(server)) } : {}),
+      ...(dom !== undefined ? { dom: redactDeep(structuredClone(dom)) } : {}),
+      ...(snap !== undefined ? { snap: redactDeep(structuredClone(snap)) } : {}),
+    };
+    print(bools.has('--text') ? formatPacketText(payload) : JSON.stringify(payload, null, 2));
     return 0;
   } catch (e: any) {
     err(`reins packet: ${e?.message ? String(e.message) : String(e)}`);

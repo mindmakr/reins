@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -408,6 +409,173 @@ describe('one-shot CLI (exec, scenario, packet)', () => {
       await execMain(['ping-server', '--target', 'server', '--input', '{"msg":"hi"}', '--port', String(hub.port), '--dir', dir], dir, c.out, c.err),
     ).toBe(0);
     expect(c.json()).toEqual({ pong: 'hi' });
+  });
+
+  it('reins packet captures causal x-reins-trace N+1 db.* spans and event-loop lag (p50/p99/max)', async () => {
+    const { dir, hub } = await setupPairedApp();
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    const paired = await rn.connect({
+      url: `ws://127.0.0.1:${hub.port}`,
+      token: hub.token,
+      WebSocket: WebSocket as any,
+      reconnect: false,
+      meta: { name: 'orders-api' },
+    });
+    expect(paired).toBe(true);
+    cleanup.push(() => rn.disconnect());
+
+    const srv = createServer(
+      rn.wrapHandler(async (_req: any, res: any) => {
+        for (let i = 0; i < 3; i++) {
+          await rn.span('db.select', async () => {
+            await new Promise((r) => setTimeout(r, 2));
+          });
+        }
+        res.statusCode = 200;
+        res.end(JSON.stringify({ ok: true }));
+      }),
+    );
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+    cleanup.push(() => new Promise<void>((resolve) => srv.close(() => resolve())));
+    const addr = srv.address() as { port: number };
+
+    const res = await fetch(`http://127.0.0.1:${addr.port}/api/orders?token=secret-token`, {
+      headers: { 'x-reins-trace': 'trace-n1', authorization: 'Bearer super-secret-jwt' },
+    });
+    expect(res.status).toBe(200);
+
+    const c = capture();
+    expect(await packetMain(['--port', String(hub.port), '--dir', dir], dir, c.out, c.err)).toBe(0);
+    const rawOut = c.stdout.join('\n');
+    expect(rawOut).not.toContain('[cycle]');
+    expect(rawOut).not.toContain('super-secret-jwt');
+
+    const pkt = c.json();
+    expect(pkt.causalTraces).toBeDefined();
+    expect(typeof pkt.causalTraces.eventLoop.p50Ms).toBe('number');
+    expect(typeof pkt.causalTraces.eventLoop.p99Ms).toBe('number');
+    expect(typeof pkt.causalTraces.eventLoop.maxMs).toBe('number');
+    expect(pkt.causalTraces.eventLoop.p50).toBe(pkt.causalTraces.eventLoop.p50Ms);
+    expect(pkt.causalTraces.eventLoop.p99).toBe(pkt.causalTraces.eventLoop.p99Ms);
+    expect(pkt.causalTraces.eventLoop.max).toBe(pkt.causalTraces.eventLoop.maxMs);
+    expect(pkt.causalTraces.duplicateDbSpans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          traceId: 'trace-n1',
+          method: 'GET',
+          route: '/api/orders',
+          name: 'db.select',
+          count: 3,
+          nPlusOne: true,
+        }),
+      ]),
+    );
+
+    const cText = capture();
+    expect(await packetMain(['--text', '--port', String(hub.port), '--dir', dir], dir, cText.out, cText.err)).toBe(0);
+    const txt = cText.stdout.join('\n');
+    expect(txt).toContain('event-loop lag:');
+    expect(txt).toContain('trace trace-n1: GET /api/orders');
+    expect(txt).toContain('db.select x3');
+    expect(txt).toContain('[N+1]');
+  });
+
+  it('reins packet detects Arabic RTL horizontal-clip and panel coordinates without --snap PNG', async () => {
+    const dir = makeProjectDir();
+    const audit = fileAudit(dir);
+    const hub = await Hub.start({ dir, port: 0, log: () => {}, audit, handshakeMs: 1000 });
+    cleanup.push(() => hub.close());
+
+    const rtlPanelEl = {
+      tagName: 'SECTION',
+      id: 'arabic-checkout',
+      className: 'checkout-rtl',
+      getAttribute: (k: string) => (k === 'data-reins' ? 'rtl-summary' : undefined),
+      getBoundingClientRect: () => ({ left: 16, top: 32, width: 320, height: 140 }),
+      scrollWidth: 460,
+      clientWidth: 320,
+      scrollHeight: 140,
+      clientHeight: 140,
+      childNodes: [{ nodeType: 3, textContent: 'ملخص الدفع' }],
+      children: [],
+    };
+    const g: any = {
+      console: makeFakeConsole(),
+      innerWidth: 375,
+      innerHeight: 812,
+      devicePixelRatio: 2,
+      getComputedStyle: () => ({
+        direction: 'rtl',
+        display: 'flex',
+        flexDirection: 'row-reverse',
+        overflowX: 'hidden',
+        overflowY: 'visible',
+      }),
+      document: {
+        title: 'Arabic App',
+        readyState: 'complete',
+        body: rtlPanelEl,
+        querySelector: (sel: string) => (sel.includes('rtl-summary') ? rtlPanelEl : null),
+        querySelectorAll: () => [rtlPanelEl],
+        getElementsByTagName: () => [rtlPanelEl],
+      },
+    };
+    const app = createReins(g);
+    app.panel('rtl-summary', () => ({
+      id: 'rtl-summary',
+      x: 16,
+      y: 32,
+      width: 320,
+      height: 140,
+      devicePixelRatio: 2,
+      viewportWidth: 375,
+      viewportHeight: 812,
+    }));
+    const paired = await app.connect({
+      url: `ws://127.0.0.1:${hub.port}`,
+      token: hub.token,
+      WebSocket: WebSocket as any,
+      reconnect: false,
+      lazy: false,
+    });
+    expect(paired).toBe(true);
+    cleanup.push(() => app.disconnect());
+
+    const c = capture();
+    expect(await packetMain(['--port', String(hub.port), '--dir', dir], dir, c.out, c.err)).toBe(0);
+    const pkt = c.json();
+    expect(pkt.snap).toBeUndefined();
+    expect(pkt.layoutMetrics.devicePixelRatio).toBe(2);
+    expect(pkt.layoutMetrics.panels).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'rtl-summary',
+          direction: 'rtl',
+          box: expect.objectContaining({ x: 16, y: 32, width: 320, height: 140, devicePixelRatio: 2 }),
+          styles: expect.objectContaining({
+            direction: 'rtl',
+            display: 'flex',
+            flexDirection: 'row-reverse',
+            overflowX: 'hidden',
+          }),
+          flags: expect.arrayContaining(['horizontal-clip']),
+        }),
+      ]),
+    );
+    expect(pkt.layoutMetrics.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          panel: 'rtl-summary',
+          issue: 'horizontal-clip',
+        }),
+      ]),
+    );
+
+    const cText = capture();
+    expect(await packetMain(['--text', '--port', String(hub.port), '--dir', dir], dir, cText.out, cText.err)).toBe(0);
+    const txt = cText.stdout.join('\n');
+    expect(txt).toContain('panel rtl-summary: box=(16,32,320x140) dpr=2 direction: rtl');
+    expect(txt).toContain('horizontal-clip');
   });
 
   const cliPath = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
