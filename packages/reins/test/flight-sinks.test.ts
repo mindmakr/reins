@@ -348,6 +348,9 @@ describe('B11: what sinks and the store never get', () => {
     await new Promise<void>((r) => closed.listen(0, '127.0.0.1', r));
     const closedPort = (closed.address() as AddressInfo).port;
     await new Promise((r) => closed.close(r));
+    // Each wait is bounded and named: once in nine loaded runs this test passed its time limit, and a stall should
+    // say which step it was (the upstream call should be refused at once: anything else means the port was taken).
+    const upstreamErrors: string[] = [];
     const app = createServer(
       f.wrapHandler(async (_req: IncomingMessage, res: ServerResponse) => {
         try {
@@ -355,16 +358,17 @@ describe('B11: what sinks and the store never get', () => {
             throw new Error('password=SECRET-IN-MESSAGE');
           });
         } catch {}
-        await fetch(`http://127.0.0.1:${closedPort}/SECRET-IN-UPSTREAM-PATH?key=SECRET-IN-UPSTREAM-QUERY`, { headers: { authorization: 'SECRET-IN-UPSTREAM-HEADER' } }).catch(() => {});
+        await fetch(`http://127.0.0.1:${closedPort}/SECRET-IN-UPSTREAM-PATH?key=SECRET-IN-UPSTREAM-QUERY`, { headers: { authorization: 'SECRET-IN-UPSTREAM-HEADER' }, signal: AbortSignal.timeout(2_000) }).catch((e) => void (upstreamErrors.push(String(e?.cause?.code ?? e?.name))));
         res.writeHead(500).end('no');
       }),
     );
     servers.push(app);
     await new Promise<void>((r) => app.listen(0, '127.0.0.1', r));
     const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
-    for (let i = 0; i < 3; i++) await fetch(`${base}/users/SECRET-IN-PATH?token=SECRET-IN-QUERY`, { headers: { authorization: 'Bearer SECRET-IN-HEADER', cookie: 'sid=SECRET-IN-COOKIE' } });
-    await f.flush();
-    await checkAndDeliver(f);
+    for (let i = 0; i < 3; i++) await within(fetch(`${base}/users/SECRET-IN-PATH?token=SECRET-IN-QUERY`, { headers: { authorization: 'Bearer SECRET-IN-HEADER', cookie: 'sid=SECRET-IN-COOKIE' } }), `request ${i + 1} to the app stalled`, 2_000);
+    expect(upstreamErrors, 'the upstream call is refused at once').toEqual(['ECONNREFUSED', 'ECONNREFUSED', 'ECONNREFUSED']);
+    await within(f.flush(), 'flush stalled', 1_000);
+    await within(checkAndDeliver(f), 'the check and its deliveries stalled', 1_000);
     const keys = got.got.map((n) => n.finding?.key);
     expect(keys).toContain('basic:error-share');
     expect(keys).toContain('unusual:code:ECONNREFUSED');
@@ -378,7 +382,7 @@ describe('B11: what sinks and the store never get', () => {
       report: f.findings(),
     });
     expect(dump).not.toMatch(/SECRET/);
-  }, 20_000); // a check of what is kept, not of speed: on a loaded machine its requests ran past the 5 s default
+  });
 
   it('a manifest file that is not JSON is said in fixed words: none of its text reaches a sink, the store or the finding', async () => {
     const dir = tmp();
