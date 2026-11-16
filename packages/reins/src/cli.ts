@@ -1,50 +1,51 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
-import { parseArgs, portInUse, USAGE } from './bridge/args.js';
-import { fileAudit } from './bridge/audit.js';
-import { DEFAULT_PORT, Hub } from './bridge/hub.js';
-import { startMcp } from './bridge/mcp.js';
-import { mapMain } from './bridge/map-cli.js';
-import { fuzzMain } from './bridge/fuzz-cli.js';
-import { execMain, packetMain, scenarioMain } from './bridge/oneshot-cli.js';
-import { reportMain } from './bridge/report-cli.js';
-import { flightMain } from './flight/check-cli.js';
-import { tokenPath } from './bridge/token.js';
-import { main as verifyMain } from './verify.js';
+import type { Hub } from './bridge/hub.js';
+
+// Each command loads only its own modules: a one-shot command (verify, report, exec, …) does not pay for the MCP SDK
+// and the bridge, which took most of a call's start-up time (about 260 ms against 60 ms for node alone).
 
 const err = (m: string) => process.stderr.write(m + '\n');
 
 async function main() {
   const argv = process.argv.slice(2);
   if (argv[0] === 'verify') {
+    const { main: verifyMain } = await import('./verify.js');
     process.exitCode = verifyMain(argv.slice(1));
     return;
   }
   if (argv[0] === 'report') {
+    const { reportMain } = await import('./bridge/report-cli.js');
     process.exitCode = reportMain(argv.slice(1));
     return;
   }
   if (argv[0] === 'exec') {
+    const { execMain } = await import('./bridge/oneshot-cli.js');
     process.exitCode = await execMain(argv.slice(1));
     return;
   }
   if (argv[0] === 'scenario') {
+    const { scenarioMain } = await import('./bridge/oneshot-cli.js');
     process.exitCode = await scenarioMain(argv.slice(1));
     return;
   }
   if (argv[0] === 'packet') {
+    const { packetMain } = await import('./bridge/oneshot-cli.js');
     process.exitCode = await packetMain(argv.slice(1));
     return;
   }
   if (argv[0] === 'fuzz') {
+    const { fuzzMain } = await import('./bridge/fuzz-cli.js');
     process.exitCode = await fuzzMain(argv.slice(1));
     return;
   }
   if (argv[0] === 'map') {
+    const { mapMain } = await import('./bridge/map-cli.js');
     process.exitCode = await mapMain(argv.slice(1));
     return;
   }
   if (argv[0] === 'flight') {
+    const { flightMain } = await import('./flight/check-cli.js');
     const code = await flightMain(argv.slice(1));
     process.exitCode = code;
     // A report or a watcher loads the app's config module, whose store (a database pool) may keep the process
@@ -52,6 +53,7 @@ async function main() {
     if (argv[1] === 'report' || argv[1] === 'watch') process.stdout.write('', () => process.exit(code));
     return;
   }
+  const { parseArgs, portInUse, USAGE } = await import('./bridge/args.js');
   let args;
   try {
     args = parseArgs(argv, process.cwd());
@@ -64,6 +66,9 @@ async function main() {
     err(USAGE);
     return;
   }
+  // Every module the bridge needs, the MCP SDK included, loads before the port opens: a failed import then exits at
+  // once, instead of leaving a bound port and no MCP server behind.
+  const [{ fileAudit }, { DEFAULT_PORT, Hub }, { tokenPath }, mcp] = await Promise.all([import('./bridge/audit.js'), import('./bridge/hub.js'), import('./bridge/token.js'), args.mcp ? import('./bridge/mcp.js') : null]);
   const dir = resolve(args.dir);
   const audit = fileAudit(dir);
   let hub: Hub;
@@ -81,7 +86,7 @@ async function main() {
   // The token itself is not printed: stderr ends up in the agent host's MCP logs. It is in the file.
   err(`[reins] pairing token written to ${tokenPath(dir)}${args.rotate ? ' (renewed after each pairing)' : ''}`);
   audit({ source: 'bridge', event: 'start', ok: true, port: hub.port });
-  if (args.mcp) await startMcp({ hub, dir, cdp: args.cdp, audit });
+  if (mcp) await mcp.startMcp({ hub, dir, cdp: args.cdp, audit });
   const stop = async () => {
     audit({ source: 'bridge', event: 'stop', ok: true });
     await hub.close();

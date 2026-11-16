@@ -64,3 +64,12 @@ export function fakeGlobal(extra: Record<string, unknown> = {}): any {
 }
 
 export const connectOpts = { token: GOOD, WebSocket: FakeSocket as any, reconnect: false, lazy: false };
+
+/**
+ * `p`, or a failure naming what did not happen within `ms` (4 s by default: inside vitest's 5 s test limit, so the
+ * message shows instead of a generic time-out). For tests that wait on an event rather than a fixed time.
+ */
+export function within<T>(p: Promise<T>, what: string, ms = 4_000): Promise<T> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([p, new Promise<T>((_, no) => (t = setTimeout(() => no(new Error(what)), ms)))]).finally(() => clearTimeout(t));
+}

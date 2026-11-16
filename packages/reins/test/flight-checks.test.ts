@@ -3,7 +3,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFlight, type Flight } from '../src/flight.js';
 import { check, type PromiseCheck } from '../src/flight/checker.js';
 import { validateManifest } from '../src/flight/manifest.js';
@@ -530,7 +530,11 @@ describe('a checker that cannot take the lock or reach the store (F4, F5)', () =
 });
 
 describe('probes that never settle (F6) and probe writes that fail (F15)', () => {
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // Fake timers: the periods and time limits these tests count run exactly, however busy the machine is (with real
+  // timers, "more than 2 calls in 150 ms" and "1 pending write after 40 ms" failed under load).
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+  const sleep = (ms: number) => vi.advanceTimersByTimeAsync(ms);
 
   it('a probe is not called again while its last call is outstanding, and stays broken by timeout', async () => {
     const store = memoryStore();

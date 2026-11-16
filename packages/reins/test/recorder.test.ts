@@ -524,6 +524,66 @@ describe('one set of hooks feeds the development pairing and flight', () => {
     expect(f.recorder()!.requests()).toMatchObject([{ route: '/api/x', spans: [{ name: 'db.q' }] }]);
   });
 
+  it('counts a request once when both hooks are installed (the dev middleware and flight)', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    await rn.connect({ standalone: true, reconnect: false, tokenFile: 'no-such-token-file' });
+    stops.push(() => rn.disconnect());
+    const f = started({ routes: ['/api/x'] });
+    const handler = (_q: IncomingMessage, res: ServerResponse) => res.end();
+    const base = await serve(rn.wrapHandler(createFlight().wrapHandler(handler)));
+    await fetch(`${base}/api/x`);
+    await settle();
+    expect(rn.report().requests).toHaveLength(1);
+    expect(f.recorder()!.requests()).toHaveLength(1);
+  });
+
+  it('with flight hooked first, the dev hook still adds Server-Timing and its spans still reach the request', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    await rn.connect({ standalone: true, reconnect: false, tokenFile: 'no-such-token-file' });
+    stops.push(() => rn.disconnect());
+    const f = started({ routes: ['/api/x'] });
+    const inner = rn.wrapHandler((_q: IncomingMessage, res: ServerResponse) => rn.span('db.q', () => res.end()), { serverTiming: true });
+    // Flight's hook first; a context switch between the hooks stands in for a body parser's stream callback.
+    const base = await serve(createFlight().wrapHandler((q: IncomingMessage, res: ServerResponse) => void setImmediate(() => inner(q, res))));
+    const res = await fetch(`${base}/api/x`);
+    await settle();
+    expect(res.headers.get('server-timing')).toBeTruthy();
+    expect(rn.report().requests).toHaveLength(1);
+    expect(f.recorder()!.requests()).toMatchObject([{ route: '/api/x', spans: [{ name: 'db.q' }] }]);
+  });
+
+  it('a raw-body parser setting req.raw between the hooks does not split the request', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    await rn.connect({ standalone: true, reconnect: false, tokenFile: 'no-such-token-file' });
+    stops.push(() => rn.disconnect());
+    started({ routes: ['/api/x'] });
+    const inner = rn.wrapHandler((_q: IncomingMessage, res: ServerResponse) => res.end());
+    const base = await serve(createFlight().wrapHandler((q: IncomingMessage, res: ServerResponse) => {
+      (q as any).raw = Buffer.from('body'); // what a raw-body parser leaves on the request
+      inner(q, res);
+    }));
+    await fetch(`${base}/api/x`);
+    await settle();
+    expect(rn.report().requests).toHaveLength(1);
+  });
+
+  it('a Fastify hook beside a wrapped handler is one capture', async () => {
+    const f = started({ routes: ['/api/x'] });
+    const hooks: Record<string, (...a: any[]) => void> = {};
+    createFlight().fastify({ addHook: (name: string, fn: (...a: any[]) => void) => void (hooks[name] = fn) });
+    const base = await serve(createFlight().wrapHandler((q: IncomingMessage, res: ServerResponse) => {
+      const freq: any = { raw: q, routeOptions: { url: '/api/x' } };
+      hooks.onRequest(freq, {}, () => {
+        // As in Fastify: onResponse runs from a 'finish' listener added after the wrapper's own.
+        res.once('finish', () => hooks.onResponse(freq, { statusCode: 200 }, () => {}));
+        res.end();
+      });
+    }));
+    await fetch(`${base}/api/x/7`);
+    await settle();
+    expect(f.recorder()!.requests()).toMatchObject([{ route: '/api/x' }]);
+  });
+
   it('feeds flight from the node hook when only flight is started, and the node pairing from the flight hook', async () => {
     const f = started();
     const rn = createReinsNode({ NODE_ENV: 'development' });

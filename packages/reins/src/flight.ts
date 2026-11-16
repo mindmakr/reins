@@ -727,7 +727,7 @@ export function createFlight(env: Record<string, string | undefined> = process.e
     manifest: (): ManifestResult | null => run?.manifest || null,
     /** Step counts of this instance: queued, written, dropped, invalid, store errors. */
     stepStats: () => run?.writer?.stats() || null,
-    /** Express/Connect middleware. The same hook as `reinsNode.middleware()`; install one of them, once. */
+    /** Express/Connect middleware. The same hook as `reinsNode.middleware()`: both may be installed, and they share one capture per request. */
     middleware: () => middleware(),
     /** Wraps a plain `(req, res)` handler. */
     wrapHandler: <H extends (req: any, res: any, ...rest: any[]) => any>(handler: H): H => wrapHandler(handler),

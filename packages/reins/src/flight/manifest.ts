@@ -443,7 +443,7 @@ export function withoutParseDetail(result: ManifestResult): ManifestResult {
 export function parseManifest(text: string): ManifestResult {
   let data: unknown;
   try {
-    data = JSON.parse(String(text).replace(/^﻿/, ''));
+    data = JSON.parse(String(text).replace(/^\uFEFF/, ''));
   } catch (e) {
     return { ok: false, problems: [{ path: ROOT, message: `${NOT_JSON}: ${e instanceof Error ? e.message : String(e)}` }] };
   }

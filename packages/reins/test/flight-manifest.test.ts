@@ -292,7 +292,7 @@ describe('validateManifest', () => {
       expect(r.ok).toBe(false);
       expect(r.problems[0].path).toBe('(root)');
     }
-    expect(parseManifest('﻿' + JSON.stringify(example())).ok).toBe(true);
+    expect(parseManifest('\uFEFF' + JSON.stringify(example())).ok).toBe(true);
     expect(readManifest(join(tmpdir(), 'reins-no-such-manifest.json')).problems[0].message).toMatch(/no such file/);
   });
 

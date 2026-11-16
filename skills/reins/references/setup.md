@@ -23,7 +23,19 @@ Install the single package as a dev dependency (or via `npx expo install @mindma
 npm i -D @mindmakr/reins
 ```
 
-(Use `pnpm add -D @mindmakr/reins`, `yarn add -D @mindmakr/reins`, or `bun add -d reins` to match the repo's lockfile.)
+(Use `pnpm add -D @mindmakr/reins`, `yarn add -D @mindmakr/reins`, or `bun add -d @mindmakr/reins` to match the repo's lockfile. Flight is the exception: it runs in production, so it is a regular dependency, `references/flight.md`.)
+
+What the package provides:
+
+- `@mindmakr/reins`: the browser and React Native core (under 5 KB min+gzip, no browser dependencies): `action`, `state`, `panel`, `markComponent`, `perf`, `dom`
+- `@mindmakr/reins/react`: `useReinsAction`, `useReinsState`, `<ReinsPanel id>` (tracks mount time and render counts)
+- `@mindmakr/reins/expo`: `connectExpo`, `<ReinsPanel id>`, `useReinsPanel`, `useReinsAction`, `useReinsState`
+- `@mindmakr/reins/node`: dev-only Node middleware (`middleware`, `wrapHandler`, `fastify`), `span('db.*')`, `Server-Timing` and `x-reins-trace` correlation
+- `@mindmakr/reins/record`: opt-in tester recording (`?reins=record` or `startRecording()`) that exports `.md` and `.json` sessions without a bridge
+- `@mindmakr/reins/report`: Markdown and JSON session reports and before/after diffs (`reins report --compare a.json b.json`)
+- `@mindmakr/reins/adapters`: `zustand`, `redux`, `reactQuery`, `routerLocation`, `fromStore`
+- `@mindmakr/reins/vite`, `@mindmakr/reins/next`, `@mindmakr/reins/metro`: build plugins (serve the token in dev, swap to stubs in production)
+- `reins bridge`: the localhost (`127.0.0.1:7357`) WebSocket hub and stdio MCP server; `reins verify <dir>`: fails if `__REINS_DEV_ONLY__` is in a production build; `reins exec|scenario|packet|fuzz|map`: one-shot commands against a running bridge (`drive.md`)
 
 ## Step 3: Wire the build plugin and token endpoint
 
@@ -131,6 +143,8 @@ if (process.env.NODE_ENV !== 'production') {
 const rows = await reinsNode.span('db.invoices.select', () => db.query('SELECT ...'));
 ```
 
+If the server also runs flight (`references/flight.md`), both hooks may stay: they share one capture per request, so each request is recorded once.
+
 ### Optional: Tester session export (`@mindmakr/reins/record`)
 
 To let human QA testers record a session (`?reins=record`) and download `.md` + `.json` diagnostics in dev or private staging (`REINS_ENABLE=1`), add `recordFromUrl()` in the browser entry (`@mindmakr/reins/vite`, `@mindmakr/reins/next`, and `@mindmakr/reins/metro` swap `@mindmakr/reins/record` for `@mindmakr/reins/record-stub` in production builds):
@@ -175,8 +189,8 @@ In the app's root shell or key feature components, import `useReinsAction`, `use
   ```
 - **Tester sign-in (only when a real login flow exists)**:
   Use the app's normal sign-in function with dev-only environment variables (`import.meta.env.VITE_TEST_USER_EMAIL`, etc.). **Never** bypass authentication or hardcode secrets.
-- **Consequential actions**:
-  Any action that resets dev data, deletes records or triggers side effects must set `consequential: true`.
+- **Consequential actions** (the one definition; other pages link here):
+  Set `consequential: true` on an action that changes real data, deletes records, resets dev data, spends money or sends messages. `reins_run_action` then refuses it without `confirm: true`, and an agent passes `confirm: true` only after the person agrees.
 - **Panels**:
   Wrap the 2–5 main screens or sections in `<ReinsPanel id="kebab-case-id">…</ReinsPanel>` so agents can measure and snap them by ID, inspect their DOM and computed CSS via `reins_dom`, and automatically track their mount time and render counts in `reins_perf`.
 
@@ -196,44 +210,29 @@ In the app's root shell or key feature components, import `useReinsAction`, `use
 }
 ```
 
+- **Snaps in a browser**: add `"--cdp", "http://127.0.0.1:9222"` to `args`, and Playwright to the project's dev dependencies (`drive.md`, step 1).
+- **The app in a subfolder** (a monorepo whose root `package.json` does not have `@mindmakr/reins`): `npx reins` at the root cannot find it. Point at the installed CLI and the app's folder instead: `"command": "node", "args": ["<app>/node_modules/@mindmakr/reins/dist/cli.js", "bridge", "--dir", "<app>"]` (the root `node_modules` when the workspace hoists it).
+
 ## Step 7: Add bundle verification to `package.json` and verify
 
-Update the `"build"` script in `package.json` so every production build checks that no reins dev code (`__REINS_DEV_ONLY__`) remains:
+Update the `"build"` script in `package.json` so every production build checks that no reins dev code (`__REINS_DEV_ONLY__`) remains (inside npm scripts `reins` is on the path, so no `npx`):
 
 - **Vite**: `"build": "vite build && reins verify dist"`
 - **Next.js**: `"build": "next build && reins verify .next/static"`
-- **Expo**: `"export:verify": "npx expo export && npx reins verify dist"`
+- **Expo**: `"export:verify": "npx expo export && reins verify dist"`
 
-Run the production build and `npx reins verify <build-dir>` (or `npx reins-verify-bundle <build-dir>`) to confirm the check exits `0` (`reins-verify-bundle: clean`), and run the project's test suite.
+Then run the production build: it exits `0` with `reins-verify-bundle: clean`. Run the tests for the files you changed, not the whole suite.
 
-While the dev app is running and paired with the bridge, export the canonical UI/server action, state, and `<ReinsPanel>` contract into `feature-map.json` (and optionally merge a static Coordinator map):
+To export the app's actions, state and panels as `feature-map.json` for Coordinator, see `companion.md`.
+
+## Step 8: Trim the agent prompt prefix (optional, ask first)
+
+Every agent turn re-sends a fixed prefix of tool definitions, skill descriptions and MCP tool names, mostly plugins and skills the project never uses. If Coordinator 1.6.0 or later is installed (`installPath` of the `coordinator@coordinator` entry in `~/.claude/plugins/installed_plugins.json`), run its script for this project and show the person the draft before writing it:
 
 ```sh
-npx reins map
-# or merge static routes/screens from Coordinator's map snapshot:
-npx reins map --static .coordinator/runs/<run>/map/map.json --out feature-map.json
+node <installPath>/skills/coordinator/scripts/prefix.mjs report --project <dir>
+node <installPath>/skills/coordinator/scripts/prefix.mjs draft --project <dir> --keep reins,<plugins and skills the person names>
+node <installPath>/skills/coordinator/scripts/prefix.mjs write --project <dir> --keep reins,<the same> --confirm
 ```
 
-`feature-map.json` contains no `__REINS_DEV_ONLY__` marker, so `reins verify` continues to exit `0`.
-
-## Step 8: Trim the agent prompt prefix for this project (optional, ask first)
-
-Every agent turn re-sends a fixed prefix: tool definitions, the name and description of every enabled skill, agent types, MCP tool names and server instructions, plus project instructions and memory. One measured run put it near 72k tokens, about 15% of the run's cost, mostly plugins and skills the project never uses. Offer a per-project trim after the wiring works. Do it only for the app's project, never for the user level.
-
-**If the coordinator plugin ships the script, use it.** Find the plugin folder: `installPath` of the first `coordinator@coordinator` entry under `plugins` in `~/.claude/plugins/installed_plugins.json`. If `<installPath>/skills/coordinator/scripts/prefix.mjs` exists (older Coordinator versions do not have it), run it with `node`: `prefix.mjs report --project <dir>`, then `prefix.mjs draft --project <dir> --keep reins,<named>`, then, after the person approves the draft, `prefix.mjs write --project <dir> --keep reins,<named> --confirm`. Put `reins` and every plugin and skill the person named in `--keep`, on both `draft` and `write`. The script does the same measure, draft and write as the steps below: it trims user skills only (not plugin skills, which go with their plugin) and adds the exclude line itself. Compare its draft with step 2 before the person approves. If the plugin or the script is missing, do the manual steps below.
-
-1. **Measure.** List what loads here and how big it is:
-   - Enabled plugins: `claude plugin list`, or the `enabledPlugins` keys in `~/.claude/settings.json`, `.claude/settings.json` and `.claude/settings.local.json`.
-   - User skills: the folders under `~/.claude/skills`. Many are links (symlinks or junctions). Follow them (`statSync`, not `Dirent.isDirectory()`), skip names that start with `.` and the `synced` folder.
-   - MCP servers: the project `.mcp.json`, and the user config (`mcpServers` in `~/.claude.json`, and `projects["<project dir>"].mcpServers` in the same file), or run `claude mcp list`. Names only: never print their `env` or `headers`.
-   - Report the counts of plugins, skills and MCP servers, and the description characters of the skills. For the real number, ask the person to run `/context` and give the prefix tokens (the system prompt, tools, skills and MCP rows). If they cannot, say the tokens were not measured.
-2. **Decide keep and off.** Keep: **reins** (this plugin), every server in the project's own `.mcp.json`, every plugin named in the project's `.claude/settings.json`, and anything the person names (ask which plugins and skills they use, and repeat their list back in the draft). Propose off the rest that the project does not use. Say why for each group, in a line.
-3. **Draft, show, then write.** Draft `.claude/settings.local.json` in the project. Merge it into the file if one exists, and never drop a key that is there:
-   - `enabledPlugins`: `{ "<plugin>@<marketplace>": false }`
-   - `skillOverrides`: `{ "<skill>": "off" }` for a user or project skill, keyed by its bare name as the skill list shows it. `"name-only"` keeps the name and drops the description, a lighter cut for a skill the person might still call. Claude Code ignores `skillOverrides` for plugin skills, so a plugin's skills go only by turning the whole plugin off in `enabledPlugins`.
-   - Only if the person agrees: `syncClaudeAiSkills: false`, `syncClaudeAiPlugins: false`, `disableClaudeAiConnectors: true`.
-
-   Show the draft, and write it only after the person approves. Never turn off reins, a project `.mcp.json` server, or a plugin or skill the person names, and never edit the user-level `~/.claude/settings.json`.
-4. **Keep it out of git.** Append `.claude/settings.local.json` to `.git/info/exclude` (or to `.gitignore` if the person prefers), unless it is already there.
-5. **Tell the person.** Plugin changes load only in a new Claude process: `/clear` reloads skill overrides but keeps the old plugins. To undo, delete the keys, or delete `.claude/settings.local.json`.
-6. **Check after.** In the new process the skill list is short. Record the counts (or the `/context` figure) before and after in the run's notes.
+Always keep `reins`: the script keeps it on its own only when this folder's `.mcp.json` names a `reins` server, not when the bridge was added with `claude mcp add` or sits in a monorepo root's `.mcp.json`. It writes only the project's `.claude/settings.local.json`; plugin changes need a new Claude process. Without Coordinator, skip this step: its rules live in Coordinator's `references/context.md`, rule 7.
