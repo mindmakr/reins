@@ -531,7 +531,7 @@ reins gives an agent real control of a running app, so the limits are enforced i
 6. **Lazy.** `connect()` waits for `load` and an idle moment before it does anything.
 7. **No eval.** Only actions the app registered can run.
 
-See [SECURITY.md](SECURITY.md) for flight's safety rules and the test behind each, what reins and flight do not protect against, and how to report a problem.
+Flight refuses a process key that holds an email address or a card number, so neither reaches its store. See [SECURITY.md](SECURITY.md) for flight's safety rules and the test behind each, what reins and flight do not protect against, and how to report a problem.
 
 ## Prior art and how reins differs
 

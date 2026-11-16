@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BROKEN_LOCK_MS, fileStore, safe } from '../src/flight/file-store.js';
 import { PG_TABLES, pgStore } from '../src/flight/pg-store.js';
-import { isStore, memoryStore, planPrune, type RunSummary } from '../src/flight/store.js';
+import { isStore, memoryStore, personalKey, planPrune, stepKey, type RunSummary } from '../src/flight/store.js';
 import { DAY, real, step, storeContract } from './flight-store-contract.js';
 
 const dirs: string[] = [];
@@ -366,3 +366,15 @@ describe('B8: a prune of more than 200,000 runs at once', () => {
 });
 
 export { DAY };
+
+describe('keys that identify a person', () => {
+  it('refuses a key holding an email address or a card number, and keeps ids, timestamps and other digit runs', () => {
+    for (const k of ['ana@example.com', 'payout-ana@example.co.uk', '4111111111111111', 'card-5500005555555559', '378282246310005']) {
+      expect(stepKey(k)).toBeUndefined();
+    }
+    for (const k of ['payout-7f3a', 'order 42', '1731744000000', '1731744000001', '1731744000000123', 'acct-123456789', 'a@b', 1731744000000]) {
+      expect(stepKey(k)).toBe(String(k));
+    }
+    expect(personalKey('4111 1111 1111 1111')).toBe(false); // spaced digits are not one run: the playbook's rule covers them
+  });
+});

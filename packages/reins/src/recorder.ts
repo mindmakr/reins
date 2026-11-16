@@ -242,9 +242,17 @@ function track(c: Capture, req: any, res: any, o: HookOptions) {
   }
 }
 
-/** Starts a capture for `req`, or returns undefined when nothing is started or the hook itself fails. */
+// Requests already captured: a second hook on the same request (the dev middleware and flight's both installed)
+// passes it through, since one capture already feeds every recorder. Without this, every request counted twice.
+const captured = new WeakSet<object>();
+
+/** Starts a capture for `req`, or returns undefined when nothing is started, the request is captured already, or the hook itself fails. */
 function open(req: any, res: any, o: HookOptions): Capture | undefined {
   if (!consumers.size || !als) return;
+  if (req && typeof req === 'object') {
+    if (captured.has(req)) return;
+    captured.add(req);
+  }
   try {
     const c = begin(req);
     track(c, req, res, o);
@@ -279,7 +287,7 @@ export function wrapHandler<H extends (req: any, res: any, ...rest: any[]) => an
 export function fastify<A extends { addHook(name: string, fn: (...a: any[]) => void): unknown }>(app: A): A {
   const KEY = Symbol.for('reins.rec');
   app.addHook('onRequest', (req: any, _reply: any, done: () => void) => {
-    if (!consumers.size || !als) return done();
+    if (!consumers.size || !als || req[KEY]) return done(); // hooked twice: the first capture feeds every recorder
     let c: Capture;
     try {
       c = begin(req.raw || req);

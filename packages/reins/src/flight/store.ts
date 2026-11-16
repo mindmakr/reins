@@ -19,8 +19,32 @@ const BAD_KEY = /[\u0000-\u001f\u007f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\
  * keys all three keep the same.
  */
 export function stepKey(key: unknown): string | undefined {
-  if (typeof key === 'number') return Number.isFinite(key) ? String(key) : undefined;
-  return typeof key === 'string' && key.length > 0 && key.length <= MAX_KEY && !BAD_KEY.test(key) ? key : undefined;
+  if (typeof key === 'number') return Number.isFinite(key) && !personalKey(String(key)) ? String(key) : undefined;
+  return typeof key === 'string' && key.length > 0 && key.length <= MAX_KEY && !BAD_KEY.test(key) && !personalKey(key) ? key : undefined;
+}
+
+const EMAIL = /[^\s@]+@[^\s@.]+\.[^\s@]{2,}/;
+const DIGIT_RUN = /\d{15,19}/g;
+const luhn = (digits: string): boolean => {
+  let sum = 0;
+  for (let i = 0; i < digits.length; i++) {
+    let d = digits.charCodeAt(digits.length - 1 - i) - 48;
+    if (i % 2 === 1) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+  }
+  return sum % 10 === 0;
+};
+/**
+ * Whether a key holds a value that plainly identifies a person: an email address, or a card number (15 to 19
+ * digits starting 3-6, the card networks, that pass the Luhn check; a millisecond timestamp, 13 digits from 1, and
+ * most generated ids are not caught). Such a key is refused and
+ * counted as invalid, like any bad key: it never reaches a store. Names, phone and account numbers cannot be told
+ * from ordinary ids by their shape; the flight playbook's rule covers them.
+ */
+export function personalKey(key: string): boolean {
+  if (EMAIL.test(key)) return true;
+  for (const m of key.match(DIGIT_RUN) ?? []) if (/^[3-6]/.test(m) && luhn(m)) return true;
+  return false;
 }
 
 /**

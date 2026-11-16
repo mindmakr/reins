@@ -114,7 +114,7 @@ Two limits remain. Between its check of a path and its read there is a short win
 
 ### What flight does not protect against
 
-- **A secret the app puts in a step name or process key.** Flight keeps both as given. Never build them from personal data or secrets.
+- **A secret the app puts in a step name or process key.** Flight keeps both as given, with one exception: a key holding an email address or a card number (15 to 19 digits from 3 to 6 that pass the Luhn check) is refused and counted as invalid, so it never reaches a store. Names, phone and account numbers look like ordinary ids and are kept. Never build a key from personal data or secrets.
 - **A store or report page the app exposes without sign-in.** The store holds process keys, and the report JSON holds them too. Show the report only behind the app's own sign-in, and keep the store private.
 - **A webhook address that points somewhere it should not.** Flight sends to the address the app gives it. Read it from the environment and check where it goes.
 - **Anyone who already controls the server.** They can change the app, its config module or flight itself.

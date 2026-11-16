@@ -6,7 +6,7 @@ This page is for coding agents asked to add reins to a web or Expo app, or to wo
 
 ## Adding reins to an app
 
-1. **Install the single dev package** (`npm i -D @mindmakr/reins`, or `npx expo install @mindmakr/reins` in Expo). It provides `@mindmakr/reins`, `@mindmakr/reins/react`, `@mindmakr/reins/expo`, `@mindmakr/reins/adapters`, `@mindmakr/reins/vite`, `@mindmakr/reins/next`, `@mindmakr/reins/next/token-route`, `@mindmakr/reins/metro`, `npx reins bridge` and `npx reins verify`.
+1. **Install the single dev package** (`npm i -D @mindmakr/reins`, or `npx expo install @mindmakr/reins` in Expo). What it provides is listed in [`setup.md`](skills/reins/references/setup.md), Step 2.
 2. **Add the build plugin first** (`@mindmakr/reins/vite`, `@mindmakr/reins/next` or `@mindmakr/reins/metro`). It serves the pairing token in dev and swaps `@mindmakr/reins` for `@mindmakr/reins/stub` in production. Without it, production builds contain reins.
 3. **Call `reins.connect()` once, in dev only**, behind `import.meta.env.DEV`, `process.env.NODE_ENV !== 'production'` or `__DEV__`. For Next, pass `tokenUrl: '/api/reins-token'` and add the token route (`@mindmakr/reins/next/token-route`). For Expo, call `connectExpo()` from `@mindmakr/reins/expo`.
 4. **Add `reins verify <build dir>` (or `reins-verify-bundle <build dir>`) after the production build** in the build script and in CI.
@@ -25,7 +25,7 @@ This page is for coding agents asked to add reins to a web or Expo app, or to wo
 Rules for actions:
 
 - **Give every action a clear `description` and an object `input` schema.** The agent only sees these.
-- **Mark anything that changes real data, spends money, sends messages or deletes things as `consequential: true`.** Callers must then pass `confirm: true`, and an agent should ask the person first.
+- **Mark consequential actions** as [`setup.md`](skills/reins/references/setup.md), Step 5, defines them.
 - **Never register an action that skips authentication or authorisation**, like "become admin" or "skip payment". Not even "only in staging". Build the action on the app's real flows.
 - **Do not put secrets in actions.** Read test credentials from dev-only env vars. Never hardcode them, and never return tokens from `run`.
 - **Keep actions small and idempotent where you can**, so an agent can retry them.
@@ -36,11 +36,7 @@ Rules for actions:
 
 ## Flight on a production server
 
-Flight (`@mindmakr/reins/flight`) records the steps of a server's long-running work, checks them against the promises in `reins.flight.json`, and reports findings. Follow [`skills/reins/references/flight.md`](skills/reins/references/flight.md). For flight, install `@mindmakr/reins` as a regular dependency (`npm i @mindmakr/reins`), because it runs in production. Three rules:
-
-- **Never put a value in a step name or a process key that identifies a person**: no email, name, phone, account or card number. Step names are fixed words from the manifest; a key is a run id such as a payout id.
-- **Never invent a promise the person has not approved.** Propose processes, steps and promises in plain words, each with its `why`, and wire nothing until the person approves the manifest.
-- **Never use flight to change behaviour.** No code branches on a flight call, a finding or a report. Flight reports; a fix is a separate change the person asks for.
+Flight (`@mindmakr/reins/flight`) records the steps of a server's long-running work, checks them against the promises in `reins.flight.json`, and reports findings. Follow [`skills/reins/references/flight.md`](skills/reins/references/flight.md): its rules (no personal value in a step name or key, no promise the person has not approved, flight never changes behaviour, nothing wired before the manifest is approved) and its install (a regular dependency, because it runs in production) live there.
 
 Flight does not protect against a secret the app puts in a step name or process key, a store or report page shown without sign-in, a webhook address that points somewhere it should not, or anyone who already controls the server. See [SECURITY.md](SECURITY.md#what-flight-does-not-protect-against).
 
@@ -58,4 +54,6 @@ Only build with `REINS_ENABLE=1` for a private staging environment that the pers
 - Guard all globals. Do nothing before pairing. Redact by default. No eval. No shell strings: use `execFileSync` with an argument array.
 - The bridge only binds to `127.0.0.1`. Do not add a host option.
 - Security changes need tests. Update `SECURITY.md` in the same change.
+- Check a claim about another tool (Claude Code settings, a CLI flag, a file format) against that tool before writing it into a skill page: one skill step once described a settings key the CLI ignores.
+- `src/cli.ts` loads each command's modules only when that command runs (`test/cli-startup.test.ts`): a one-shot command must not load the bridge or the MCP SDK.
 - The flight entry (`packages/reins/src/flight.ts` and `src/flight/`) imports only Node built-ins and reins' shared modules, never the bridge, the pairing code, `ws` or the MCP SDK. `packages/reins/test/flight-safety.test.ts` walks its imports; keep it passing.

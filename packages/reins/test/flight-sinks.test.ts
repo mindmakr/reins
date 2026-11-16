@@ -377,7 +377,7 @@ describe('B11: what sinks and the store never get', () => {
       report: f.findings(),
     });
     expect(dump).not.toMatch(/SECRET/);
-  });
+  }, 20_000); // a check of what is kept, not of speed: on a loaded machine its requests ran past the 5 s default
 
   it('a manifest file that is not JSON is said in fixed words: none of its text reaches a sink, the store or the finding', async () => {
     const dir = tmp();

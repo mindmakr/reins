@@ -15,7 +15,7 @@ Facts for [Coordinator](https://github.com/mindmakr/coordinator) runs in this re
 - Plugin: `claude plugin validate .` (AGENTS.md).
 - Mapped tests: one test file per area in `packages/reins/test/`. Builders and critics run `npx vitest related --run <changed files>` or the area's file, plus `npm run build`.
 - Full suite, once per unit head, run by the lead: `npm run build && npm test && claude plugin validate .`.
-- Nothing needs a database or a service. Local Node is 22; Node 18 and 20 are proven only by CI on the pull request.
+- Nothing needs a database or a service. Local Node is 22; Node 18 and 20 are proven by CI on the pull request. A change that uses a Node API whose behaviour differs by version also runs the suite in Docker (`node:18`, `node:20`) before the pull request: local runs on 22 once missed two failures CI then found.
 
 ## Risk areas
 - Security, on every change to the core, the bridge, record mode, `node` or `flight`: nothing happens before pairing, redaction by default, no eval, no shell strings (`execFileSync` with an argument array), the bridge binds to 127.0.0.1 only (AGENTS.md, CONTRIBUTING.md).

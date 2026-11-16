@@ -524,6 +524,19 @@ describe('one set of hooks feeds the development pairing and flight', () => {
     expect(f.recorder()!.requests()).toMatchObject([{ route: '/api/x', spans: [{ name: 'db.q' }] }]);
   });
 
+  it('counts a request once when both hooks are installed (the dev middleware and flight)', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    await rn.connect({ standalone: true, reconnect: false, tokenFile: 'no-such-token-file' });
+    stops.push(() => rn.disconnect());
+    const f = started({ routes: ['/api/x'] });
+    const handler = (_q: IncomingMessage, res: ServerResponse) => res.end();
+    const base = await serve(rn.wrapHandler(createFlight().wrapHandler(handler)));
+    await fetch(`${base}/api/x`);
+    await settle();
+    expect(rn.report().requests).toHaveLength(1);
+    expect(f.recorder()!.requests()).toHaveLength(1);
+  });
+
   it('feeds flight from the node hook when only flight is started, and the node pairing from the flight hook', async () => {
     const f = started();
     const rn = createReinsNode({ NODE_ENV: 'development' });
