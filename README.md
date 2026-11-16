@@ -542,30 +542,7 @@ See [SECURITY.md](SECURITY.md) for flight's safety rules and the test behind eac
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). For coding agents adding reins to an app, see [AGENTS.md](AGENTS.md) and [`skills/reins/SKILL.md`](skills/reins/SKILL.md).
-
-## Releasing (maintainers)
-
-A release is a pull request, a tag and a GitHub release, then the npm publish, which needs the maintainer's npm login.
-
-1. **Pick the version.** New commands, options or tools: a minor version (0.3.0 to 0.4.0). Fixes only: a patch (0.3.0 to 0.3.1). Read `git log --first-parent v<last>..main` and make sure every merged change has its line in `CHANGELOG.md`.
-2. **Write the version everywhere it lives**, on a `release/<version>` branch: `packages/reins/package.json`, the `@mindmakr/reins` entry in `package-lock.json`, `.claude-plugin/plugin.json`, and the `VERSION` constant in `packages/reins/src/index.ts`, `stub.ts`, `node.ts`, `flight.ts` and `bridge/mcp.ts`. Rename the changelog's `## Unreleased` to `## <version> (<date>)`. Edit `package.json` by hand: `npm version` rewrites the whole file's layout.
-3. **Check:** `npm run build`, `npm test`, `claude plugin validate .`, and in `packages/reins` `npm pack --dry-run`. The file list should change only where the release adds or removes modules.
-4. **Release PR** into `main`. Once CI passes, merge it, then tag and release on GitHub with the changelog section as the notes: `gh release create v<version> --target main --title "reins <version>" --notes-file <section.md>`.
-5. **Publish to npm**, from PowerShell (or any shell) on the merged `main`:
-
-```powershell
-cd <your reins checkout>
-git checkout main; git pull
-npm login                          # skip when npm whoami already shows your account
-npm whoami
-cd packages\reins
-npm publish --dry-run              # check: @mindmakr/reins@<version> and its file list
-npm publish                        # builds first (prepublishOnly); add --otp=<code> if your account uses two-factor codes
-npm view @mindmakr/reins version   # shows the new version
-```
-
-The package is published as public (`publishConfig` in its `package.json`), so `--access public` is not needed. Claude Code users get the plugin's skills from the GitHub release with `/plugin`; the npm package is what apps install.
+See [CONTRIBUTING.md](CONTRIBUTING.md), which also says how to release. For coding agents adding reins to an app, see [AGENTS.md](AGENTS.md) and [`skills/reins/SKILL.md`](skills/reins/SKILL.md).
 
 ## Licence
 
