@@ -231,8 +231,8 @@ Every agent turn re-sends a fixed prefix of tool definitions, skill descriptions
 
 ```sh
 node <installPath>/skills/coordinator/scripts/prefix.mjs report --project <dir>
-node <installPath>/skills/coordinator/scripts/prefix.mjs draft --project <dir> --keep <plugins and skills the person names>
-node <installPath>/skills/coordinator/scripts/prefix.mjs write --project <dir> --keep <the same> --confirm
+node <installPath>/skills/coordinator/scripts/prefix.mjs draft --project <dir> --keep reins,<plugins and skills the person names>
+node <installPath>/skills/coordinator/scripts/prefix.mjs write --project <dir> --keep reins,<the same> --confirm
 ```
 
-Leave `--keep` out when the person names nothing. The script keeps reins (the project's `.mcp.json` names it) and writes only the project's `.claude/settings.local.json`; plugin changes need a new Claude process. Without Coordinator, skip this step: its rules live in Coordinator's `references/context.md`, rule 7.
+Always keep `reins`: the script keeps it on its own only when this folder's `.mcp.json` names a `reins` server, not when the bridge was added with `claude mcp add` or sits in a monorepo root's `.mcp.json`. It writes only the project's `.claude/settings.local.json`; plugin changes need a new Claude process. Without Coordinator, skip this step: its rules live in Coordinator's `references/context.md`, rule 7.

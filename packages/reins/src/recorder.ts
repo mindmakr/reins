@@ -308,6 +308,10 @@ export function fastify<A extends { addHook(name: string, fn: (...a: any[]) => v
       const seen = key ? captures.get(key) : undefined;
       c = seen ?? begin(req.raw || req);
       if (key && !seen) captures.set(key, c);
+      // A capture another hook opened ends on the raw response's 'finish', before onResponse: take Fastify's route
+      // pattern now, while the request is still open, so it is not lost.
+      const route = req.routeOptions?.url || req.routerPath;
+      if (seen && !c.done && typeof route === 'string' && route) c.route = route;
       req[KEY] = c;
     } catch {
       fault();

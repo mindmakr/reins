@@ -559,13 +559,14 @@ describe('one set of hooks feeds the development pairing and flight', () => {
     const base = await serve(createFlight().wrapHandler((q: IncomingMessage, res: ServerResponse) => {
       const freq: any = { raw: q, routeOptions: { url: '/api/x' } };
       hooks.onRequest(freq, {}, () => {
+        // As in Fastify: onResponse runs from a 'finish' listener added after the wrapper's own.
+        res.once('finish', () => hooks.onResponse(freq, { statusCode: 200 }, () => {}));
         res.end();
-        hooks.onResponse(freq, { statusCode: 200 }, () => {});
       });
     }));
-    await fetch(`${base}/api/x`);
+    await fetch(`${base}/api/x/7`);
     await settle();
-    expect(f.recorder()!.requests()).toHaveLength(1);
+    expect(f.recorder()!.requests()).toMatchObject([{ route: '/api/x' }]);
   });
 
   it('feeds flight from the node hook when only flight is started, and the node pairing from the flight hook', async () => {

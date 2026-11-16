@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { redactDeep } from '@mindmakr/reins';
 import WebSocket from 'ws';
-import { DEFAULT_PORT, HOST } from './hub.js';
+import { DEFAULT_PORT, HOST } from './constants.js';
 import { tokenPath } from './token.js';
 
 import { LIMITS, summarizeDom } from '../report.js';

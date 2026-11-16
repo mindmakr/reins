@@ -5,10 +5,9 @@ import type { Audit } from './audit.js';
 import { isOriginAllowed } from './origin.js';
 import { newToken, removeToken, tokensMatch, writeToken } from './token.js';
 import { callTool } from './tools.js';
+import { DEFAULT_PORT, HOST } from './constants.js';
 
-export const DEFAULT_PORT = 7357;
-/** The bridge listens on loopback only. There is no option to change this. */
-export const HOST = '127.0.0.1';
+export { DEFAULT_PORT, HOST };
 
 export interface HubOptions {
   /** Project folder; the token goes to `<dir>/.reins/token`. */

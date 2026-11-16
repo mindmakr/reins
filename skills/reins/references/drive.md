@@ -2,7 +2,7 @@
 
 Use this playbook when verifying a feature, reproducing a bug, or running a visual, layout, and performance review on a web or Expo app wired with **reins**.
 
-Run the CLI from the project's own install, `./node_modules/.bin/reins …` (`.\node_modules\.bin\reins …` in PowerShell): `npx reins …` gives the same result but spends about half a second per call finding the package. Run it from the folder whose `package.json` has `@mindmakr/reins` (the app's folder in a monorepo).
+Run the CLI from the project's own install, `./node_modules/.bin/reins …` (`.\node_modules\.bin\reins …` in PowerShell): `npx reins …` gives the same result but spends about half a second per call finding the package. Run it from the folder whose `package.json` has `@mindmakr/reins` (the app's folder in a monorepo); a workspace that hoists packages keeps the CLI in the root's `node_modules/.bin` instead, and `npx reins` finds either.
 
 ## 1. Pair with the running app
 

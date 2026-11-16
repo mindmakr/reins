@@ -29,8 +29,13 @@ export function plainKey(key: unknown): string | undefined {
   return typeof key === 'string' && key.length > 0 && key.length <= MAX_KEY && !BAD_KEY.test(key) ? key : undefined;
 }
 
-/** An email address: a local part, @, and a domain whose last label is letters (so `deploy@1.2.3` is no address). */
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/;
+/**
+ * An email address: a local part, @, and a domain ending in a top-level domain addresses use (com, net, org, edu,
+ * gov, mil, int, io, co, me, info, biz, or a two-letter country code), with no letter right after it, so
+ * `ana@example.com_42` is caught and `task@queue.high`, `build@web.app` and `deploy@1.2.3` are not. A key such as
+ * `deploy@prod.eu` reads as an address and is refused: rename such keys.
+ */
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:com|net|org|edu|gov|mil|int|io|co|me|info|biz|[A-Za-z]{2})(?![A-Za-z])/i;
 /**
  * Whether a process key holds an email address, the one personal value whose shape cannot be an ordinary id. Such
  * a key is refused and counted as invalid, like any bad key, so it never reaches a store. Names, phone, account

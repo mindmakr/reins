@@ -369,9 +369,9 @@ export { DAY };
 
 describe('keys that identify a person', () => {
   it('refuses a key holding an email address, and keeps ids, numbers and version tags', () => {
-    for (const k of ['ana@example.com', 'payout-ana@example.co.uk', 'x+tag@mail.example.org']) expect(stepKey(k)).toBeUndefined();
+    for (const k of ['ana@example.com', 'payout-ana@example.co.uk', 'x+tag@mail.example.org', 'ana@example.com_42', 'refund-ana@example.com7', 'ANA@EXAMPLE.COM']) expect(stepKey(k)).toBeUndefined();
     // Long numeric ids are kept: a card-number check by shape refused about one in ten of them.
-    for (const k of ['payout-7f3a', 'order 42', '1731744000000', '4111111111111111', '5123456789012345678', 'acct-123456789', 'a@b', 'deploy@1.2.3', 'job@v2.10', 'retry@2024.11', 1731744000000]) {
+    for (const k of ['payout-7f3a', 'order 42', '1731744000000', '4111111111111111', '5123456789012345678', 'acct-123456789', 'a@b', 'deploy@1.2.3', 'job@v2.10', 'retry@2024.11', 'task@queue.high', 'job@worker.default', 'build@web.app', 1731744000000]) {
       expect(stepKey(k)).toBe(String(k));
     }
     expect(personalKey('deploy@1.2.3')).toBe(false);
