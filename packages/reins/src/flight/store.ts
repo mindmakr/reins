@@ -19,32 +19,26 @@ const BAD_KEY = /[\u0000-\u001f\u007f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\
  * keys all three keep the same.
  */
 export function stepKey(key: unknown): string | undefined {
-  if (typeof key === 'number') return Number.isFinite(key) && !personalKey(String(key)) ? String(key) : undefined;
-  return typeof key === 'string' && key.length > 0 && key.length <= MAX_KEY && !BAD_KEY.test(key) && !personalKey(key) ? key : undefined;
+  const k = plainKey(key);
+  return k !== undefined && !personalKey(k) ? k : undefined;
 }
 
-const EMAIL = /[^\s@]+@[^\s@.]+\.[^\s@]{2,}/;
-const DIGIT_RUN = /\d{15,19}/g;
-const luhn = (digits: string): boolean => {
-  let sum = 0;
-  for (let i = 0; i < digits.length; i++) {
-    let d = digits.charCodeAt(digits.length - 1 - i) - 48;
-    if (i % 2 === 1) { d *= 2; if (d > 9) d -= 9; }
-    sum += d;
-  }
-  return sum % 10 === 0;
-};
+/** A key or an instance name as every store keeps it (the shape rules of `stepKey`, without the personal check). */
+export function plainKey(key: unknown): string | undefined {
+  if (typeof key === 'number') return Number.isFinite(key) ? String(key) : undefined;
+  return typeof key === 'string' && key.length > 0 && key.length <= MAX_KEY && !BAD_KEY.test(key) ? key : undefined;
+}
+
+/** An email address: a local part, @, and a domain whose last label is letters (so `deploy@1.2.3` is no address). */
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/;
 /**
- * Whether a key holds a value that plainly identifies a person: an email address, or a card number (15 to 19
- * digits starting 3-6, the card networks, that pass the Luhn check; a millisecond timestamp, 13 digits from 1, and
- * most generated ids are not caught). Such a key is refused and
- * counted as invalid, like any bad key: it never reaches a store. Names, phone and account numbers cannot be told
- * from ordinary ids by their shape; the flight playbook's rule covers them.
+ * Whether a process key holds an email address, the one personal value whose shape cannot be an ordinary id. Such
+ * a key is refused and counted as invalid, like any bad key, so it never reaches a store. Names, phone, account
+ * and card numbers look like ordinary ids (a digit-shape check refused about one long numeric id in ten), so the
+ * flight playbook's rule covers them.
  */
 export function personalKey(key: string): boolean {
-  if (EMAIL.test(key)) return true;
-  for (const m of key.match(DIGIT_RUN) ?? []) if (/^[3-6]/.test(m) && luhn(m)) return true;
-  return false;
+  return EMAIL.test(key);
 }
 
 /**
@@ -54,7 +48,7 @@ export function personalKey(key: string): boolean {
  * PRUNED_STEP is not a manifest name, so no caller can write a retention marker.
  */
 export const goodStep = (s: StepRecord): boolean =>
-  !!s && isName(s.process) && isName(s.step) && typeof s.key === 'string' && stepKey(s.key) === s.key && typeof s.instance === 'string' && stepKey(s.instance) === s.instance && Number.isSafeInteger(s.at) && s.at >= 0;
+  !!s && isName(s.process) && isName(s.step) && typeof s.key === 'string' && stepKey(s.key) === s.key && typeof s.instance === 'string' && plainKey(s.instance) === s.instance && Number.isSafeInteger(s.at) && s.at >= 0;
 
 /** The rows of `steps` that pass `goodStep`. */
 export const goodSteps = (steps: StepRecord[]): StepRecord[] => (Array.isArray(steps) ? steps.filter(goodStep) : []);

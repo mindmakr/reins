@@ -509,6 +509,11 @@ describe("round 2: the critics' findings on sinks and the notifier", () => {
 });
 
 describe("round 2: the critics' findings on store outages", () => {
+  /** `p`, or a failure naming what did not happen within 4 s (inside vitest's 5 s limit, so the message shows). */
+  const within = <T,>(p: Promise<T>, what: string): Promise<T> => {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    return Promise.race([p, new Promise<T>((_, no) => (t = setTimeout(() => no(new Error(what)), 4_000)))]).finally(() => clearTimeout(t));
+  };
   /** A store that can go down (every call rejects), whose lock `takeover` takes as if the holder's lease ran out, and whose findings write can be slow. */
   function flaky(base: FlightStore = memoryStore()) {
     // Slow findings writes are tracked, so a test waits for them to start (writeStarted) and to land (writesDone)
@@ -517,11 +522,12 @@ describe("round 2: the critics' findings on store outages", () => {
     let onStart: (() => void) | null = null;
     const ctl = {
       down: false, takeover: '', slowWrite: 0, fail: '',
-      writeStarted: () => new Promise<void>((r) => (onStart = r)),
-      writesDone: async () => {
+      // Bounded: a path that never writes fails with this message rather than the test's generic time-out.
+      writeStarted: () => within(new Promise<void>((r) => (onStart = r)), 'no findings write started'),
+      writesDone: () => within((async () => {
         while (slow.size) await Promise.all([...slow]);
         await new Promise((r) => setImmediate(r)); // what the write's caller does next
-      },
+      })(), 'the slow findings write never landed'),
     };
     const store = new Proxy(base, {
       get(t, k) {

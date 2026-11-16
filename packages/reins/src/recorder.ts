@@ -227,10 +227,17 @@ function track(c: Capture, req: any, res: any, o: HookOptions) {
   };
   res.once?.('finish', fin(false));
   res.once?.('close', fin(true));
+  addTiming(c, res, o);
+}
+
+// Responses whose head already adds a Server-Timing header (one wrap per response, whichever hook asked first).
+const timed = new WeakSet<object>();
+function addTiming(c: Capture, res: any, o: HookOptions) {
   // Development only: flight alone never changes a response, so the header needs a development recorder
   // attached both when the request begins and when the head is written.
   const timing = o.timing;
-  if (timing && devAttached() && typeof res.writeHead === 'function') {
+  if (timing && devAttached() && typeof res?.writeHead === 'function' && !timed.has(res)) {
+    timed.add(res);
     const writeHead = res.writeHead;
     res.writeHead = function (...args: any[]) {
       try {
@@ -242,19 +249,25 @@ function track(c: Capture, req: any, res: any, o: HookOptions) {
   }
 }
 
-// Requests already captured: a second hook on the same request (the dev middleware and flight's both installed)
-// passes it through, since one capture already feeds every recorder. Without this, every request counted twice.
-const captured = new WeakSet<object>();
+// The capture of each request, keyed by the raw Node request (Fastify's `req.raw`), shared by every hook: with
+// the dev middleware and flight's both installed, or a Fastify hook beside a wrapped handler, a request is still
+// one capture (it feeds every recorder), and the second hook re-enters it, so spans after a body parser keep their
+// request and that hook's own Server-Timing option still applies. Without this, every request counted twice.
+const captures = new WeakMap<object, Capture>();
+const rawOf = (req: any): object | null => (req && typeof req === 'object' ? (req.raw && typeof req.raw === 'object' ? req.raw : req) : null);
 
-/** Starts a capture for `req`, or returns undefined when nothing is started, the request is captured already, or the hook itself fails. */
+/** The capture for `req`, started now or by an earlier hook; undefined when nothing is started or the hook itself fails. */
 function open(req: any, res: any, o: HookOptions): Capture | undefined {
   if (!consumers.size || !als) return;
-  if (req && typeof req === 'object') {
-    if (captured.has(req)) return;
-    captured.add(req);
-  }
   try {
+    const key = rawOf(req);
+    const seen = key ? captures.get(key) : undefined;
+    if (seen) {
+      addTiming(seen, res, o);
+      return seen;
+    }
     const c = begin(req);
+    if (key) captures.set(key, c);
     track(c, req, res, o);
     return c;
   } catch {
@@ -287,10 +300,14 @@ export function wrapHandler<H extends (req: any, res: any, ...rest: any[]) => an
 export function fastify<A extends { addHook(name: string, fn: (...a: any[]) => void): unknown }>(app: A): A {
   const KEY = Symbol.for('reins.rec');
   app.addHook('onRequest', (req: any, _reply: any, done: () => void) => {
-    if (!consumers.size || !als || req[KEY]) return done(); // hooked twice: the first capture feeds every recorder
+    if (!consumers.size || !als) return done();
     let c: Capture;
     try {
-      c = begin(req.raw || req);
+      // One capture per raw request, shared with a second fastify(app) and with middleware or a wrapped handler.
+      const key = rawOf(req);
+      const seen = key ? captures.get(key) : undefined;
+      c = seen ?? begin(req.raw || req);
+      if (key && !seen) captures.set(key, c);
       req[KEY] = c;
     } catch {
       fault();

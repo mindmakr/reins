@@ -537,6 +537,37 @@ describe('one set of hooks feeds the development pairing and flight', () => {
     expect(f.recorder()!.requests()).toHaveLength(1);
   });
 
+  it('with flight hooked first, the dev hook still adds Server-Timing and its spans still reach the request', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    await rn.connect({ standalone: true, reconnect: false, tokenFile: 'no-such-token-file' });
+    stops.push(() => rn.disconnect());
+    const f = started({ routes: ['/api/x'] });
+    const inner = rn.wrapHandler((_q: IncomingMessage, res: ServerResponse) => rn.span('db.q', () => res.end()), { serverTiming: true });
+    // Flight's hook first; a context switch between the hooks stands in for a body parser's stream callback.
+    const base = await serve(createFlight().wrapHandler((q: IncomingMessage, res: ServerResponse) => void setImmediate(() => inner(q, res))));
+    const res = await fetch(`${base}/api/x`);
+    await settle();
+    expect(res.headers.get('server-timing')).toBeTruthy();
+    expect(rn.report().requests).toHaveLength(1);
+    expect(f.recorder()!.requests()).toMatchObject([{ route: '/api/x', spans: [{ name: 'db.q' }] }]);
+  });
+
+  it('a Fastify hook beside a wrapped handler is one capture', async () => {
+    const f = started({ routes: ['/api/x'] });
+    const hooks: Record<string, (...a: any[]) => void> = {};
+    createFlight().fastify({ addHook: (name: string, fn: (...a: any[]) => void) => void (hooks[name] = fn) });
+    const base = await serve(createFlight().wrapHandler((q: IncomingMessage, res: ServerResponse) => {
+      const freq: any = { raw: q, routeOptions: { url: '/api/x' } };
+      hooks.onRequest(freq, {}, () => {
+        res.end();
+        hooks.onResponse(freq, { statusCode: 200 }, () => {});
+      });
+    }));
+    await fetch(`${base}/api/x`);
+    await settle();
+    expect(f.recorder()!.requests()).toHaveLength(1);
+  });
+
   it('feeds flight from the node hook when only flight is started, and the node pairing from the flight hook', async () => {
     const f = started();
     const rn = createReinsNode({ NODE_ENV: 'development' });

@@ -423,7 +423,8 @@ describe('B4: no port, no route, no shell; a config module that cannot load', ()
       let stop!: () => void;
       const o = capture();
       const done = flightWatchMain(['--config', 'flight.config.mjs'], dir, o.print, o.perr, new Promise<void>((r) => (stop = r)));
-      await watched;
+      let t: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([watched, new Promise((_, no) => (t = setTimeout(() => no(new Error('the watcher did not take the lock twice')), 4_000)))]).finally(() => clearTimeout(t));
       stop();
       expect(await done).toBe(0);
       expect(listen).not.toHaveBeenCalled();

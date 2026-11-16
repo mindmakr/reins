@@ -143,7 +143,7 @@ if (process.env.NODE_ENV !== 'production') {
 const rows = await reinsNode.span('db.invoices.select', () => db.query('SELECT ...'));
 ```
 
-If the server also runs flight (`references/flight.md`), install one request hook, not both: flight's `middleware()` and `reinsNode.middleware()` each record every request.
+If the server also runs flight (`references/flight.md`), both hooks may stay: they share one capture per request, so each request is recorded once.
 
 ### Optional: Tester session export (`@mindmakr/reins/record`)
 

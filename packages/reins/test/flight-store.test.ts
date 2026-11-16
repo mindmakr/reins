@@ -368,13 +368,18 @@ describe('B8: a prune of more than 200,000 runs at once', () => {
 export { DAY };
 
 describe('keys that identify a person', () => {
-  it('refuses a key holding an email address or a card number, and keeps ids, timestamps and other digit runs', () => {
-    for (const k of ['ana@example.com', 'payout-ana@example.co.uk', '4111111111111111', 'card-5500005555555559', '378282246310005']) {
-      expect(stepKey(k)).toBeUndefined();
-    }
-    for (const k of ['payout-7f3a', 'order 42', '1731744000000', '1731744000001', '1731744000000123', 'acct-123456789', 'a@b', 1731744000000]) {
+  it('refuses a key holding an email address, and keeps ids, numbers and version tags', () => {
+    for (const k of ['ana@example.com', 'payout-ana@example.co.uk', 'x+tag@mail.example.org']) expect(stepKey(k)).toBeUndefined();
+    // Long numeric ids are kept: a card-number check by shape refused about one in ten of them.
+    for (const k of ['payout-7f3a', 'order 42', '1731744000000', '4111111111111111', '5123456789012345678', 'acct-123456789', 'a@b', 'deploy@1.2.3', 'job@v2.10', 'retry@2024.11', 1731744000000]) {
       expect(stepKey(k)).toBe(String(k));
     }
-    expect(personalKey('4111 1111 1111 1111')).toBe(false); // spaced digits are not one run: the playbook's rule covers them
+    expect(personalKey('deploy@1.2.3')).toBe(false);
+  });
+
+  it('checks an instance name by shape only, so a numeric instance id keeps its steps', async () => {
+    const store = memoryStore();
+    await store.addSteps([{ process: 'payout', key: 'p-1', step: 'sent', at: 1, instance: '4111111111111111' }]);
+    expect(await store.runSteps('payout', 0)).toHaveLength(1);
   });
 });

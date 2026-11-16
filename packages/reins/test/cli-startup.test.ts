@@ -14,8 +14,13 @@ describe('cli start-up', () => {
   });
 
   it('loads every command module on demand', () => {
-    for (const m of ['./verify.js', './bridge/report-cli.js', './bridge/oneshot-cli.js', './bridge/fuzz-cli.js', './bridge/map-cli.js', './flight/check-cli.js', './bridge/mcp.js', './bridge/hub.js']) {
+    for (const m of ['./verify.js', './bridge/report-cli.js', './bridge/oneshot-cli.js', './bridge/fuzz-cli.js', './bridge/map-cli.js', './flight/check-cli.js', './bridge/hub.js']) {
       expect(src).toContain(`import('${m}')`);
     }
+  });
+
+  it('loads the MCP SDK before the bridge opens its port', () => {
+    expect(src.indexOf("import('./bridge/mcp.js')")).toBeGreaterThan(-1);
+    expect(src.indexOf("import('./bridge/mcp.js')")).toBeLessThan(src.indexOf('Hub.start('));
   });
 });

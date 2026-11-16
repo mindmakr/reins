@@ -66,7 +66,9 @@ async function main() {
     err(USAGE);
     return;
   }
-  const [{ fileAudit }, { DEFAULT_PORT, Hub }, { tokenPath }] = await Promise.all([import('./bridge/audit.js'), import('./bridge/hub.js'), import('./bridge/token.js')]);
+  // Every module the bridge needs, the MCP SDK included, loads before the port opens: a failed import then exits at
+  // once, instead of leaving a bound port and no MCP server behind.
+  const [{ fileAudit }, { DEFAULT_PORT, Hub }, { tokenPath }, mcp] = await Promise.all([import('./bridge/audit.js'), import('./bridge/hub.js'), import('./bridge/token.js'), args.mcp ? import('./bridge/mcp.js') : null]);
   const dir = resolve(args.dir);
   const audit = fileAudit(dir);
   let hub: Hub;
@@ -84,10 +86,7 @@ async function main() {
   // The token itself is not printed: stderr ends up in the agent host's MCP logs. It is in the file.
   err(`[reins] pairing token written to ${tokenPath(dir)}${args.rotate ? ' (renewed after each pairing)' : ''}`);
   audit({ source: 'bridge', event: 'start', ok: true, port: hub.port });
-  if (args.mcp) {
-    const { startMcp } = await import('./bridge/mcp.js');
-    await startMcp({ hub, dir, cdp: args.cdp, audit });
-  }
+  if (mcp) await mcp.startMcp({ hub, dir, cdp: args.cdp, audit });
   const stop = async () => {
     audit({ source: 'bridge', event: 'stop', ok: true });
     await hub.close();
