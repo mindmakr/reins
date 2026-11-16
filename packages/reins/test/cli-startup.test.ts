@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -41,9 +42,19 @@ function loads(entry: string): Set<string> {
 }
 
 describe('cli start-up', () => {
-  it('imports nothing of its own at the top but types', () => {
-    const own = cli.split('\n').filter((l) => /^import\s/.test(l) && /from '\.\//.test(l) && !/^import type\s/.test(l));
-    expect(own).toEqual([]);
+  it('imports nothing of its own at the top but types (an import over several lines, or in double quotes, counts too)', () => {
+    expect(staticImports(join(src, 'cli.ts')).filter((spec) => spec.startsWith('.'))).toEqual([]);
+  });
+
+  it('the import reader sees a multi-line import, double quotes and a re-export, and skips type-only imports', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'reins-imports-'));
+    try {
+      const f = join(dir, 'x.ts');
+      writeFileSync(f, `import {\n  Hub,\n} from './bridge/hub.js';\nimport { a } from "./a.js";\nexport { b } from './b.js';\nimport type { T } from './t.js';\n`);
+      expect(staticImports(f)).toEqual(['./bridge/hub.js', './a.js', './b.js']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('a one-shot command loads neither the bridge nor the MCP SDK, however deep the import', () => {

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BROKEN_LOCK_MS, fileStore, safe } from '../src/flight/file-store.js';
 import { PG_TABLES, pgStore } from '../src/flight/pg-store.js';
-import { isStore, memoryStore, personalKey, planPrune, stepKey, type RunSummary } from '../src/flight/store.js';
+import { isStore, memoryStore, planPrune, type RunSummary } from '../src/flight/store.js';
 import { DAY, real, step, storeContract } from './flight-store-contract.js';
 
 const dirs: string[] = [];
@@ -366,20 +366,3 @@ describe('B8: a prune of more than 200,000 runs at once', () => {
 });
 
 export { DAY };
-
-describe('keys that identify a person', () => {
-  it('refuses a key holding an email address, and keeps ids, numbers and version tags', () => {
-    for (const k of ['ana@example.com', 'payout-ana@example.co.uk', 'x+tag@mail.example.org', 'ana@example.com_42', 'refund-ana@example.com7', 'ANA@EXAMPLE.COM']) expect(stepKey(k)).toBeUndefined();
-    // Long numeric ids are kept: a card-number check by shape refused about one in ten of them.
-    for (const k of ['payout-7f3a', 'order 42', '1731744000000', '4111111111111111', '5123456789012345678', 'acct-123456789', 'a@b', 'deploy@1.2.3', 'job@v2.10', 'retry@2024.11', 'task@queue.high', 'job@worker.default', 'build@web.app', 1731744000000]) {
-      expect(stepKey(k)).toBe(String(k));
-    }
-    expect(personalKey('deploy@1.2.3')).toBe(false);
-  });
-
-  it('checks an instance name by shape only, so a numeric instance id keeps its steps', async () => {
-    const store = memoryStore();
-    await store.addSteps([{ process: 'payout', key: 'p-1', step: 'sent', at: 1, instance: '4111111111111111' }]);
-    expect(await store.runSteps('payout', 0)).toHaveLength(1);
-  });
-});

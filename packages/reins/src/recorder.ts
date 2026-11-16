@@ -254,21 +254,28 @@ function addTiming(c: Capture, res: any, o: HookOptions) {
 // one capture (it feeds every recorder), and the second hook re-enters it, so spans after a body parser keep their
 // request and that hook's own Server-Timing option still applies. Without this, every request counted twice.
 const captures = new WeakMap<object, Capture>();
-const rawOf = (req: any): object | null => (req && typeof req === 'object' ? (req.raw && typeof req.raw === 'object' ? req.raw : req) : null);
+// The Node request itself: Fastify's request wraps it as `raw`; anything else called `raw` (a raw-body parser's
+// Buffer) is not one, so it never splits a request into two captures. Told by its shape, not `instanceof
+// IncomingMessage`: importing node:http here would leave a global behind in a production process (flight safety).
+const nodeRequest = (x: any): boolean => !!x && typeof x === 'object' && typeof x.method === 'string' && !!x.headers && typeof x.headers === 'object' && typeof x.on === 'function';
+const rawOf = (req: any): object | null => (nodeRequest(req?.raw) ? req.raw : req && typeof req === 'object' ? req : null);
+/** The request's shared capture: the one an earlier hook started (seen), or a new one, registered. */
+function captureFor(req: any): { c: Capture; seen: boolean } {
+  const key = rawOf(req);
+  const had = key ? captures.get(key) : undefined;
+  if (had) return { c: had, seen: true };
+  const c = begin(key ?? req);
+  if (key) captures.set(key, c);
+  return { c, seen: false };
+}
 
 /** The capture for `req`, started now or by an earlier hook; undefined when nothing is started or the hook itself fails. */
 function open(req: any, res: any, o: HookOptions): Capture | undefined {
   if (!consumers.size || !als) return;
   try {
-    const key = rawOf(req);
-    const seen = key ? captures.get(key) : undefined;
-    if (seen) {
-      addTiming(seen, res, o);
-      return seen;
-    }
-    const c = begin(req);
-    if (key) captures.set(key, c);
-    track(c, req, res, o);
+    const { c, seen } = captureFor(req);
+    if (seen) addTiming(c, res, o);
+    else track(c, req, res, o);
     return c;
   } catch {
     fault();
@@ -304,10 +311,9 @@ export function fastify<A extends { addHook(name: string, fn: (...a: any[]) => v
     let c: Capture;
     try {
       // One capture per raw request, shared with a second fastify(app) and with middleware or a wrapped handler.
-      const key = rawOf(req);
-      const seen = key ? captures.get(key) : undefined;
-      c = seen ?? begin(req.raw || req);
-      if (key && !seen) captures.set(key, c);
+      const got = captureFor(req);
+      c = got.c;
+      const seen = got.seen;
       // A capture another hook opened ends on the raw response's 'finish', before onResponse: take Fastify's route
       // pattern now, while the request is still open, so it is not lost.
       const route = req.routeOptions?.url || req.routerPath;

@@ -552,6 +552,21 @@ describe('one set of hooks feeds the development pairing and flight', () => {
     expect(f.recorder()!.requests()).toMatchObject([{ route: '/api/x', spans: [{ name: 'db.q' }] }]);
   });
 
+  it('a raw-body parser setting req.raw between the hooks does not split the request', async () => {
+    const rn = createReinsNode({ NODE_ENV: 'development' });
+    await rn.connect({ standalone: true, reconnect: false, tokenFile: 'no-such-token-file' });
+    stops.push(() => rn.disconnect());
+    started({ routes: ['/api/x'] });
+    const inner = rn.wrapHandler((_q: IncomingMessage, res: ServerResponse) => res.end());
+    const base = await serve(createFlight().wrapHandler((q: IncomingMessage, res: ServerResponse) => {
+      (q as any).raw = Buffer.from('body'); // what a raw-body parser leaves on the request
+      inner(q, res);
+    }));
+    await fetch(`${base}/api/x`);
+    await settle();
+    expect(rn.report().requests).toHaveLength(1);
+  });
+
   it('a Fastify hook beside a wrapped handler is one capture', async () => {
     const f = started({ routes: ['/api/x'] });
     const hooks: Record<string, (...a: any[]) => void> = {};

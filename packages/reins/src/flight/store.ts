@@ -19,31 +19,8 @@ const BAD_KEY = /[\u0000-\u001f\u007f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\
  * keys all three keep the same.
  */
 export function stepKey(key: unknown): string | undefined {
-  const k = plainKey(key);
-  return k !== undefined && !personalKey(k) ? k : undefined;
-}
-
-/** A key or an instance name as every store keeps it (the shape rules of `stepKey`, without the personal check). */
-export function plainKey(key: unknown): string | undefined {
   if (typeof key === 'number') return Number.isFinite(key) ? String(key) : undefined;
   return typeof key === 'string' && key.length > 0 && key.length <= MAX_KEY && !BAD_KEY.test(key) ? key : undefined;
-}
-
-/**
- * An email address: a local part, @, and a domain ending in a top-level domain addresses use (com, net, org, edu,
- * gov, mil, int, io, co, me, info, biz, or a two-letter country code), with no letter right after it, so
- * `ana@example.com_42` is caught and `task@queue.high`, `build@web.app` and `deploy@1.2.3` are not. A key such as
- * `deploy@prod.eu` reads as an address and is refused: rename such keys.
- */
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:com|net|org|edu|gov|mil|int|io|co|me|info|biz|[A-Za-z]{2})(?![A-Za-z])/i;
-/**
- * Whether a process key holds an email address, the one personal value whose shape cannot be an ordinary id. Such
- * a key is refused and counted as invalid, like any bad key, so it never reaches a store. Names, phone, account
- * and card numbers look like ordinary ids (a digit-shape check refused about one long numeric id in ten), so the
- * flight playbook's rule covers them.
- */
-export function personalKey(key: string): boolean {
-  return EMAIL.test(key);
 }
 
 /**
@@ -53,7 +30,7 @@ export function personalKey(key: string): boolean {
  * PRUNED_STEP is not a manifest name, so no caller can write a retention marker.
  */
 export const goodStep = (s: StepRecord): boolean =>
-  !!s && isName(s.process) && isName(s.step) && typeof s.key === 'string' && stepKey(s.key) === s.key && typeof s.instance === 'string' && plainKey(s.instance) === s.instance && Number.isSafeInteger(s.at) && s.at >= 0;
+  !!s && isName(s.process) && isName(s.step) && typeof s.key === 'string' && stepKey(s.key) === s.key && typeof s.instance === 'string' && stepKey(s.instance) === s.instance && Number.isSafeInteger(s.at) && s.at >= 0;
 
 /** The rows of `steps` that pass `goodStep`. */
 export const goodSteps = (steps: StepRecord[]): StepRecord[] => (Array.isArray(steps) ? steps.filter(goodStep) : []);

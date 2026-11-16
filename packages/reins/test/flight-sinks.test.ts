@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { within } from './helpers.js';
 import { createFlight, type Flight } from '../src/flight.js';
 import { type Change, type FlightFinding, STATE_KEY } from '../src/flight/findings.js';
 import { validateManifest } from '../src/flight/manifest.js';
@@ -509,11 +510,6 @@ describe("round 2: the critics' findings on sinks and the notifier", () => {
 });
 
 describe("round 2: the critics' findings on store outages", () => {
-  /** `p`, or a failure naming what did not happen within 4 s (inside vitest's 5 s limit, so the message shows). */
-  const within = <T,>(p: Promise<T>, what: string): Promise<T> => {
-    let t: ReturnType<typeof setTimeout> | undefined;
-    return Promise.race([p, new Promise<T>((_, no) => (t = setTimeout(() => no(new Error(what)), 4_000)))]).finally(() => clearTimeout(t));
-  };
   /** A store that can go down (every call rejects), whose lock `takeover` takes as if the holder's lease ran out, and whose findings write can be slow. */
   function flaky(base: FlightStore = memoryStore()) {
     // Slow findings writes are tracked, so a test waits for them to start (writeStarted) and to land (writesDone)
