@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-16)
+
+### Added
+
+- **One-shot commands against a running bridge: `reins exec`, `reins scenario` and `reins packet`** (#15). They connect over `127.0.0.1` with `.reins/token`, without rotating the browser's pairing token, and keep redaction, `consequential: true` confirmation and the audit log. `exec` runs one tool or action; `scenario <file.json>` runs a list of steps with state assertions and fails on new errors; `packet` prints the evidence of the current state.
+- **`reins packet` joins causes and layout** (#18): `causalTraces` (requests joined to server spans by `x-reins-trace`, repeated `db.*` spans flagged as N+1, event-loop lag p50/p99/max, lifecycle and components) and `layoutMetrics` (`<ReinsPanel>` boxes, `devicePixelRatio`, direction, display, flex direction, overflow and `reins_dom` clipping flags), all redacted, with `--text` for tables.
+- **`reins map`** (#16) writes the app's actions with their input schemas, its state keys and its `<ReinsPanel>` ids to `feature-map.json`, optionally merged with a static Coordinator map (`--static`, `--offline`, `--out`, `--stdout`).
+- **`reins fuzz`** (#17): a property-based UI fuzzer that runs deterministic, schema-valid inputs (`--steps`, `--seed`) against the registered actions, never a `consequential: true` one unless `--allow-consequential --confirm`, and after every step checks for no new uncaught errors, no 5xx response and no clipped or zero-size element. A failure writes a redacted trace to `.reins/sessions/` and exits with code 2.
 
 ### Faster for agents
 
