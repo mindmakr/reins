@@ -511,7 +511,18 @@ describe("round 2: the critics' findings on sinks and the notifier", () => {
 describe("round 2: the critics' findings on store outages", () => {
   /** A store that can go down (every call rejects), whose lock `takeover` takes as if the holder's lease ran out, and whose findings write can be slow. */
   function flaky(base: FlightStore = memoryStore()) {
-    const ctl = { down: false, takeover: '', slowWrite: 0, fail: '' };
+    // Slow findings writes are tracked, so a test waits for them to start (writeStarted) and to land (writesDone)
+    // instead of sleeping longer than the delay: a fixed sleep failed when a loaded machine ran the write late.
+    const slow = new Set<Promise<unknown>>();
+    let onStart: (() => void) | null = null;
+    const ctl = {
+      down: false, takeover: '', slowWrite: 0, fail: '',
+      writeStarted: () => new Promise<void>((r) => (onStart = r)),
+      writesDone: async () => {
+        while (slow.size) await Promise.all([...slow]);
+        await new Promise((r) => setImmediate(r)); // what the write's caller does next
+      },
+    };
     const store = new Proxy(base, {
       get(t, k) {
         const v = (t as any)[k];
@@ -519,7 +530,12 @@ describe("round 2: the critics' findings on store outages", () => {
         return async (...a: unknown[]) => {
           if (ctl.down || ctl.fail === k) throw Object.assign(new Error('down'), { code: 'ECONNREFUSED' });
           if (k === 'lock' && ctl.takeover && String(a[0]).startsWith(ctl.takeover)) a = [a[0], a[1], Date.now() + 10 * MIN];
-          if (k === 'putFindings' && ctl.slowWrite) await new Promise((r) => setTimeout(r, ctl.slowWrite));
+          if (k === 'putFindings' && ctl.slowWrite) {
+            const write = new Promise((r) => setTimeout(r, ctl.slowWrite)).then(() => v.apply(t, a));
+            slow.add(write);
+            onStart?.(); onStart = null;
+            try { return await write; } finally { slow.delete(write); }
+          }
           return v.apply(t, a);
         };
       },
@@ -540,7 +556,7 @@ describe("round 2: the critics' findings on store outages", () => {
     expect(t.got).toEqual(['srv: opened blind:manifest-invalid']);
     ctl.slowWrite = 400;
     await f.checkNow();
-    await new Promise((r) => setTimeout(r, 700));
+    await ctl.writesDone();
     await f.sinksIdle();
     ctl.slowWrite = 0;
     await checkAndDeliver(f);
@@ -560,7 +576,7 @@ describe("round 2: the critics' findings on store outages", () => {
     a.ctl.slowWrite = 500;
     expect((await A.checkNow())?.blind.map((x) => x.kind)).toEqual(['store-unreachable']);
     await checkAndDeliver(B);
-    await new Promise((r) => setTimeout(r, 700));
+    await a.ctl.writesDone();
     await A.sinksIdle();
     expect(t.got.filter((x) => x.includes('basic:error-share'))).toEqual(['B: opened basic:error-share']);
   });
@@ -571,11 +587,13 @@ describe("round 2: the critics' findings on store outages", () => {
     const { f } = started([t.as('srv')], { store });
     await errors(store, 40, 10);
     ctl.slowWrite = 300;
+    const writing = ctl.writeStarted();
     const p = f.checkNow();
-    await new Promise((r) => setTimeout(r, 100));
+    await writing; // the findings write is under way
     f.stop();
     await p;
-    await new Promise((r) => setTimeout(r, 400));
+    await ctl.writesDone();
+    await f.sinksIdle();
     expect(t.got).toEqual([]);
   });
 
@@ -586,7 +604,7 @@ describe("round 2: the critics' findings on store outages", () => {
     await errors(store, 40, 10);
     ctl.slowWrite = 400;
     await f.checkNow();
-    await new Promise((r) => setTimeout(r, 600));
+    await ctl.writesDone();
     ctl.slowWrite = 0;
     for (let i = 0; i < 3; i++) await checkAndDeliver(f);
     expect(t.got.filter((x) => x.includes('basic:error-share'))).toEqual(['srv: opened basic:error-share']);

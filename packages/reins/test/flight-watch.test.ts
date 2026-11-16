@@ -409,14 +409,21 @@ describe('B3: one checker at a time, the watcher first while it runs', () => {
 describe('B4: no port, no route, no shell; a config module that cannot load', () => {
   it('opens no port while it watches', async () => {
     const dir = moduleDir();
-    (globalThis as any).__reinsFlightWatchTest = { store: memoryStore(), manifest: manifest(), checkEveryMs: 20 };
+    // Two passes start (the store's lock is taken twice), so the watcher has really watched before it is stopped,
+    // however long a loaded machine takes to get there.
+    const inner = memoryStore();
+    let locks = 0;
+    let twice!: () => void;
+    const watched = new Promise<void>((r) => (twice = r));
+    const store: FlightStore = Object.assign(Object.create(inner), { lock: async (...a: Parameters<FlightStore['lock']>) => { if (++locks === 2) twice(); return inner.lock(...a); } });
+    (globalThis as any).__reinsFlightWatchTest = { store, manifest: manifest(), checkEveryMs: 20 };
     writeFileSync(join(dir, 'flight.config.mjs'), 'export default globalThis.__reinsFlightWatchTest;\n');
     const listen = vi.spyOn(NetServer.prototype, 'listen');
     try {
       let stop!: () => void;
       const o = capture();
       const done = flightWatchMain(['--config', 'flight.config.mjs'], dir, o.print, o.perr, new Promise<void>((r) => (stop = r)));
-      await new Promise((r) => setTimeout(r, 150));
+      await watched;
       stop();
       expect(await done).toBe(0);
       expect(listen).not.toHaveBeenCalled();
